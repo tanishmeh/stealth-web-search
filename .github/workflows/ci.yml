@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, unit and integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Download Obscura for this runner
+        run: npm run obscura:download
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm run test:integration
+      - run: npm run build
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build and start the container
+        run: docker compose -f compose.yaml -f compose.test.yaml up -d --build
+      - name: Wait for the health check
+        run: |
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' stealth-browser-mcp || true)
+            [ "$status" = "healthy" ] && exit 0
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - name: Run the integration suite against the container
+        run: npm run test:docker
+      - name: Container logs
+        if: always()
+        run: docker compose logs --no-log-prefix | tail -n 200
+      - run: docker compose down
+        if: always()

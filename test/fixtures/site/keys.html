@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Keys Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    .tall { height: 3000px; background: linear-gradient(#fff, #efe); }
+  </style>
+</head>
+<body>
+  <h1>Keyboard</h1>
+  <form id="kform" action="/echo" method="post">
+    <input id="first" name="first" value="one">
+    <button type="button" id="plain" onclick="note('plain clicked')">Plain</button>
+    <input id="second" name="second" value="two">
+    <input id="skip" name="skip" tabindex="-1" value="skip">
+    <input id="off" name="off" disabled value="off">
+    <textarea id="notes" name="notes"></textarea>
+    <input id="agree" type="checkbox" name="agree" value="yes">
+  </form>
+  <a href="/page2.html" id="link">Go to page two</a>
+  <button id="solo" onclick="note('solo clicked')">Solo</button>
+  <div id="editor" contenteditable="true"></div>
+  <div id="log"></div>
+  <div class="tall">tall spacer</div>
+  <p id="bottom">Bottom</p>
+  <script>
+    function note(s) { var l = document.getElementById('log'); l.textContent = (l.textContent ? l.textContent + ',' : '') + s; }
+    document.addEventListener('keydown', function (e) { note('keydown:' + e.key); });
+  </script>
+</body>
+</html>

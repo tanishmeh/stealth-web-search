@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stealth-browser": {
+      "command": "docker",
+      "args": ["exec", "-i", "stealth-browser-mcp", "node", "dist/stdio-bridge.js"]
+    },
+    "stealth-browser-via-mcp-remote": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.2", "http://127.0.0.1:8931/mcp", "--transport", "http-only"]
+    }
+  }
+}

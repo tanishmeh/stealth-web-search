@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Article</title>
+  <style>
+    .invisible { visibility: hidden; }
+    #display-none { display: none; }
+  </style>
+  <script>var articleLoaded = true;</script>
+</head>
+<body>
+  <header id="site-header">
+    <a href="/index.html">Home</a>
+    <a href="page2.html">Relative Page Two</a>
+    <a href="./page2.html">Duplicate Page Two</a>
+    <a href="https://example.org/about?x=1">External About</a>
+    <a href="//cdn.example.net/lib">Protocol Relative</a>
+    <a href="javascript:void(0)">Script Link</a>
+    <a href="#comments">Jump to comments</a>
+    <a href="mailto:editor@example.com">Mail the editor</a>
+    <a href="/search?q=caf%C3%A9"><span>Search</span>   <em>café</em></a>
+    <a href="/icon-only" aria-label="Icon only link"><img src="/img/icon.png" alt=""></a>
+  </header>
+  <main id="article">
+    <article>
+      <h1>Understanding Café Culture</h1>
+      <p class="lead">A short guide to <strong>coffee</strong>, <em>tea</em> and <code>code</code> in Zürich — naïve résumé 日本語 テキスト 🚀 rocket.</p>
+      <h2>Ordering</h2>
+      <ul class="tips">
+        <li>Say <b>hello</b> first</li>
+        <li>Pick a <a href="/menu">menu item</a></li>
+        <li>Pay at the counter</li>
+      </ul>
+      <ol id="steps">
+        <li>Grind beans</li>
+        <li>Brew</li>
+      </ol>
+      <ul class="nested"><li>Parent item<ul><li>Child A</li><li>Child <a href="#child-b">B</a></li></ul></li><li>Sibling item</li></ul>
+      <h3>Example code</h3>
+      <pre class="language-python" id="py">def brew(kind):
+    if kind == "espresso":
+        return 2
+    return 1</pre>
+      <pre id="snippet">const cup = brew('espresso');
+console.log(cup &lt; 2);</pre>
+      <blockquote id="quote">Good coffee takes time.<br>A patient barista</blockquote>
+      <figure>
+        <img id="hero" src="images/hero.jpg" alt="A steaming cup">
+        <figcaption>The perfect cup</figcaption>
+      </figure>
+      <h2>2. Prices</h2>
+      <table id="menu-table">
+        <thead><tr><th>Drink</th><th>Price</th></tr></thead>
+        <tbody>
+          <tr class="row"><td>Espresso</td><td>€2.50</td></tr>
+          <tr class="row"><td>Flat white</td><td>€3.80</td></tr>
+          <tr class="row"><td>Matcha</td><td>€4.20</td></tr>
+        </tbody>
+      </table>
+      <a class="card" href="/cards/1"><h3>Card title</h3><p>Card body</p></a>
+      <hr>
+      <p id="spaced">   Lots
+        of     whitespace
+        here   </p>
+      <p id="empty-attr" title="">Empty title attribute</p>
+      <input id="name-input" type="text" value="prefilled">
+      <input id="agree" type="checkbox" checked>
+      <input id="secret" type="password" value="hunter2">
+      <div style="color: red; display: none">Inline hidden text</div>
+    </article>
+    <div hidden id="hidden-attr">Secret hidden-attribute text</div>
+    <div id="display-none">Secret display-none text</div>
+    <div class="invisible" id="vis-hidden">Visibility hidden text</div>
+    <script>var inlineScript = 'script source must not appear';</script>
+    <noscript>Noscript fallback text</noscript>
+    <section id="comments">
+      <h2>Comments</h2>
+      <div class="comment" data-author="Ann" data-id="c1">Great article about café life!</div>
+      <div class="comment" data-author="Bob" data-id="c2">I prefer tea. Tea tea TEA.</div>
+      <div class="comment" data-author="Zoë" data-id="c3">Grüße aus Zürich</div>
+    </section>
+    <div id="empty-box"></div>
+  </main>
+  <footer><a href="/terms">Terms</a> <a href="/privacy">Privacy</a></footer>
+</body>
+</html>

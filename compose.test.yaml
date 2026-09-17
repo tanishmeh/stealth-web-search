@@ -1,0 +1,10 @@
+# Overrides for running the integration test suite against the container:
+#   docker compose -f compose.yaml -f compose.test.yaml up -d --build
+#   npm run test:docker
+# The test fixture website runs on the host, so the browser must be allowed to reach host.docker.internal.
+services:
+  stealth-browser-mcp:
+    environment:
+      ALLOW_PRIVATE_NETWORK: "true"
+      LOG_LEVEL: info
+      LOG_FILE_LEVEL: debug

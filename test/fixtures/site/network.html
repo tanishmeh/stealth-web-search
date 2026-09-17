@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Network Fixture</title>
+  <link rel="stylesheet" href="/network-style.css">
+  <script src="/network-script.js"></script>
+</head>
+<body>
+  <h1>Network fixture</h1>
+  <p id="out">pending</p>
+  <img src="/status/404?img=1" alt="missing image">
+  <button id="load" onclick="fetch('/api/data?from=button').then(function (r) { return r.json(); }).then(function (d) { document.getElementById('out').textContent = 'items:' + d.items.length; })">Load</button>
+  <script>
+    fetch('/api/data?from=inline').then(function (r) { return r.json(); }).then(function (d) { document.getElementById('out').textContent = 'loaded:' + d.items.length; });
+    fetch('/status/404?from=inline').then(function (r) { console.warn('missing resource status', r.status); });
+  </script>
+</body>
+</html>

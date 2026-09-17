@@ -1,0 +1,17 @@
+.git
+.github
+.obscura
+node_modules
+dist
+logs
+data
+test
+docs
+examples
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage

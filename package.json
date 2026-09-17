@@ -1,0 +1,57 @@
+{
+  "name": "stealth-browser-mcp",
+  "version": "0.1.0",
+  "description": "A Dockerized MCP server that drives the Obscura stealth headless browser, with full logging, a live view of what the agent is doing, and LM Studio integration.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "start": "node dist/main.js",
+    "dev": "node --watch src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-reporter=spec test/unit/*.test.ts",
+    "test:integration": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/integration/*.test.ts",
+    "obscura:download": "node scripts/download-obscura.mjs",
+    "stdio-bridge": "node dist/stdio-bridge.js",
+    "lmstudio:setup": "node scripts/setup-lmstudio.mjs",
+    "lmstudio:agent": "node scripts/lmstudio-agent.ts",
+    "lmstudio:e2e": "node scripts/lmstudio-e2e.ts",
+    "test:docker": "MCP_URL=http://127.0.0.1:8931/mcp FIXTURE_HOST=host.docker.internal node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/integration/*.test.ts",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docs:tools": "node scripts/generate-tool-docs.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "obscura",
+    "headless-browser",
+    "stealth",
+    "lm-studio",
+    "docker",
+    "ai-agent"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/express": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "express": "^5.2.1",
+    "hono": "^4.13.8",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "pino-roll": "^4.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.13.5",
+    "typescript": "^7.0.2"
+  }
+}

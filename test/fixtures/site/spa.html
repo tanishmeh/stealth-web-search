@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>SPA Fixture</title></head>
+<body>
+  <div id="app">Loading…</div>
+  <script>
+    setTimeout(function () {
+      var app = document.getElementById('app');
+      app.innerHTML = '<h1 id="late">Late content</h1><button id="route">Go to route</button><button id="load-data">Load data</button><ul id="data"></ul>';
+      document.getElementById('route').onclick = function () {
+        history.pushState({}, '', '/spa/route');
+        document.getElementById('late').textContent = 'Routed view';
+      };
+      document.getElementById('load-data').onclick = function () {
+        fetch('/api/data').then(function (r) { return r.json(); }).then(function (d) {
+          document.getElementById('data').innerHTML = d.items.map(function (i) { return '<li>' + i + '</li>'; }).join('');
+          console.info('data loaded', d.items.length);
+        });
+      };
+    }, 600);
+    setTimeout(function () {
+      var p = document.createElement('p');
+      p.id = 'later';
+      p.textContent = 'Arrived after two seconds';
+      document.body.appendChild(p);
+    }, 2000);
+  </script>
+</body>
+</html>

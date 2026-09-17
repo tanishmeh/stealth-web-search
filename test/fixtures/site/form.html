@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Form Fixture</title></head>
+<body>
+  <h1>Sign up</h1>
+  <form id="signup" name="signup" action="/echo" method="post">
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email" placeholder="you@example.com" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password">
+    <input id="nickname" name="nickname" placeholder="Nick">
+    <input type="hidden" name="csrf" value="tok">
+    <label><input id="agree" type="checkbox" name="agree" value="yes"> I agree</label>
+    <fieldset>
+      <label><input type="radio" name="plan" value="free" id="plan-free" checked> Free</label>
+      <label><input type="radio" name="plan" value="pro" id="plan-pro"> Pro</label>
+    </fieldset>
+    <select id="color" name="color"><option value="r">Red</option><option value="g">Green</option><option value="b">Blue</option></select>
+    <select id="multi" name="multi" multiple><option value="a">Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select>
+    <textarea id="bio" name="bio"></textarea>
+    <input id="readonly" name="readonly" value="fixed" readonly>
+    <div id="editor" contenteditable="true"></div>
+    <button type="submit" id="submit">Send</button>
+  </form>
+  <form id="search" action="/echo" method="get">
+    <input id="q" name="q" placeholder="Search">
+    <button id="go">Go</button>
+  </form>
+  <div id="events"></div>
+  <script>
+    var log = [];
+    ['email','nickname','bio','color','agree'].forEach(function(id){
+      var el = document.getElementById(id);
+      el.addEventListener('input', function(e){ log.push(id + ':input:' + e.isTrusted); document.getElementById('events').textContent = log.join(','); });
+      el.addEventListener('change', function(e){ log.push(id + ':change'); document.getElementById('events').textContent = log.join(','); });
+    });
+    document.getElementById('q').addEventListener('keydown', function(e){ log.push('q:keydown:' + e.key); document.getElementById('events').textContent = log.join(','); });
+  </script>
+</body>
+</html>

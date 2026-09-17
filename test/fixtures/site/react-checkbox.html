@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Controlled checkbox</title></head>
+<body>
+  <h1>Controlled checkbox</h1>
+  <!-- the overlay covers the checkbox so the tool uses a DOM click, the path that reverts -->
+  <div style="position:relative;width:60px;height:60px">
+    <input type="checkbox" id="cb" style="position:absolute;top:10px;left:10px;width:20px;height:20px;margin:0">
+    <div id="overlay" style="position:absolute;top:0;left:0;width:60px;height:60px"></div>
+  </div>
+  <p id="status"></p>
+  <script>
+    // Emulates a React-controlled checkbox: the DOM always reflects `state`, and `state` only
+    // advances when a trusted change event fires. A raw .checked mutation (a plain el.click())
+    // is reverted on the next frame, exactly like React re-rendering to its controlled value.
+    (function () {
+      var el = document.getElementById('cb');
+      var state = false;
+      el.checked = state;
+      function commit(e) { if (e && e.isTrusted) state = !!el.checked; }
+      el.addEventListener('change', commit);
+      el.addEventListener('input', commit);
+      function render() {
+        el.checked = state;
+        document.getElementById('status').textContent = 'state=' + state;
+        requestAnimationFrame(render);
+      }
+      requestAnimationFrame(render);
+    })();
+  </script>
+</body>
+</html>

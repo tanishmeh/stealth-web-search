@@ -1,0 +1,50 @@
+# Stealth Browser MCP — docker compose up -d --build
+#
+# MCP endpoint:    http://127.0.0.1:8931/mcp
+# Live dashboard:  http://127.0.0.1:8931/
+# Logs:            ./logs/ (JSON lines, rotated daily / by size)
+#
+# Configure with a .env file next to this one (copy .env.example).
+
+name: stealth-browser-mcp
+
+services:
+  stealth-browser-mcp:
+    build:
+      context: .
+      args:
+        OBSCURA_VERSION: ${OBSCURA_VERSION:-v0.2.2}
+    image: stealth-browser-mcp:latest
+    container_name: stealth-browser-mcp
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # HOST and PORT are fixed for Compose: inside the container the server must bind 0.0.0.0:8931,
+      # the port the image publishes and health-checks. Change the published host port with HOST_PORT
+      # (below), never PORT. These override any HOST/PORT set in .env.
+      HOST: 0.0.0.0
+      PORT: 8931
+      # A PUBLIC_URL set in .env wins; otherwise it defaults to the published host-loopback URL.
+      PUBLIC_URL: ${PUBLIC_URL:-http://127.0.0.1:${HOST_PORT:-8931}}
+    ports:
+      # Published on the host loopback only. The MCP endpoint controls a browser: do not expose
+      # it to your network without AUTH_TOKEN and a reverse proxy.
+      - "127.0.0.1:${HOST_PORT:-8931}:8931"
+    volumes:
+      - ./logs:/app/logs
+      # Persist cookies between restarts: uncomment and set OBSCURA_STORAGE_DIR=/data in .env
+      # - ./data:/data
+    extra_hosts:
+      # Lets the browser reach services on your machine (with ALLOW_PRIVATE_NETWORK=true) on Linux too.
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    pids_limit: 512
+    restart: unless-stopped

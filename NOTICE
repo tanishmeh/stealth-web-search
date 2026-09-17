@@ -1,0 +1,17 @@
+Stealth Browser MCP
+
+This project is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party software
+--------------------
+
+Obscura (https://github.com/h4ckf0r0day/obscura)
+  Licensed under the Apache License, Version 2.0.
+  The Docker image downloads and bundles an unmodified Obscura release binary.
+  src/browser/scripts.ts contains page scripts adapted from Obscura's MCP server
+  (crates/obscura-mcp and crates/obscura-js/src/markdown.rs).
+
+Model Context Protocol TypeScript SDK (https://github.com/modelcontextprotocol/typescript-sdk)
+  Licensed under the MIT License (npm dependency).
+
+Other npm dependencies are listed in package.json and carry their own licenses.

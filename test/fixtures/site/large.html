@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Large Fixture</title>
+</head>
+<body>
+  <h1>Large page</h1>
+  <div id="rows"></div>
+  <table id="big-table"><tbody></tbody></table>
+  <div id="deep"></div>
+  <script>
+    (function () {
+      var rows = document.getElementById('rows');
+      var html = '';
+      for (var i = 0; i < 2000; i++) {
+        html += '<div class="row"><p>Row ' + i + ' has <b>bold</b> text and a <a href="/row/' + i + '">link ' + i + '</a>.</p></div>';
+      }
+      rows.innerHTML = html;
+      var body = '';
+      for (var r = 0; r < 500; r++) body += '<tr><td>cell ' + r + '</td><td>' + (r * 2) + '</td></tr>';
+      document.querySelector('#big-table tbody').innerHTML = body;
+      var m = /[?&]depth=(\d+)/.exec(location.search);
+      var depth = m ? Math.min(+m[1], 5000) : 200;
+      var deep = '';
+      for (var d = 0; d < depth; d++) deep += '<div>';
+      deep += '<span id="deepest">deepest text</span>';
+      for (var e = 0; e < depth; e++) deep += '</div>';
+      document.getElementById('deep').innerHTML = deep;
+    })();
+  </script>
+</body>
+</html>

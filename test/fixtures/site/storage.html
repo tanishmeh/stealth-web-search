@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Storage Fixture</title></head>
+<body>
+  <p id="state"></p>
+  <script>
+    document.getElementById('state').textContent = 'local=' + localStorage.getItem('k') + ' session=' + sessionStorage.getItem('s') + ' cookie=' + document.cookie;
+  </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Console Fixture</title></head>
+<body>
+  <p>Console fixture</p>
+  <script>
+    console.log('hello from page', 42, {a: 1});
+    console.warn('a warning');
+    console.error('an error happened');
+    fetch('/api/data').then(function (r) { return r.json(); }).then(function () { console.info('fetch done'); });
+    setTimeout(function () { undefinedFunctionCall(); }, 10);
+  </script>
+  <script>throw new Error('top level boom');</script>
+</body>
+</html>

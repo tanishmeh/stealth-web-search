@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Home</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    .tall { height: 2600px; background: linear-gradient(#fff, #eef); }
+    #overlay-host { position: relative; width: 220px; height: 60px; }
+    #covered { position: absolute; left: 0; top: 0; width: 200px; height: 40px; }
+    #cover { position: absolute; left: 0; top: 0; width: 220px; height: 60px; background: rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/page2.html" id="link-page2">Page Two</a> |
+    <a href="https://example.com/ext" id="link-ext">External</a> |
+    <a href="#section" id="link-hash">Hash</a>
+  </nav>
+  <h1>Hello Fixture</h1>
+  <p id="intro" data-x="42">Intro paragraph with the needle word. Second Needle here.</p>
+  <ul id="items">
+    <li><a href="/i/1" class="item">Item One</a></li>
+    <li><a href="/i/2" class="item">Item Two</a></li>
+  </ul>
+  <table id="prices">
+    <thead><tr><th>Product</th><th>Price</th></tr></thead>
+    <tbody><tr><td>Apple</td><td>$1</td></tr><tr><td>Pear</td><td>$2</td></tr></tbody>
+  </table>
+  <button id="counter" onclick="this.dataset.n = (+(this.dataset.n||0)) + 1; document.getElementById('out').textContent = 'clicked:' + this.dataset.n; console.log('counter clicked', this.dataset.n)">Click me</button>
+  <button id="dbl" ondblclick="document.getElementById('out').textContent = 'double-clicked'">Double me</button>
+  <button id="disabled-btn" disabled>Disabled</button>
+  <div id="out">none</div>
+  <button id="hidden-btn" style="display:none" onclick="document.getElementById('out').textContent='hidden clicked'">Hidden</button>
+  <div id="overlay-host"><button id="covered" onclick="document.getElementById('out').textContent='covered clicked'">Covered</button><div id="cover"></div></div>
+  <div role="button" tabindex="0" id="div-button" onclick="document.getElementById('out').textContent='div button'">Div Button</div>
+  <section id="section"><h2>Section</h2><p>Section body text.</p></section>
+  <div class="tall">tall spacer</div>
+  <button id="far" onclick="document.getElementById('out').textContent='far clicked'">Far button</button>
+  <p id="bottom">Bottom of page</p>
+</body>
+</html>

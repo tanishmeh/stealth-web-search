@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Edge Inputs</title>
+  <style>
+    .gone { display: none; }
+    .tall { height: 2500px; }
+  </style>
+</head>
+<body>
+  <h1>Edge cases</h1>
+  <p id="ws">Multi
+     line    text</p>
+  <div id="hid" class="gone">Hidden text here</div>
+  <p hidden>Hidden attribute text</p>
+
+  <!-- two text fields and no submit button: Enter does not submit -->
+  <form id="f" action="/echo" method="post">
+    <label for="mail">Mail</label> <input id="mail" name="mail" type="email" value="ab">
+    <label for="num">Num</label> <input id="num" name="num" type="number" value="12">
+    <button type="button" id="inform">In form</button>
+    <select id="opts" name="opts"><option value="1">One</option><option value="2" disabled>Two</option><option value="3">Three</option></select>
+    <select id="nav" name="nav"><option value="a">A</option><option value="b">B</option></select>
+    <label><input type="radio" name="size" value="s" id="size-s" checked> Small</label>
+    <label><input type="radio" name="size" value="l" id="size-l"> Large</label>
+  </form>
+
+  <!-- a single text field and no button: Enter submits -->
+  <form id="single" action="/echo" method="get">
+    <input id="single-q" name="single">
+  </form>
+
+  <!-- a default button with a click handler; the submit handler cancels navigation -->
+  <form id="jsform" action="/echo" method="post">
+    <input id="guarded" name="guarded">
+    <input id="plain2" name="plain2">
+    <button id="save">Save</button>
+    <input id="otp2" name="verification" autocomplete="one-time-code" value="424242">
+    <select id="many" name="many"></select>
+    <select id="sort" name="sort"><option value="asc">Ascending</option><option value="desc">Descending</option></select>
+  </form>
+
+  <input id="chips" placeholder="Tags">
+  <ul id="chip-list"></ul>
+  <textarea id="code" name="code"></textarea>
+  <div id="rich" contenteditable="true"><p>Hello <b>bold</b></p></div>
+  <div id="log"></div>
+  <div class="tall">spacer</div>
+  <script>
+    function note(s) { var l = document.getElementById('log'); l.textContent = (l.textContent ? l.textContent + ',' : '') + s; }
+    var inlineScriptOnly = 'Script only phrase';
+    for (var i = 1; i <= 80; i++) { var o = document.createElement('option'); o.value = 'v' + i; o.textContent = 'Option ' + i; document.getElementById('many').appendChild(o); }
+    function on(id, type, fn) { document.getElementById(id).addEventListener(type, fn); }
+    on('inform', 'click', function () { note('inform clicked'); });
+    on('save', 'click', function () { note('save clicked'); });
+    on('jsform', 'submit', function (e) { e.preventDefault(); note('jsform submitted'); });
+    on('guarded', 'keydown', function (e) { if (e.key === 'Enter' || e.key === 'x') { e.preventDefault(); note('guarded prevented ' + e.key); } });
+    on('code', 'keydown', function (e) { if (e.key === 'Tab') { e.preventDefault(); note('code kept Tab'); } });
+    on('nav', 'change', function () { location.href = '/page2.html?nav=' + this.value; });
+    on('sort', 'change', function () { history.replaceState(null, '', '?sort=' + this.value); });
+    on('chips', 'input', function () {
+      if (this.value.indexOf(',') < 0) return;
+      var li = document.createElement('li');
+      li.textContent = this.value.replace(/,/g, '');
+      document.getElementById('chip-list').appendChild(li);
+      this.value = '';
+    });
+    ['mail', 'num', 'inform'].forEach(function (id) {
+      on(id, 'focus', function () { note('focus:' + id); });
+      on(id, 'blur', function () { note('blur:' + id); });
+    });
+    document.addEventListener('keydown', function (e) { if (e.shiftKey) note('shift:' + e.key); });
+    window.addEventListener('scroll', function (e) { if (!window.__scrollNoted) { window.__scrollNoted = true; note('scroll:' + e.isTrusted); } });
+  </script>
+</body>
+</html>
