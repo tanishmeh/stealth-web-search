@@ -94,6 +94,8 @@ export class ChatClient {
   private readonly log: Logger;
   private resolvedModel: Promise<string> | null = null;
   private requests = 0;
+  /** false once the endpoint rejected tool_choice naming one function (LM Studio accepts only none/auto/required). */
+  private namedToolChoice = true;
 
   constructor(cfg: AgentConfig, log: Logger) {
     if (!cfg.endpoint) throw new Error('No agent model endpoint configured (AGENT_LLM_URL)');
@@ -146,10 +148,18 @@ export class ChatClient {
   async complete(opts: CompleteOptions): Promise<Completion> {
     let attempt = 0;
     for (;;) {
+      // an endpoint that cannot force one named function gets "required"; the agent loop then accepts only that function
+      const named = typeof opts.toolChoice === 'object';
+      const request = named && !this.namedToolChoice ? { ...opts, toolChoice: 'required' as const } : opts;
       try {
-        return await this.completeOnce(opts);
+        return await this.completeOnce(request);
       } catch (err) {
         if (err instanceof LlmAbortedError || opts.signal?.aborted) throw new LlmAbortedError();
+        if (named && this.namedToolChoice && err instanceof LlmError && err.status === 400 && /tool_choice/i.test(err.message)) {
+          this.namedToolChoice = false;
+          this.log.warn({ err: err.message }, 'the model endpoint does not accept a named tool_choice; using "required" instead');
+          continue;
+        }
         const e = err instanceof LlmError ? err : new LlmError((err as Error).message, { transient: true });
         if (!e.transient || attempt >= RETRY_DELAYS_MS.length) throw e;
         const delay = RETRY_DELAYS_MS[attempt++];

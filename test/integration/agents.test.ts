@@ -530,6 +530,25 @@ describe('sub-agents (scripted model)', { skip: SKIP }, () => {
       await client.close();
     }
   });
+
+  // last in this group: the model client remembers the fallback for later requests
+  test('an endpoint that rejects a named tool_choice (LM Studio) still gets the forced finish, with "required"', async () => {
+    const marker = 'MARKER-NAMED-CHOICE';
+    policies.set(marker, (req) => {
+      if (typeof req.body.tool_choice === 'object') {
+        return { status: 400, error: "Invalid tool_choice type: 'object'. Supported string values: none, auto, required" };
+      }
+      if (req.body.tool_choice === 'required') return call('finish', { output: 'Hello Fixture' });
+      return call('browser_navigate', { url: `${site.baseUrl}/index.html` });
+    });
+    const res = await srv.call('agent_run', { task: `${marker}: read the heading`, output: 'the heading', max_steps: 1 });
+    const s = res.raw.structuredContent;
+    assert.equal(s.status, 'completed', res.text);
+    assert.equal(s.forced, true);
+    assert.equal(s.output, 'Hello Fixture');
+    const choices = llm.requests.filter((r) => String(r.messages[1]?.content).includes(marker)).map((r) => (typeof r.body.tool_choice === 'object' ? 'named' : r.body.tool_choice));
+    assert.deepEqual(choices, ['auto', 'named', 'required']);
+  });
 });
 
 describe('sub-agents disabled', { skip: SKIP }, () => {
