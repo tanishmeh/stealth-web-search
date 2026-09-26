@@ -143,7 +143,7 @@ export const agentRun = defineTool({
       .boolean()
       .optional()
       .describe(
-        'true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question. ' +
+        'true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question asked on that page. ' +
           'Set false only when your user already approved the purchase; then put the limits (item, quantity, maximum total) in the TASK.',
       ),
     snapshot: z

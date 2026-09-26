@@ -400,7 +400,8 @@ describe('sub-agent purchases need the host', () => {
     for (const label of before) assert.equal(looksLikeFinalPurchase(label), false, label);
   });
 
-  test('the purchase guard blocks the final step until the host answered a confirm question; confirm_purchases false turns it off', async () => {
+  test('the purchase guard blocks the final step until the host answered a confirm question on that page; confirm_purchases false turns it off', async () => {
+    const CHECKOUT = 'https://shop.example/checkout';
     const warned: unknown[] = [];
     const env = { config, log: { warn: (obj: unknown) => warned.push(obj) }, waitingCount: () => 0 } as any;
     const run = newRun();
@@ -408,11 +409,11 @@ describe('sub-agent purchases need the host', () => {
     assert.equal(KINDS.automation.purchaseGuard, undefined, 'task runs only');
     assert.equal(KINDS.finder.purchaseGuard, undefined);
     const guard = purchaseGuardFor(run, env)!;
-    assert.equal(guard('Proceed to checkout'), null);
+    assert.equal(guard('Proceed to checkout', CHECKOUT), null);
     const blocked =
       'Blocked: "Place your order" looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", ' +
       'giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.';
-    assert.equal(guard('Place your order'), blocked);
+    assert.equal(guard('Place your order', CHECKOUT), blocked);
     assert.equal(warned.length, 1, 'a blocked step is logged');
 
     // a choose answer or an expired confirm question does not lift it
@@ -420,18 +421,29 @@ describe('sub-agent purchases need the host', () => {
       const closed = run.ask({ text: 'Which one?', options: [], reason, secret: false, pageUrl: null }, 60_000);
       run.closeQuestion(status, status === 'answered' ? { answer: 'the blue one', by: null } : undefined);
       await closed;
-      assert.equal(guard('Place your order'), blocked, `${reason} ${status}`);
+      assert.equal(guard('Place your order', CHECKOUT), blocked, `${reason} ${status}`);
     }
-    // an answered confirm question lifts it for the rest of the run, whatever the answer (the agent respects a "No")
-    const confirm = run.ask({ text: 'Place the order for the Blue Mug, $17.49?', options: [], reason: 'confirm', secret: false, pageUrl: null }, 60_000);
+    // an approval asked on another page (the cart, before the total was shown) does not unlock the checkout's button
+    const early = run.ask({ text: 'Order the Blue Mug?', options: [], reason: 'confirm', secret: false, pageUrl: 'https://shop.example/cart' }, 60_000);
+    run.closeQuestion('answered', { answer: 'Yes.', by: null });
+    await early;
+    assert.equal(
+      guard('Place your order', CHECKOUT),
+      'Blocked: "Place your order" looks like the final step of an order or payment, and the host\'s approval was for a question you asked on another page (https://shop.example/cart). ' +
+        'Ask again on this page: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method it shows. Click it again after the host approves.',
+    );
+    // a confirm question answered on the checkout page lifts it there, whatever the answer (the agent respects a "No");
+    // the query and the fragment may differ
+    const confirm = run.ask({ text: 'Place the order for the Blue Mug, $17.49?', options: [], reason: 'confirm', secret: false, pageUrl: `${CHECKOUT}?step=review` }, 60_000);
     run.closeQuestion('answered', { answer: 'Yes, place the order.', by: null });
     await confirm;
-    assert.equal(guard('Place your order'), null);
+    assert.equal(guard('Place your order', `${CHECKOUT}/#pay`), null);
+    assert.notEqual(guard('Place your order', 'https://other.example/checkout'), null, 'another site');
 
     assert.equal(purchaseGuardFor(newRun('task', { confirmPurchases: false }), env), null, 'the host approved purchases');
     const quiet = purchaseGuardFor(newRun('task', { allowQuestions: false }), env)!;
     assert.equal(
-      quiet('Pay $17.49'),
+      quiet('Pay $17.49', CHECKOUT),
       'Blocked: "Pay $17.49" looks like the final step of an order or payment, and this job needs the host\'s approval for it but questions are off. ' +
         'Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).',
     );
@@ -442,7 +454,7 @@ describe('sub-agent purchases need the host', () => {
     const asks = task();
     assert.match(
       asks,
-      /\(1\) Before placing an order or paying, always ask first \(reason confirm\) with the item, the total price, the delivery address and the payment method\. A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy\. The server blocks the final order or payment button until the host has answered your confirm question\. If what you are about to do differs from what the host approved, ask again\./,
+      /\(1\) Before placing an order or paying, always ask first \(reason confirm\) with the item, the total price, the delivery address and the payment method\. A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy\. Ask on the page that has the final order or payment button \(for example the order review page\), once it shows the total, the address and the payment method\. The server blocks that button until the host has answered a confirm question you asked on that same page\. If what you are about to do differs from what the host approved, ask again\./,
     );
     assert.doesNotMatch(asks, /maximum total and the checkout|explicitly says not to ask/, 'a price limit in the TASK is not an approval');
     assert.match(

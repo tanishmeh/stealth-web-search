@@ -92,7 +92,8 @@ function orderRule(run: AgentRun): string {
     return (
       '(1) Before placing an order or paying, always ask first (reason confirm) with the item, the total price, the delivery address and the payment method. ' +
       'A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy. ' +
-      'The server blocks the final order or payment button until the host has answered your confirm question. ' +
+      'Ask on the page that has the final order or payment button (for example the order review page), once it shows the total, the address and the payment method. ' +
+      'The server blocks that button until the host has answered a confirm question you asked on that same page. ' +
       `If what you are about to do differs from what the host approved, ask again. ${others}`
     );
   }

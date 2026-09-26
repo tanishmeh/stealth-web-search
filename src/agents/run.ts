@@ -448,8 +448,8 @@ export interface KindSpec {
   finishTool: string;
   /** Work after the loop (e.g. verify the script); may set run.extra. */
   finalize?(run: AgentRun, env: RunEnv): Promise<void>;
-  /** A check the browser tools run on the label of a control before they activate it (see ToolContext.purchaseGuard). */
-  purchaseGuard?(run: AgentRun, env: RunEnv): ((label: string) => string | null) | null;
+  /** A check the browser tools run on the label of a control, and the page it is on, before they activate it (see ToolContext.purchaseGuard). */
+  purchaseGuard?(run: AgentRun, env: RunEnv): ((label: string, pageUrl: string) => string | null) | null;
 }
 
 export interface RunEnv {
@@ -532,17 +532,37 @@ export function looksLikeFinalPurchase(label: string): boolean {
  * the host answered a confirm question. An answer lifts it for the rest of the run: the agent is trusted
  * to respect a "No". Page scripts (browser_evaluate, offered with a snapshot only when allow_evaluate) are not checked.
  */
-export function purchaseGuardFor(run: AgentRun, env: RunEnv): ((label: string) => string | null) | null {
+export function purchaseGuardFor(run: AgentRun, env: RunEnv): ((label: string, pageUrl: string) => string | null) | null {
   if (run.input.confirmPurchases === false) return null;
-  return (label) => {
+  return (label, pageUrl) => {
     if (!looksLikeFinalPurchase(label)) return null;
-    if (run.questions.some((q) => q.reason === 'confirm' && q.status === 'answered')) return null;
+    const approved = run.questions.filter((q) => q.reason === 'confirm' && q.status === 'answered');
+    // an approval counts on the page it was asked on, where the total, the address and the payment method were shown
+    if (approved.some((q) => samePage(q.pageUrl, pageUrl))) return null;
     const shown = JSON.stringify(run.scrub(clip(label.replace(/\s+/g, ' ').trim(), 80)));
-    env.log.warn({ label: shown }, 'blocked the final step of an order or payment: the host has not approved it');
-    return questionsAllowed(run, env.config)
-      ? `Blocked: ${shown} looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.`
-      : `Blocked: ${shown} looks like the final step of an order or payment, and this job needs the host's approval for it but questions are off. Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).`;
+    const elsewhere = approved.at(-1)?.pageUrl ?? null;
+    env.log.warn({ label: shown, approvedOn: elsewhere }, 'blocked the final step of an order or payment: the host has not approved it');
+    if (!questionsAllowed(run, env.config)) {
+      return `Blocked: ${shown} looks like the final step of an order or payment, and this job needs the host's approval for it but questions are off. Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).`;
+    }
+    if (approved.length) {
+      return `Blocked: ${shown} looks like the final step of an order or payment, and the host's approval was for a question you asked on another page (${elsewhere ?? 'unknown'}). Ask again on this page: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method it shows. Click it again after the host approves.`;
+    }
+    return `Blocked: ${shown} looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.`;
   };
+}
+
+/** Same page for the purchase guard: same origin and path (the query and the fragment may differ). */
+function samePage(a: string | null, b: string): boolean {
+  if (!a) return false;
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    const path = (u: URL) => u.pathname.replace(/\/+$/, '') || '/';
+    return x.origin === y.origin && path(x) === path(y);
+  } catch {
+    return false;
+  }
 }
 
 const READING_TOOLS = new Set(['browser_markdown', 'browser_snapshot', 'browser_get_text', 'browser_search', 'browser_extract', 'browser_navigate']);

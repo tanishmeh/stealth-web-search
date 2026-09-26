@@ -50,7 +50,7 @@ export interface RunToolOptions {
    */
   scrub?: (text: string) => string;
   /** Sub-agent task runs: refuses the final step of an order or payment the host has not approved (ToolContext.purchaseGuard). */
-  purchaseGuard?: (label: string) => string | null;
+  purchaseGuard?: (label: string, pageUrl: string) => string | null;
 }
 
 export const SERVER_INSTRUCTIONS = `This server controls a real (headless, stealthy) web browser that fully runs JavaScript.

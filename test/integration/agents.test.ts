@@ -1181,6 +1181,49 @@ describe('sub-agent questions (scripted model)', { skip: SKIP }, () => {
     assert.equal(d.output, 'ordered: note=leave+at+the+door&item=blue-mug', 'nothing was typed by the refused browser_type');
   });
 
+  test('an approval asked on another page does not unlock the order button: the agent must ask again on the checkout page', async () => {
+    const marker = 'MARKER-GUARD-PAGE';
+    let refused = '';
+    policies.set(marker, (req) => {
+      switch (req.step) {
+        case 1:
+          return call('browser_navigate', { url: `${site.baseUrl}/index.html` });
+        case 2:
+          // asked too early, as a real model once did: before the checkout showed the total, the address and the card
+          return call('ask_host', { question: 'Should I go ahead and order the Blue Mug?', reason: 'confirm' });
+        case 3:
+          return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });
+        case 4:
+          return call('browser_click', { selector: '#place' });
+        case 5:
+          refused = req.lastToolResult ?? '';
+          return call('ask_host', { question: 'Place the order for one Blue Mug, total $17.49, to 1 Example Street, card ending 4242?', reason: 'confirm' });
+        case 6:
+          return call('browser_click', { selector: '#place' });
+        default:
+          return call('finish', { output: 'ordered' });
+      }
+    });
+    const before = orders().length;
+    const first = await srv.call('agent_run', { task: `${marker}: order one Blue Mug`, output: 'the order', wait_seconds: 60 });
+    const q1 = first.raw.structuredContent;
+    assert.equal(q1.status, 'waiting', first.text);
+    assert.match(q1.question.page_url, /\/index\.html$/);
+    const second = await srv.call('agent_reply', { run_id: q1.run_id, question_id: q1.question.id, answer: 'Yes', wait_seconds: 60 });
+    const q2 = second.raw.structuredContent;
+    assert.equal(q2.status, 'waiting', second.text);
+    assert.match(q2.question.page_url, /\/checkout\.html$/);
+    assert.equal(orders().length, before, 'the early approval did not place the order');
+    assert.equal(
+      refused,
+      `Error: Blocked: "Place your order" looks like the final step of an order or payment, and the host's approval was for a question you asked on another page (${site.baseUrl}/index.html). ` +
+        'Ask again on this page: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method it shows. Click it again after the host approves.',
+    );
+    const done = await srv.call('agent_reply', { run_id: q1.run_id, question_id: q2.question.id, answer: 'Yes, place the order', wait_seconds: 60 });
+    assert.equal(done.raw.structuredContent.status, 'completed', done.text);
+    assert.equal(orders().length, before + 1, 'ordered once, after the approval on the checkout page');
+  });
+
   test('confirm_purchases: false lets the agent order without asking; with questions off the button stays blocked and the agent is told to finish', async () => {
     const policy: Policy = (req) => {
       if (req.step === 1) return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });

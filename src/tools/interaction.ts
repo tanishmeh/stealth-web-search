@@ -126,7 +126,7 @@ export async function guardPurchase(
   if (!ctx.purchaseGuard) return;
   const labels = [...known, ...((await tab.callFunction<string[]>(ACTIVATION_LABELS, [key, point], { objectId })) ?? [])];
   for (const label of labels) {
-    const block = label ? ctx.purchaseGuard(label) : null;
+    const block = label ? ctx.purchaseGuard(label, tab.url) : null;
     if (block) throw new PurchaseBlockedError(block);
   }
 }
