@@ -1,5 +1,5 @@
 import type { Config } from '../config.ts';
-import type { Hub } from '../dashboard/hub.ts';
+import type { BrowserChannel } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import type { Browser } from './browser.ts';
 import type { Tab } from './tab.ts';
@@ -18,17 +18,18 @@ export class LiveView {
   private streamingTab: Tab | null = null;
   private starting: Promise<void> | null = null;
   private readonly browser: Browser;
-  private readonly hub: Hub;
+  private readonly hub: BrowserChannel;
   private readonly config: Config;
   private readonly log: Logger;
   private frames = 0;
+  private readonly unsubscribe: () => void;
 
-  constructor(browser: Browser, hub: Hub, config: Config, log: Logger) {
+  constructor(browser: Browser, hub: BrowserChannel, config: Config, log: Logger) {
     this.browser = browser;
     this.hub = hub;
     this.config = config;
-    this.log = log.child({ component: 'live-view' });
-    hub.on('viewers', (count: number) => {
+    this.log = log.child({ component: 'live-view', ...(hub.browserId === 'main' ? {} : { browserId: hub.browserId }) });
+    this.unsubscribe = hub.onViewers((count: number) => {
       this.log.info({ viewers: count }, count > 0 ? 'live view viewer connected' : 'no live view viewers');
       void this.sync();
     });
@@ -155,6 +156,7 @@ export class LiveView {
   }
 
   stop(): void {
+    this.unsubscribe();
     const tab = this.streamingTab;
     this.streamingTab = null;
     if (tab && !tab.closed) void tab.send('Page.stopScreencast', {}, 2_000).catch(() => undefined);

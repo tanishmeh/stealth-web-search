@@ -32,7 +32,7 @@ function createDeps() {
     browser,
     sessions: { list: () => [] },
     obscura: { getStatus: () => ({ mode: 'managed', running: true, ready: true, restarts: 0 }) },
-    logFile: '/nonexistent/stealth-browser-mcp.log',
+    logFile: '/nonexistent/stealth-web-search.log',
     startedAt: new Date(),
   };
   return { deps, hub, browser };

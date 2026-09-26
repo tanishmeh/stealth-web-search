@@ -1,6 +1,10 @@
 /**
  * JavaScript executed inside pages via `Runtime.callFunctionOn`.
  *
+ * Portions adapted from Obscura (https://github.com/h4ckf0r0day/obscura: crates/obscura-mcp and
+ * crates/obscura-js/src/markdown.rs), licensed under the Apache License 2.0, and modified for this
+ * project. See NOTICE.
+ *
  * Every script is a plain function declaration whose inputs arrive as CDP
  * call arguments (JSON-encoded by CDP), never by string interpolation, so
  * agent-supplied selectors/text cannot break out of the script.
@@ -132,6 +136,7 @@ export const COLLECT_INTERACTIVE = `function collectInteractive(opts) {
       role: e.getAttribute('role') || '',
       name: e.getAttribute('name') || '',
       label: labelFor(e),
+      hints: ((e.id || '') + ' ' + (e.getAttribute('autocomplete') || '')).trim(),
       visible: visible,
       inViewport: visible && r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw,
       disabled: !!(e.disabled || e.getAttribute('aria-disabled') === 'true'),
@@ -187,6 +192,7 @@ export const DETECT_FORMS = `function detectForms() {
         tag: tag,
         type: type,
         name: el.getAttribute('name') || '',
+        hints: ((el.id || '') + ' ' + (el.getAttribute('autocomplete') || '')).trim(),
         value: type === 'password' ? (el.value ? '••••' : '') : (el.value || ''),
         checked: !!el.checked,
         required: el.hasAttribute('required'),

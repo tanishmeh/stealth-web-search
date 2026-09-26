@@ -1,4 +1,5 @@
-Stealth Browser MCP
+Stealth Web Search
+Copyright 2026 tanishmeh
 
 This project is licensed under the Apache License, Version 2.0 (see LICENSE).
 
@@ -12,6 +13,15 @@ Obscura (https://github.com/h4ckf0r0day/obscura)
   (crates/obscura-mcp and crates/obscura-js/src/markdown.rs).
 
 Model Context Protocol TypeScript SDK (https://github.com/modelcontextprotocol/typescript-sdk)
-  Licensed under the MIT License (npm dependency).
+  Licensed under the Apache License, Version 2.0 and the MIT License: the MCP project is moving
+  from MIT to Apache-2.0, and code not yet relicensed stays under MIT (see each package's LICENSE).
+  npm dependencies @modelcontextprotocol/server, client, node and express; the Docker image
+  bundles them with their LICENSE files.
+
+quickjs-emscripten (https://github.com/justjake/quickjs-emscripten)
+  Copyright (c) 2019-2024 Jake Teton-Landis. Licensed under the MIT License (npm dependency:
+  quickjs-emscripten-core and @jitl/quickjs-wasmfile-release-sync). It includes QuickJS,
+  Copyright (c) 2017-2021 Fabrice Bellard and Charlie Gordon, licensed under the MIT License.
+  Used to run automation scripts in a WebAssembly sandbox; the Docker image bundles it.
 
 Other npm dependencies are listed in package.json and carry their own licenses.

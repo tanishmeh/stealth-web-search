@@ -49,7 +49,7 @@ if (!force && existsSync(path.join(DEST, binName)) && existsSync(marker) && read
 }
 
 console.log(`Looking up ${asset} in ${REPO} ${version}…`);
-const apiHeaders = { Accept: 'application/vnd.github+json', 'User-Agent': 'stealth-browser-mcp' };
+const apiHeaders = { Accept: 'application/vnd.github+json', 'User-Agent': 'stealth-web-search' };
 if (process.env.GITHUB_TOKEN) apiHeaders.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`; // avoids API rate limits in CI
 const releaseRes = await fetch(`https://api.github.com/repos/${REPO}/releases/tags/${version}`, { headers: apiHeaders });
 if (!releaseRes.ok) {

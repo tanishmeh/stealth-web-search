@@ -1,0 +1,126 @@
+name: Bug report
+description: Something does not work as documented.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you file a bug, check the [troubleshooting guide](https://github.com/tanishmeh/stealth-web-search/blob/main/docs/TROUBLESHOOTING.md) and the [known limitations](https://github.com/tanishmeh/stealth-web-search/blob/main/README.md#known-limitations).
+
+        Do not report security vulnerabilities here. Use [private vulnerability reporting](https://github.com/tanishmeh/stealth-web-search/security/advisories/new) instead.
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Version
+      description: |
+        The output of `curl -s http://127.0.0.1:8931/healthz`. It shows the server version and the Obscura version.
+        If the server does not start, paste the output of `git rev-parse --short HEAD` instead.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How do you run the server?
+      options:
+        - Docker Compose (docker compose up)
+        - npm (npm run dev or npm start)
+        - Other (describe in the steps below)
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and CPU
+      placeholder: "e.g. macOS on arm64 with Docker Desktop, or Ubuntu on amd64 with Docker Engine"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      description: The client that called the server when the bug happened.
+      options:
+        - LM Studio chat (mcp.json)
+        - LM Studio command-line agent (npm run lmstudio:agent)
+        - Claude Desktop
+        - Claude Code
+        - Cursor
+        - VS Code
+        - Other (name it in the steps below)
+        - No client involved (dashboard, setup or scripts)
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Client version
+      placeholder: "e.g. LM Studio 0.4.18"
+    validations:
+      required: false
+
+  - type: textarea
+    id: model
+    attributes:
+      label: Model (for sub-agents and LM Studio)
+      description: |
+        The model id and the server that runs it (vLLM, LM Studio, Ollama, a hosted API, ...).
+        For sub-agents, also paste the output of `npm run config:check`, or in Docker
+        `docker compose run --rm --no-deps stealth-web-search node dist/check-config.js`.
+        It prints "set" instead of the API key, but it shows the endpoint address: replace private addresses if you prefer.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The tool calls, task or page that trigger the bug. Public example sites help most.
+      placeholder: |
+        1. Call browser_navigate with {"url": "https://example.com"}
+        2. Call browser_snapshot
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead, including any error message the tool or client returned.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        For example `jq -c 'select(.level>=40)' logs/current.log` or `docker compose logs --tail 100`.
+        Logs and sub-agent transcripts can contain page content, URLs, typed text, tokens and API keys.
+        Paste only the lines that matter, and redact secrets and private data first.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Settings you changed from the defaults (without their secret values), screenshots, or other context.
+    validations:
+      required: false

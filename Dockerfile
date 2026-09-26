@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Stealth Browser MCP: an MCP server plus the Obscura headless browser in one container.
+# Stealth Web Search: an MCP server plus the Obscura headless browser in one container.
 #
 #   docker compose up -d --build        (recommended; see README.md)
 #
@@ -63,7 +63,7 @@ FROM node:${NODE_VERSION}-bookworm-slim
 ARG OBSCURA_VERSION=v0.2.2
 ARG OBSCURA_VARIANT=stealth
 
-LABEL org.opencontainers.image.title="stealth-browser-mcp" \
+LABEL org.opencontainers.image.title="stealth-web-search" \
       org.opencontainers.image.description="MCP server driving the Obscura stealth headless browser, with full logging and a live view" \
       org.opencontainers.image.licenses="Apache-2.0" \
       io.obscura.version="${OBSCURA_VERSION}" \
@@ -79,19 +79,23 @@ ENV NODE_ENV=production \
     PUBLIC_URL=http://127.0.0.1:8931 \
     OBSCURA_BIN=/opt/obscura/obscura \
     LOG_DIR=/app/logs \
-    LOG_FORMAT=json
+    LOG_FORMAT=json \
+    SCRIPTS_DIR=/data/scripts
 
 WORKDIR /app
 COPY --from=obscura /opt/obscura/obscura /opt/obscura/obscura
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY package.json ./
+COPY package.json LICENSE NOTICE ./
+# Obscura is also Apache-2.0: the license text travels with its binary
+COPY LICENSE /opt/obscura/LICENSE
 
-RUN mkdir -p /app/logs /data && chown -R node:node /app/logs /data
+RUN mkdir -p /app/logs /data/scripts && chown -R node:node /app/logs /data
 USER node
 
 EXPOSE 8931
-VOLUME ["/app/logs"]
+# logs (incl. sub-agent transcripts in agent-runs/) and automation scripts made by agent_automate
+VOLUME ["/app/logs", "/data/scripts"]
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 8931) + '/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]

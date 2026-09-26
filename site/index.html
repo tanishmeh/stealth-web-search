@@ -1,0 +1,427 @@
+<!-- @head -->
+<body class="home">
+<!-- @icons -->
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="f-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.6 3.6 5.6 3.6 9s-1.2 6.4-3.6 9c-2.4-2.6-3.6-5.6-3.6-9S9.6 5.6 12 3z"/></symbol>
+  <symbol id="f-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.2c0 4.7-3.2 8.3-7.5 9.8-4.3-1.5-7.5-5.1-7.5-9.8V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="f-bot" viewBox="0 0 24 24"><rect x="4.5" y="8" width="15" height="11.5" rx="3"/><path d="M12 8V4.5M12 4.5h.01M9 13h.01M15 13h.01M9.5 16.5h5M2.5 12.5v3M21.5 12.5v3"/></symbol>
+  <symbol id="f-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="f-list" viewBox="0 0 24 24"><path d="M9 6h11.5M9 12h11.5M9 18h11.5M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  <symbol id="f-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0V8zM12 17v4"/></symbol>
+  <symbol id="f-box" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+  <symbol id="f-script" viewBox="0 0 24 24"><path d="M7 3.5h8.5L20 8v12.5H7z"/><path d="M15.5 3.5V8H20M10 12.5l-1.8 1.8L10 16M14 12.5l1.8 1.8L14 16"/></symbol>
+  <symbol id="f-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></symbol>
+  <symbol id="f-book" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/><path d="M4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/></symbol>
+</svg>
+<!-- @header -->
+
+<main id="main">
+
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <ul class="hero-badges" aria-label="Highlights">
+          <li>MCP server</li>
+          <li>One Docker container</li>
+          <li>LM Studio ready</li>
+          <li>Apache-2.0</li>
+        </ul>
+        <h1>A stealth web browser <span class="grad-text">and research agents</span> for your AI</h1>
+        <p class="lede">Stealth Web Search gives any MCP client a real, JavaScript-rendering browser with built-in anti-fingerprinting, plus sub-agents that browse, automate and cross-check the web on their own. It runs in one Docker container, logs every step, and lets you watch it all live.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="docs/getting-started.html">Get started <svg class="i"><use href="#i-arrow"/></svg></a>
+          <a class="btn btn-lm" href="{{LM_STUDIO_INSTALL}}" rel="noopener"><svg class="i"><use href="#f-plug"/></svg>Add to LM Studio</a>
+          <a class="btn" href="{{REPO}}" rel="noopener"><svg class="i"><use href="#i-github"/></svg>View on GitHub</a>
+        </div>
+      </div>
+      <figure class="shot">
+        <div class="shot-frame">
+          <div class="shot-bar" aria-hidden="true"><span></span><span></span><span></span><code>127.0.0.1:8931</code></div>
+          <a class="zoom" href="assets/img/dashboard.png"><img src="assets/img/dashboard.png" width="2880" height="1800" alt="The Stealth Web Search dashboard: the live view of a sub-agent's browser on a book catalogue, the activity feed of tool calls, and the Agents tab with a finder result and its sources."></a>
+        </div>
+        <figcaption>The live dashboard while a sub-agent reads a catalogue and a finder cross-checks its answer.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" id="quick-start">
+    <div class="wrap quick">
+      <div>
+        <p class="eyebrow">Quick start</p>
+        <h2>Running in three commands</h2>
+        <p>You need Docker. The first build downloads the checksum-verified Obscura browser and compiles the server; it takes about a minute.</p>
+        <ul class="check-list">
+          <li>MCP endpoint at <code>http://127.0.0.1:8931/mcp</code> (Streamable HTTP)</li>
+          <li>Live dashboard at <code>http://127.0.0.1:8931/</code></li>
+          <li>Published on <code>127.0.0.1</code> only, with optional bearer-token auth</li>
+          <li>JSON logs in <code>./logs</code>, one transcript per sub-agent run</li>
+        </ul>
+        <p style="margin-top:22px"><a href="docs/getting-started.html">Read the full setup guide <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a></p>
+      </div>
+      <div class="terminal">
+        <div class="terminal-bar"><span></span><span></span><span></span><b>bash</b><button class="copy" type="button" data-copy="quick-cmds">Copy</button></div>
+<pre id="quick-cmds"><span class="prompt">$ </span><span data-cmd>git clone {{REPO}}.git</span>
+<span class="prompt">$ </span><span data-cmd>cd stealth-web-search</span>
+<span class="prompt">$ </span><span data-cmd>docker compose up -d --build</span>
+<span class="prompt">$ </span><span data-cmd>curl -s http://127.0.0.1:8931/healthz</span>
+<span class="out">{"ok":true,"name":"stealth-web-search","version":"{{VERSION}}",...}</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Features</p>
+        <h2>Everything an agent needs to use the web, and everything you need to trust it</h2>
+        <p>A production-quality MCP server around a fast, stealthy browser engine, with the observability to see exactly what your agents did.</p>
+      </div>
+      <div class="features">
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-globe"/></svg></div>
+          <h3>A real browser, not a fetcher</h3>
+          <p>{{TOOLS_BROWSER}} <code>browser_*</code> tools: navigate, read pages as text, Markdown, links or structured data, click, type, fill forms, use tabs and cookies, run JavaScript, take screenshots and PDFs. Pages run their scripts in V8 first, so single-page apps work.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-shield"/></svg></div>
+          <h3>Stealth by default</h3>
+          <p>Obscura's stealth build presents a consistent Chrome fingerprint, impersonates its TLS fingerprint, reports <code>navigator.webdriver</code> as false and blocks trackers. Element references stay on the server, so nothing is written into the page.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-bot"/></svg></div>
+          <h3>Sub-agents for whole jobs</h3>
+          <p>Hand over a task and get back only the result. Each run gets its own isolated browser and uses any OpenAI-compatible model: vLLM, LM Studio, Ollama, llama.cpp or a hosted API.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-eye"/></svg></div>
+          <h3>Watch it live</h3>
+          <p>The dashboard streams the agent's tab with markers where it clicks and types, lists every tool call with its arguments and result, and shows the console, network, logs and each sub-agent's reasoning as it streams.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-list"/></svg></div>
+          <h3>Logs everything</h3>
+          <p>Every MCP message, tool call, browser command, console message and network request goes to rotating JSON log files. Passwords, cookie values and credential headers are redacted, and each sub-agent run leaves a transcript.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-plug"/></svg></div>
+          <h3>LM Studio and any MCP client</h3>
+          <p>One click adds it to LM Studio. Claude Code, Cursor, VS Code and other clients connect over Streamable HTTP; stdio-only clients use the bundled bridge.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-script"/></svg></div>
+          <h3>Reusable automation scripts</h3>
+          <p>The automation agent turns a task into a verified script with named parameters. Replay it later with <code>script_run</code> in a fresh browser, with no model, in a QuickJS sandbox with memory and time limits.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-box"/></svg></div>
+          <h3>A hardened container</h3>
+          <p>Non-root, read-only file system, every Linux capability dropped. The browser's control port never leaves the container, private networks are blocked by default, and sub-agents use a separate browser engine.</p>
+        </article>
+        <article class="feature">
+          <div class="feature-icon"><svg class="i"><use href="#f-check"/></svg></div>
+          <h3>Tested end to end</h3>
+          <p>Unit and integration suites run against the real browser engine, locally and in the container. Sub-agents are tested with a scripted model and live with a real one, and LM Studio scenarios run against a local model.</p>
+        </article>
+      </div>
+      <div class="stats" aria-label="At a glance">
+        <div class="stat"><b>{{TOOLS_ALL}}</b><span>MCP tools</span></div>
+        <div class="stat"><b>3</b><span>kinds of sub-agent</span></div>
+        <div class="stat"><b>1</b><span>Docker container</span></div>
+        <div class="stat"><b>0</b><span>cloud accounts needed</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="agents">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Sub-agents</p>
+        <h2>Give a <span class="grad-text">TASK</span>, get back the <span class="grad-text">OUTPUT</span></h2>
+        <p>Sub-agents run inside the container next to the browser. Your agent stays in charge and keeps its context small; the sub-agent does the clicking and reading, and returns only what you asked for.</p>
+      </div>
+      <div class="agents">
+        <article class="agent">
+          <div class="agent-head">
+            <span class="agent-kind">agent_run</span>
+            <h3>Agentic</h3>
+            <p>Completes a task in its own browser and returns the output in the shape you describe, as text or validated JSON.</p>
+          </div>
+          <div class="agent-io">
+            <div><b>Task</b><span>On books.toscrape.com, open the Poetry category and read the first 3 books.</span></div>
+            <div><b>Output</b><span>[{"title": "A Light in the Attic", "price": "£51.77"}, {"title": "The Black Maria", "price": "£52.15"}, …]</span></div>
+          </div>
+        </article>
+        <article class="agent">
+          <div class="agent-head">
+            <span class="agent-kind">agent_automate</span>
+            <h3>Automation</h3>
+            <p>Does the task once, writes a script that repeats it for any inputs, verifies it in a fresh browser, and stores it.</p>
+          </div>
+          <div class="agent-io">
+            <div><b>Task</b><span>On quotes.toscrape.com, get the first 3 quotes for a tag.</span></div>
+            <div><b>Output</b><span>Script "quotes-by-tag" v1, verification PASSED
+script_run {"name": "quotes-by-tag", "params": {"tag": "love", "count": 3}}</span></div>
+          </div>
+        </article>
+        <article class="agent">
+          <div class="agent-head">
+            <span class="agent-kind">agent_find</span>
+            <h3>Finder</h3>
+            <p>Searches the web, reads the pages, cross-checks several independent sources and returns the answer with cited, verified quotes.</p>
+          </div>
+          <div class="agent-io">
+            <div><b>Objective</b><span>What is the default TCP port a PostgreSQL server listens on?</span></div>
+            <div><b>Output</b><span>5432 (confidence: high)
+[1] postgresql.org: "The TCP port the server listens on; 5432 by default."
+[2] dbvis.com</span></div>
+          </div>
+        </article>
+      </div>
+      <p style="margin-top:28px"><a href="docs/agents.html">How sub-agents work, their limits and the script API <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a></p>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="screenshots">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">See every step</p>
+        <h2>Nothing happens out of sight</h2>
+        <p>The dashboard at <code>http://127.0.0.1:8931/</code> shows what each agent sees and does, while it does it.</p>
+      </div>
+      <div class="gallery">
+        <figure class="wide">
+          <div class="shot-frame"><a class="zoom" href="assets/img/watch-agent.png"><img src="assets/img/watch-agent.png" width="2880" height="1800" loading="lazy" alt="The live view switched to a sub-agent's private browser, with the browser picker open and the agent's current step in the Agents tab."></a></div>
+          <figcaption><b>Watch any browser.</b> Switch the live view, console and network panes to a sub-agent's private browser while it works.</figcaption>
+        </figure>
+        <figure>
+          <div class="shot-frame"><a class="zoom" href="assets/img/agent-details.png"><img src="assets/img/agent-details.png" width="2880" height="1800" loading="lazy" alt="The details of a finder run: each step with the model's reasoning and tool calls, and the cited sources with verified quotes."></a></div>
+          <figcaption><b>Every step, every source.</b> The model's reasoning, each tool call and result, and the quotes the finder verified on each page.</figcaption>
+        </figure>
+        <figure>
+          <div class="shot-frame"><a class="zoom" href="assets/img/logs.png"><img src="assets/img/logs.png" width="2880" height="1800" loading="lazy" alt="The Logs tab with structured server log lines filtered by component."></a></div>
+          <figcaption><b>Structured logs.</b> The server log live in the browser, filterable by level, component and text, and in <code>./logs</code> as JSON lines.</figcaption>
+        </figure>
+        <figure class="wide">
+          <div class="shot-frame"><a class="zoom" href="assets/img/lmstudio-agent.png"><img src="assets/img/lmstudio-agent.png" width="2724" height="2036" loading="lazy" alt="A terminal running npm run lmstudio:agent: a model loaded in LM Studio opens a JavaScript-rendered page with the browser tools, waits for the quotes, extracts the authors and answers."></a></div>
+          <figcaption><b>With LM Studio.</b> The bundled command-line agent runs a model loaded in LM Studio through the browser tools, step by step. In LM Studio chats the same tools appear as the <code>mcp/stealth-web-search</code> integration.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="integrations">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Integrations</p>
+        <h2>First-class LM Studio support, and standard MCP for everything else</h2>
+        <p>Use the tools from an LM Studio chat, run the sub-agents on an LM Studio model, or connect any MCP client.</p>
+      </div>
+      <div class="integrations">
+        <div class="panel">
+          <h3><svg class="i" style="width:24px;height:24px;color:var(--accent)"><use href="#f-bot"/></svg>LM Studio</h3>
+          <p>LM Studio connects to MCP servers listed in its <code>mcp.json</code>. Add this one in one click, or with the setup script.</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="{{LM_STUDIO_INSTALL}}" rel="noopener"><svg class="i"><use href="#f-plug"/></svg>Add to LM Studio</a>
+            <a class="btn" href="docs/lm-studio.html"><svg class="i"><use href="#f-book"/></svg>LM Studio guide</a>
+          </div>
+          <ol class="steps">
+            <li>Start the server: <code>docker compose up -d</code></li>
+            <li>Click <b>Add to LM Studio</b>, or run <code>npm run lmstudio:setup</code></li>
+            <li>Load a tool-use model with a context of 32k or more</li>
+            <li>In a chat, turn on <code>mcp/stealth-web-search</code> under Integrations</li>
+          </ol>
+          <div class="code"><div class="code-head"><span class="code-lang">json</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="json">{
+  "mcpServers": {
+    "stealth-web-search": {
+      "url": "http://127.0.0.1:8931/mcp",
+      "timeout": 180000
+    }
+  }
+}</code></pre></div>
+          <p style="margin:0;color:var(--muted);font-size:14px">The sub-agents can run on LM Studio too: see the <code>LM Studio</code> provider in <code>config/models.example.json</code>.</p>
+        </div>
+        <div class="panel">
+          <h3><svg class="i" style="width:24px;height:24px;color:var(--accent)"><use href="#f-plug"/></svg>Any MCP client</h3>
+          <p>The endpoint is <code>http://127.0.0.1:8931/mcp</code> (Streamable HTTP). Clients that only speak stdio use the bridge that ships in the image.</p>
+          <div class="tabs" role="tablist" aria-label="MCP client">
+            <button role="tab" id="tab-cc" aria-controls="panel-cc" aria-selected="true">Claude Code</button>
+            <button role="tab" id="tab-cursor" aria-controls="panel-cursor" aria-selected="false" tabindex="-1">Cursor</button>
+            <button role="tab" id="tab-vscode" aria-controls="panel-vscode" aria-selected="false" tabindex="-1">VS Code</button>
+            <button role="tab" id="tab-stdio" aria-controls="panel-stdio" aria-selected="false" tabindex="-1">stdio clients</button>
+          </div>
+          <div class="tab-panel" id="panel-cc" role="tabpanel" aria-labelledby="tab-cc">
+            <div class="code"><div class="code-head"><span class="code-lang">bash</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="bash">claude mcp add --transport http stealth-web-search http://127.0.0.1:8931/mcp</code></pre></div>
+          </div>
+          <div class="tab-panel" id="panel-cursor" role="tabpanel" aria-labelledby="tab-cursor" hidden>
+            <div class="code"><div class="code-head"><span class="code-lang">json</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="json">{
+  "mcpServers": {
+    "stealth-web-search": {
+      "url": "http://127.0.0.1:8931/mcp"
+    }
+  }
+}</code></pre></div>
+            <p>In <code>~/.cursor/mcp.json</code> or <code>.cursor/mcp.json</code>.</p>
+          </div>
+          <div class="tab-panel" id="panel-vscode" role="tabpanel" aria-labelledby="tab-vscode" hidden>
+            <div class="code"><div class="code-head"><span class="code-lang">json</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="json">{
+  "servers": {
+    "stealth-web-search": {
+      "type": "http",
+      "url": "http://127.0.0.1:8931/mcp"
+    }
+  }
+}</code></pre></div>
+            <p>In <code>.vscode/mcp.json</code> in your workspace.</p>
+          </div>
+          <div class="tab-panel" id="panel-stdio" role="tabpanel" aria-labelledby="tab-stdio" hidden>
+            <div class="code"><div class="code-head"><span class="code-lang">json</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="json">{
+  "mcpServers": {
+    "stealth-web-search": {
+      "command": "docker",
+      "args": ["exec", "-i", "stealth-web-search", "node", "dist/stdio-bridge.js"]
+    }
+  }
+}</code></pre></div>
+            <p>For Claude Desktop and other stdio-only clients. The container must be running.</p>
+          </div>
+          <ul class="check-list" style="margin-top:22px">
+            <li>Streamable HTTP for the 2025 and 2026 protocol revisions</li>
+            <li>A stdio bridge in the image for stdio-only clients</li>
+            <li>Optional bearer token with <code>AUTH_TOKEN</code></li>
+            <li>Every client shares one browser; the dashboard lists the sessions</li>
+          </ul>
+          <p style="margin-top:auto;padding-top:22px"><a href="docs/clients.html">All clients, tokens and remote access <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="models">
+    <div class="wrap split">
+      <div>
+        <p class="eyebrow">Model configuration</p>
+        <h2 style="margin:0 0 14px;font-size:clamp(1.8rem,3vw,2.3rem);letter-spacing:-0.025em;line-height:1.15">Point the sub-agents at your model with one JSON file</h2>
+        <p style="color:var(--text-2);margin:0">Copy <code>config/models.example.json</code> to <code>config/models.json</code>, set your endpoint, model and key, and restart. The format is the provider list editors use for custom endpoints, so you can reuse the one you already have.</p>
+        <ul class="facts">
+          <li><b>Any OpenAI-compatible endpoint</b><span>vLLM, LM Studio, Ollama, llama.cpp or a hosted API, with streaming, tool calling and reasoning effort.</span></li>
+          <li><b>Validated at startup</b><span>Clear errors for invalid values, warnings for unknown fields and keys that appear twice. Comments and trailing commas are fine.</span></li>
+          <li><b>Checked in one command</b><span><code>docker compose run --rm --no-deps stealth-web-search node dist/check-config.js --ping</code> shows the settings the agents will use and whether the model answers.</span></li>
+        </ul>
+        <a class="btn" href="docs/models.html"><svg class="i"><use href="#f-book"/></svg>models.json reference</a>
+      </div>
+      <div class="code"><div class="code-head"><span class="code-lang">config/models.json</span><button class="copy" type="button">Copy</button></div><pre><code data-hl="json">{{MODELS_EXAMPLE}}</code></pre></div>
+    </div>
+  </section>
+
+  <section class="section" id="architecture">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">How it works</p>
+        <h2>One container, two browser engines, your model</h2>
+        <p>All MCP clients share one browser and their tool calls run in order. Sub-agents and scripts get private browsers on a second engine, so they never disturb yours.</p>
+      </div>
+      <div class="arch">
+        <svg viewBox="0 0 1100 440" role="img" aria-labelledby="arch-title arch-desc">
+          <title id="arch-title">Architecture</title>
+          <desc id="arch-desc">An AI client talks MCP to the server in the Docker container. The server drives the main Obscura browser over CDP and runs sub-agents, which use a second, isolated Obscura engine and call your model endpoint. Both engines load websites. You watch through the dashboard and the logs.</desc>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor" style="fill:var(--muted)"/></marker>
+          </defs>
+          <rect class="container" x="290" y="18" width="520" height="352" rx="18"/>
+          <text class="label" x="312" y="46">DOCKER CONTAINER</text>
+
+          <rect class="box" x="20" y="70" width="200" height="90" rx="12"/>
+          <text x="120" y="106" text-anchor="middle">AI client</text>
+          <text class="sub" x="120" y="128" text-anchor="middle">LM Studio · Claude Code</text>
+          <text class="sub" x="120" y="146" text-anchor="middle">Cursor · VS Code · …</text>
+
+          <rect class="box" x="20" y="250" width="200" height="90" rx="12"/>
+          <text x="120" y="286" text-anchor="middle">You</text>
+          <text class="sub" x="120" y="308" text-anchor="middle">dashboard :8931</text>
+          <text class="sub" x="120" y="326" text-anchor="middle">./logs (JSON)</text>
+
+          <rect class="box-accent" x="320" y="70" width="230" height="90" rx="12"/>
+          <text x="435" y="100" text-anchor="middle">MCP server (Node.js)</text>
+          <text class="sub" x="435" y="122" text-anchor="middle">{{TOOLS_ALL}} tools · ordered queue</text>
+          <text class="sub" x="435" y="140" text-anchor="middle">logs · live view · auth</text>
+
+          <rect class="box-accent" x="320" y="250" width="230" height="90" rx="12"/>
+          <text x="435" y="280" text-anchor="middle">Sub-agents</text>
+          <text class="sub" x="435" y="302" text-anchor="middle">agent_run · automate · find</text>
+          <text class="sub" x="435" y="320" text-anchor="middle">scripts (QuickJS sandbox)</text>
+
+          <rect class="box" x="600" y="70" width="180" height="90" rx="12"/>
+          <text x="690" y="100" text-anchor="middle">Obscura</text>
+          <text class="sub" x="690" y="122" text-anchor="middle">shared browser</text>
+          <text class="sub" x="690" y="140" text-anchor="middle">V8 · stealth</text>
+
+          <rect class="box" x="600" y="250" width="180" height="90" rx="12"/>
+          <text x="690" y="280" text-anchor="middle">Obscura</text>
+          <text class="sub" x="690" y="302" text-anchor="middle">isolated engine</text>
+          <text class="sub" x="690" y="320" text-anchor="middle">a browser per run</text>
+
+          <rect class="box" x="880" y="70" width="200" height="90" rx="12"/>
+          <text x="980" y="110" text-anchor="middle">Websites</text>
+          <text class="sub" x="980" y="132" text-anchor="middle">rendered with JavaScript</text>
+
+          <rect class="box" x="880" y="250" width="200" height="90" rx="12"/>
+          <text x="980" y="280" text-anchor="middle">Your model</text>
+          <text class="sub" x="980" y="302" text-anchor="middle">vLLM · LM Studio · Ollama</text>
+          <text class="sub" x="980" y="320" text-anchor="middle">OpenAI-compatible API</text>
+
+          <path class="edge" d="M220 115H316" marker-end="url(#arrow)"/>
+          <text class="edge-label" x="232" y="105">MCP</text>
+          <path class="edge" d="M550 115H596" marker-end="url(#arrow)"/>
+          <text class="edge-label" x="556" y="105">CDP</text>
+          <path class="edge" d="M435 160V246" marker-end="url(#arrow)"/>
+          <path class="edge" d="M550 295H596" marker-end="url(#arrow)"/>
+          <text class="edge-label" x="556" y="285">CDP</text>
+          <path class="edge" d="M780 115H876" marker-end="url(#arrow)"/>
+          <path class="edge" d="M780 280C830 280 830 140 876 138" marker-end="url(#arrow)"/>
+          <path class="edge" d="M435 340V400H980V344" marker-end="url(#arrow)"/>
+          <text class="edge-label" x="600" y="392">chat completions (tool calling)</text>
+          <path class="edge" d="M320 145H262V295H224" marker-end="url(#arrow)"/>
+          <text class="edge-label" x="252" y="220" text-anchor="middle" transform="rotate(-90 252 220)">live view</text>
+        </svg>
+      </div>
+      <p class="arch-note">Details, including the tool queue, isolation and crash recovery, are in the <a href="docs/architecture.html">architecture notes</a>.</p>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="security">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Security</p>
+        <h2>Treat it like a remote-control port. It is built like one.</h2>
+        <p>Whoever reaches the MCP endpoint drives a browser on your machine, so the defaults are strict.</p>
+      </div>
+      <ul class="security">
+        <li><b>Loopback only.</b> The port is published on <code>127.0.0.1</code>; <code>AUTH_TOKEN</code> adds bearer-token auth for the MCP endpoint and the dashboard.</li>
+        <li><b>DNS-rebinding protection.</b> Host and Origin headers are validated, so a web page cannot reach the server through a rebound domain.</li>
+        <li><b>URL guards.</b> <code>file:</code> and <code>javascript:</code> URLs are refused, and private networks are blocked unless you allow them.</li>
+        <li><b>Locked-down container.</b> Non-root user, read-only file system, all capabilities dropped, <code>no-new-privileges</code>.</li>
+        <li><b>Isolation.</b> Sub-agents and scripts use a separate engine and start with empty browsers; scripts run in a WebAssembly sandbox.</li>
+        <li><b>Redacted logs.</b> Passwords, cookie values and credential headers are masked in the logs and on the dashboard.</li>
+      </ul>
+      <p style="margin-top:28px;color:var(--text-2)">Pages are untrusted input: text on a page can try to steer a model. Keep a human in the loop for sensitive accounts. <a href="docs/security.html">Security policy</a></p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <div class="cta">
+        <h2>Give your agent the web, safely</h2>
+        <p>Clone, build, connect. The setup guide takes you from nothing to a local model browsing in LM Studio in a few minutes.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="docs/getting-started.html">Get started <svg class="i"><use href="#i-arrow"/></svg></a>
+          <a class="btn" href="docs/tools.html"><svg class="i"><use href="#f-book"/></svg>Tool reference</a>
+          <a class="btn" href="{{REPO}}" rel="noopener"><svg class="i"><use href="#i-github"/></svg>GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+<!-- @footer -->
+</body>
+</html>

@@ -63,7 +63,8 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
 
   if (!mcpUrl) {
     const port = await freePort();
-    const cdpPort = await freePort();
+    let cdpPort = await freePort();
+    while (cdpPort === port) cdpPort = await freePort();
     logDir = mkdtempSync(path.join(tmpdir(), 'sbm-test-logs-'));
     const output: string[] = [];
     child = spawn(process.execPath, ['src/main.ts'], {
@@ -80,6 +81,8 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
         ALLOW_PRIVATE_NETWORK: 'true',
         // stop the server if the test runner dies without cleaning up
         SBM_EXIT_WITH_PARENT: '1',
+        // never the developer's own config/models.json: tests configure their model themselves
+        AGENT_MODELS_FILE: 'none',
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

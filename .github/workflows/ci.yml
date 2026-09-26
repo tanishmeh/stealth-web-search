@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -33,23 +33,39 @@ jobs:
       - run: npm run test:integration
       - run: npm run build
 
+  site:
+    name: Website build and link check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # fails on a broken link or anchor between the pages
+      - run: npm run site:build
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      # the container runs as uid 1000; the runner's checkout belongs to another user
+      - run: sudo chown 1000:1000 logs
       - name: Build and start the container
         run: docker compose -f compose.yaml -f compose.test.yaml up -d --build
       - name: Wait for the health check
         run: |
           for i in $(seq 1 60); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' stealth-browser-mcp || true)
+            status=$(docker inspect -f '{{.State.Health.Status}}' stealth-web-search || true)
             [ "$status" = "healthy" ] && exit 0
             sleep 2
           done

@@ -360,7 +360,7 @@ const KEY_PRESS = `function keyPress(key, code, text, shift, keyCode) {
   var setField = globalThis.__obscura_setFieldValue || function (e, f, v) { e[f] = v; };
   var NON_TEXT = ['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file', 'range', 'color', 'hidden'];
   var BUTTON_TYPES = ['button', 'submit', 'reset', 'image'];
-  var describe = function (n) { return { nid: n._nid, tag: n.tagName.toLowerCase(), type: (n.getAttribute('type') || '').toLowerCase(), label: labelOf(n) }; };
+  var describe = function (n) { return { nid: n._nid, tag: n.tagName.toLowerCase(), type: (n.getAttribute('type') || '').toLowerCase(), label: labelOf(n), hints: [n.getAttribute('name') || '', n.id || '', n.getAttribute('autocomplete') || ''].join(' ').trim() }; };
   var dispatch = function (target, ev) {
     try { return target.dispatchEvent(markTrusted(ev)); } catch (_e) { return !ev.defaultPrevented; }
   };
@@ -1053,6 +1053,8 @@ interface ActiveElement {
   tag: string;
   type: string;
   label: string;
+  /** name, id and autocomplete attributes (to recognise secret fields for log redaction) */
+  hints?: string;
   role?: string;
   editable?: boolean;
 }
@@ -1095,8 +1097,10 @@ async function activateNode(tab: Tab, nid: number): Promise<void> {
   else await tab.callFunction('function(){ this.click(); }', [], { objectId });
 }
 
-function describeActive(tab: Tab, el: ActiveElement): string {
-  const ref = typeof el.nid === 'number' ? tab.assignRef(el.nid, el.tag, el.label, el.type) : null;
+function describeActive(tab: Tab, el: ActiveElement | FieldInfo): string {
+  // name/id/autocomplete let log redaction recognise secret fields (OTP, card number) typed into by this ref
+  const hints = 'hints' in el && typeof el.hints === 'string' ? el.hints : [(el as FieldInfo).name, (el as FieldInfo).id, (el as FieldInfo).autocomplete].filter(Boolean).join(' ');
+  const ref = typeof el.nid === 'number' ? tab.assignRef(el.nid, el.tag, el.label, el.type, hints) : null;
   return `${kindOf(el)}${el.label ? ` ${JSON.stringify(el.label)}` : ''}${ref ? ` (ref ${ref})` : ''}`;
 }
 

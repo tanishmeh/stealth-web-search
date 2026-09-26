@@ -1,6 +1,6 @@
 import { CdpError, type CdpConnection, type CdpEvent } from '../cdp/client.ts';
 import type { Config } from '../config.ts';
-import type { ConsoleEntry, Hub, NetworkEntry } from '../dashboard/hub.ts';
+import type { BrowserChannel, ConsoleEntry, NetworkEntry } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import { truncateString } from '../util/summarize.ts';
 import { ElementNotFoundError, JavaScriptError, NavigationError, StaleRefError, ToolError, UnknownRefError } from './errors.ts';
@@ -35,6 +35,8 @@ export interface RefEntry {
   tag: string;
   type: string;
   label: string;
+  /** name, id and autocomplete attributes: used to recognise secret fields (OTP, card number…) for log redaction. */
+  hints?: string;
 }
 
 export interface ElementHandle {
@@ -100,10 +102,10 @@ export class Tab {
   private readonly log: Logger;
   private readonly consoleLog: Logger;
   private readonly networkLog: Logger;
-  private readonly hub: Hub;
+  private readonly hub: BrowserChannel;
   private readonly config: Config;
 
-  constructor(opts: { id: string; targetId: string; sessionId: string; conn: CdpConnection; log: Logger; hub: Hub; config: Config }) {
+  constructor(opts: { id: string; targetId: string; sessionId: string; conn: CdpConnection; log: Logger; hub: BrowserChannel; config: Config }) {
     this.id = opts.id;
     this.targetId = opts.targetId;
     this.sessionId = opts.sessionId;
@@ -401,7 +403,7 @@ export class Tab {
    * Assign refs to element node ids. A node keeps its ref for the lifetime of
    * the document, so the same element is always `eN` between snapshots.
    */
-  assignRef(nid: number, tag: string, label: string, type = ''): string {
+  assignRef(nid: number, tag: string, label: string, type = '', hints = ''): string {
     if (this.refsNeedCheck) {
       // A navigation happened and nobody re-checked the document: node ids may belong to a new
       // document, so start a fresh ref table rather than risk an old ref pointing at a new element.
@@ -413,10 +415,11 @@ export class Tab {
       const entry = this.refs.get(existing)!;
       entry.label = label;
       entry.type = type;
+      if (hints) entry.hints = hints;
       return existing;
     }
     const ref = `e${++this.refCounter}`;
-    this.refs.set(ref, { ref, nid, tag, type, label });
+    this.refs.set(ref, { ref, nid, tag, type, label, hints });
     this.nidToRef.set(nid, ref);
     return ref;
   }

@@ -1,4 +1,4 @@
-/* Stealth Browser MCP dashboard. No external fonts or frameworks. */
+/* Stealth Web Search dashboard. No external fonts or frameworks. */
 
 /* ------------------------------------------------------------------ tokens */
 
@@ -312,7 +312,7 @@ select {
   height: 14px;
 }
 
-.chip:hover {
+.chip:hover:where(:not(:disabled)) {
   color: var(--text);
   background: var(--hover);
 }
@@ -864,9 +864,11 @@ body.resizing {
 }
 
 .btab-id {
+  flex: none;
   margin-left: auto;
   color: var(--faint);
   font: 10.5px var(--mono);
+  white-space: nowrap;
 }
 
 .btab.placeholder {
@@ -2223,6 +2225,343 @@ body.resizing {
 }
 
 /* ------------------------------------------------------------------ responsive */
+
+/* browser picker (live view toolbar) */
+.browser-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 34%;
+  color: var(--muted);
+}
+
+.browser-pick .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.browser-pick .select {
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.browser-pick.has-others .icon {
+  color: var(--accent);
+}
+
+.browser-pick.watching-other .select {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+/* activity cards made by sub-agents */
+.act.from-agent {
+  box-shadow: inset 2px 0 0 var(--accent-soft);
+}
+
+/* agents view */
+.agents-scroll {
+  font: 12.5px/1.5 var(--font);
+}
+
+.agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--row-line);
+}
+
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.agent-kind {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: 650 10.5px/1.6 var(--font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-kind.kind-automation {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.agent-kind.kind-finder {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.agent-status {
+  height: 22px;
+}
+
+.agent-id,
+.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.agent-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chip.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.icon.rot {
+  transform: rotate(90deg);
+}
+
+.agent-task {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.agent-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  min-width: 0;
+}
+
+.agent-activity span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-thinking {
+  /* newest reasoning at the bottom: overflow is cut at the top */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: 4.6em;
+  overflow: hidden;
+  color: var(--faint);
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-script {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--info);
+}
+
+.agent-result {
+  padding: 6px 10px;
+  border-left: 2px solid var(--ok);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: var(--ok-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-error {
+  padding: 6px 10px;
+  border-left: 2px solid var(--err);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: var(--err-soft);
+  color: var(--err-text);
+  overflow-wrap: anywhere;
+}
+
+.agent-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.agent-details .code {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.agent-steps,
+.agent-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.agent-steps > li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+
+.agent-step-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.agent-steps details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.agent-call {
+  display: grid;
+  grid-template-columns: 16px auto 1fr;
+  gap: 2px 8px;
+  align-items: baseline;
+}
+
+.agent-call .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--ok);
+}
+
+.agent-call.err .icon {
+  color: var(--err);
+}
+
+.agent-call-name {
+  font: 600 12px var(--mono);
+}
+
+.agent-call-args {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font: 11.5px var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-call-preview {
+  grid-column: 2 / -1;
+  color: var(--text-2);
+  font: 11.5px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-sources > li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-sources a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.agent-quote {
+  color: var(--text-2);
+  font-style: italic;
+}
+
+.agent-quote.unverified {
+  color: var(--warn-text);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  font: 650 10.5px/1.4 var(--font);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.section-title .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.script-row {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) auto auto minmax(120px, 1fr);
+  gap: 4px 12px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--row-line);
+}
+
+.script-params {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.script-desc {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .browser-pick {
+    max-width: 45%;
+  }
+
+  .script-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .script-params {
+    grid-column: 1 / -1;
+  }
+
+  .agent-actions {
+    margin-left: 0;
+  }
+}
 
 @media (min-width: 1100px) and (max-width: 1299px) {
   .statusbar {

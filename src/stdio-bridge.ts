@@ -2,10 +2,10 @@
  * stdio <-> Streamable HTTP bridge.
  *
  * Lets MCP clients that can only launch stdio servers (Claude Desktop, older
- * IDE plugins, ...) use the running Stealth Browser MCP server, so every
+ * IDE plugins, ...) use the running Stealth Web Search server, so every
  * client shares the same browser, logs and live dashboard:
  *
- *   docker exec -i stealth-browser-mcp node dist/stdio-bridge.js
+ *   docker exec -i stealth-web-search node dist/stdio-bridge.js
  *   node dist/stdio-bridge.js http://127.0.0.1:8931/mcp
  *
  * Messages are forwarded verbatim in both directions. The bridge only adds
@@ -22,7 +22,7 @@
  * BRIDGE_LOG_LEVEL (debug|info|warn|error|silent, default info),
  * BRIDGE_CONNECT_TIMEOUT_MS (how long to retry an unreachable server during
  * the handshake, default 15000), BRIDGE_DRAIN_TIMEOUT_MS (how long to wait
- * for in-flight requests after stdin ends, default 130000).
+ * for in-flight requests after stdin ends, default 330000: longer than a script run or an agent wait).
  *
  * stdout is the JSON-RPC channel: this file must only ever log to stderr.
  */
@@ -42,7 +42,7 @@ const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40
 
 const USAGE = `Usage: stdio-bridge [MCP_URL]
 
-Bridges an MCP client speaking stdio to the Stealth Browser MCP server's
+Bridges an MCP client speaking stdio to the Stealth Web Search server's
 Streamable HTTP endpoint.
 
   MCP_URL                    server endpoint (default http://127.0.0.1:8931/mcp)
@@ -51,7 +51,7 @@ Environment:
   AUTH_TOKEN                 bearer token, when the server sets AUTH_TOKEN
   BRIDGE_LOG_LEVEL           debug | info | warn | error | silent (default info; logs go to stderr)
   BRIDGE_CONNECT_TIMEOUT_MS  retry window for an unreachable server during the handshake (default 15000)
-  BRIDGE_DRAIN_TIMEOUT_MS    after stdin ends, how long to wait for answers to requests already sent (default 130000)
+  BRIDGE_DRAIN_TIMEOUT_MS    after stdin ends, how long to wait for answers to requests already sent (default 330000)
 `;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -72,7 +72,7 @@ const threshold = LEVELS[parseLevel(process.env.BRIDGE_LOG_LEVEL)];
 
 function log(level: Exclude<Level, 'silent'>, message: string): void {
   if (LEVELS[level] < threshold) return;
-  process.stderr.write(`[stealth-browser-bridge] ${level}: ${message}\n`);
+  process.stderr.write(`[stealth-web-search-bridge] ${level}: ${message}\n`);
 }
 
 function resolveUrl(argv: string[]): URL {
@@ -109,7 +109,7 @@ function httpStatus(err: unknown): number | null {
 function describeError(err: unknown, url: URL): string {
   const code = networkErrorCode(err);
   if (code) {
-    return `Cannot reach the Stealth Browser MCP server at ${url.href} (${code}). Is the server or container running? Set MCP_URL or pass the URL as the first argument.`;
+    return `Cannot reach the Stealth Web Search server at ${url.href} (${code}). Is the server or container running? Set MCP_URL or pass the URL as the first argument.`;
   }
   const status = httpStatus(err);
   if (status === 401) return `The MCP server at ${url.href} requires a token: set AUTH_TOKEN for the bridge to the server's AUTH_TOKEN.`;
@@ -130,12 +130,13 @@ async function main(): Promise<void> {
   try {
     url = resolveUrl(argv);
   } catch (err) {
-    process.stderr.write(`[stealth-browser-bridge] error: ${(err as Error).message}\n\n${USAGE}`);
+    process.stderr.write(`[stealth-web-search-bridge] error: ${(err as Error).message}\n\n${USAGE}`);
     process.exit(2);
   }
 
   const connectTimeoutMs = envMs('BRIDGE_CONNECT_TIMEOUT_MS', 15_000);
-  const drainTimeoutMs = envMs('BRIDGE_DRAIN_TIMEOUT_MS', 130_000);
+  // longer than the longest server-side wait (SCRIPT_TIMEOUT_MS 300 s, agent tools 170 s by default)
+  const drainTimeoutMs = envMs('BRIDGE_DRAIN_TIMEOUT_MS', 330_000);
   const headers: Record<string, string> = {};
   const token = process.env.AUTH_TOKEN?.trim();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -256,7 +257,7 @@ async function main(): Promise<void> {
     reinitInFlight = (async () => {
       if (!initRequest) throw new Error('session expired before the client initialized');
       log('warn', 'the server no longer knows this MCP session (idle timeout or restart); starting a new session');
-      const response = await request({ ...initRequest, id: `stealth-browser-bridge-reinit-${++reinitCounter}` }, 30_000);
+      const response = await request({ ...initRequest, id: `stealth-web-search-bridge-reinit-${++reinitCounter}` }, 30_000);
       if (response.error) throw new Error(`re-initialize failed: ${response.error.message}`);
       if (typeof response.result?.protocolVersion === 'string') http.setProtocolVersion(response.result.protocolVersion);
       await http.send({ jsonrpc: '2.0', method: 'notifications/initialized' } as JSONRPCMessage);
@@ -362,7 +363,13 @@ async function main(): Promise<void> {
     const deadline = Date.now() + drainTimeoutMs;
     await Promise.race([dispatchChain, sleep(drainTimeoutMs)]);
     while (pending.size > 0 && !stopped && Date.now() < deadline) await sleep(25);
-    if (pending.size > 0 && !stopped) log('warn', `${reason}; giving up on ${pending.size} unanswered request(s) after ${Math.round(drainTimeoutMs / 1000)} s`);
+    if (pending.size > 0 && !stopped) {
+      log('warn', `${reason}; giving up on ${pending.size} unanswered request(s) after ${Math.round(drainTimeoutMs / 1000)} s`);
+      // the client gets an answer instead of silence
+      for (const [id, method] of [...pending]) {
+        await failRequest(id, method, `the bridge stopped waiting after ${Math.round(drainTimeoutMs / 1000)} s (BRIDGE_DRAIN_TIMEOUT_MS)`).catch(() => undefined);
+      }
+    }
     await shutdown(reason);
   };
 
@@ -380,6 +387,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(`[stealth-browser-bridge] fatal: ${(err as Error)?.stack ?? err}\n`);
+  process.stderr.write(`[stealth-web-search-bridge] fatal: ${(err as Error)?.stack ?? err}\n`);
   process.exit(1);
 });

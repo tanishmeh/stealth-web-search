@@ -29,9 +29,18 @@ const OBSCURA_ENV_DENYLIST = new Set(['OBSCURA_PROXY']);
 // the crash backoff: a child that flaps (e.g. loses an EADDRINUSE race) must not keep resetting it.
 const STABLE_AFTER_MS = 5_000;
 
+/** Engine log lines longer than this are cut before they are logged (a page can make Obscura log huge URLs). */
+const MAX_ENGINE_LINE = 8_000;
+
 /** Hide the password in URLs such as a proxy "http://user:pass@host:port" before logging or reporting them. */
 export function maskCredentials(value: string): string {
-  return value.replace(/([a-z][a-z0-9+.-]*:\/\/)([^/@\s:]+):([^/@\s]+)@/gi, '$1$2:***@');
+  // bounded quantifiers keep this linear on long input (an unbounded scheme run backtracks quadratically)
+  // '@' may appear inside the user name or password: the last '@' before the host ends the credentials
+  return value.replace(/([a-z][a-z0-9+.-]{0,31}:\/\/)([^/\s:]{1,4096}):([^/\s]{1,4096})@/gi, '$1$2:***@');
+}
+
+function capLine(text: string): string {
+  return text.length > MAX_ENGINE_LINE ? `${text.slice(0, MAX_ENGINE_LINE)}…(+${text.length - MAX_ENGINE_LINE} chars)` : text;
 }
 
 /**
@@ -105,7 +114,9 @@ export class ObscuraProcess extends EventEmitter {
 
   buildArgs(): string[] {
     const o = this.config.obscura;
-    const args = ['serve', '--host', '127.0.0.1', '--port', String(o.cdpPort), '--max-connections', '8'];
+    // one CDP connection per browser: the main one, each running sub-agent and its script test, script runs
+    const connections = Math.max(16, 1 + 2 * this.config.agent.maxConcurrent + 8);
+    const args = ['serve', '--host', '127.0.0.1', '--port', String(o.cdpPort), '--max-connections', String(connections)];
     if (o.stealth) args.push('--stealth');
     if (o.proxy) args.push('--proxy', o.proxy);
     if (o.userAgent) args.push('--user-agent', o.userAgent);
@@ -196,7 +207,7 @@ export class ObscuraProcess extends EventEmitter {
 
     createInterface({ input: child.stdout! }).on('line', (line) => {
       const clean = line.replace(ANSI, '').trimEnd();
-      if (clean.trim()) this.engineLog.debug({ stream: 'stdout' }, maskCredentials(clean));
+      if (clean.trim()) this.engineLog.debug({ stream: 'stdout' }, capLine(maskCredentials(clean)));
     });
 
     // One record per engine message: continuation lines (e.g. a JS stack trace) are appended to the
@@ -209,7 +220,7 @@ export class ObscuraProcess extends EventEmitter {
       if (!pending) return;
       const { level, fields, lines } = pending;
       pending = null;
-      this.engineLog[level](lines.length > 1 ? { ...fields, lines: lines.length } : fields, maskCredentials(lines.join('\n')));
+      this.engineLog[level](lines.length > 1 ? { ...fields, lines: lines.length } : fields, capLine(maskCredentials(lines.join('\n'))));
     };
     const stderr = createInterface({ input: child.stderr! });
     stderr.on('line', (line) => {

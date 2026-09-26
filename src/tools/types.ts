@@ -1,10 +1,12 @@
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/server';
 import type * as z from 'zod';
+import type { AgentManager } from '../agents/manager.ts';
 import type { Browser } from '../browser/browser.ts';
 import type { Tab } from '../browser/tab.ts';
 import type { Config } from '../config.ts';
 import type { Hub, PointerData } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
+import type { ScriptService } from '../scripts/service.ts';
 
 export type { CallToolResult } from '@modelcontextprotocol/server';
 
@@ -12,8 +14,11 @@ export type { CallToolResult } from '@modelcontextprotocol/server';
  * Tool groups can be enabled selectively with TOOLSETS (e.g. `core,content`),
  * which helps small local models that struggle with large tool lists.
  */
-export const TOOL_GROUPS = ['core', 'content', 'forms', 'tabs', 'state', 'debug', 'capture'] as const;
+export const TOOL_GROUPS = ['core', 'content', 'forms', 'tabs', 'state', 'debug', 'capture', 'agents', 'scripts'] as const;
 export type ToolGroup = (typeof TOOL_GROUPS)[number];
+
+/** MCP progress notification for the calling client (long-running agent and script tools). */
+export type ProgressFn = (p: { progress: number; total?: number; message?: string }) => Promise<void>;
 
 export interface ToolContext {
   browser: Browser;
@@ -31,6 +36,14 @@ export interface ToolContext {
    * arguments stay redacted in logs and on the dashboard (LOG_REDACT_SECRETS=true).
    */
   markSensitive(): void;
+  /** Sub-agent runs; null when no agent model is configured. */
+  agents: AgentManager | null;
+  /** Stored automation scripts. */
+  scripts: ScriptService | null;
+  /** Report progress to the calling client, when it asked for progress notifications. */
+  progress?: ProgressFn;
+  /** Aborted when the calling client cancels the request. */
+  signal?: AbortSignal;
 }
 
 export interface ToolDefinition<S extends z.ZodObject = z.ZodObject> {
@@ -45,6 +58,11 @@ export interface ToolDefinition<S extends z.ZodObject = z.ZodObject> {
    * `args` lists argument names whose values are redacted, `result` hides the whole result text.
    */
   sensitive?: { args?: string[]; result?: boolean };
+  /**
+   * The tool does not use the main browser (sub-agent and script tools): it runs outside the
+   * browser queue and TOOL_TIMEOUT_MS, and bounds its own waiting.
+   */
+  concurrent?: boolean;
   handler: (args: z.output<S>, ctx: ToolContext) => Promise<CallToolResult>;
 }
 

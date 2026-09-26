@@ -101,6 +101,8 @@ interface DetectedField {
   tag: string;
   type: string;
   name: string;
+  /** id and autocomplete attributes */
+  hints?: string;
   label: string;
   value: string;
   checked: boolean;
@@ -143,7 +145,7 @@ export const detectForms = defineTool({
       method: f.method,
       fields: f.fields.map((field) => {
         const entry: Record<string, unknown> = {
-          ref: typeof field.nid === 'number' ? tab.assignRef(field.nid, field.tag, field.label, field.type) : null,
+          ref: typeof field.nid === 'number' ? tab.assignRef(field.nid, field.tag, field.label, field.type, `${field.name} ${field.hints ?? ''}`.trim()) : null,
           tag: field.tag,
           type: field.type,
           name: field.name,

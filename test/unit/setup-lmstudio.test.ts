@@ -26,7 +26,7 @@ function run(args: string[], env: Record<string, string> = {}) {
 const EXISTING = {
   mcpServers: {
     brave: { command: 'npx', args: ['-y', 'brave-mcp'], env: { BRAVE_API_KEY: 'BSA-secret-key-123' } },
-    'stealth-browser': { url: 'http://127.0.0.1:8931/mcp', headers: { Authorization: 'Bearer tok-SECRET-999' }, timeout: 60000, extra: true },
+    'stealth-web-search': { url: 'http://127.0.0.1:8931/mcp', headers: { Authorization: 'Bearer tok-SECRET-999' }, timeout: 60000, extra: true },
   },
   otherTopLevel: 1,
 };
@@ -39,8 +39,8 @@ describe('setup-lmstudio.mjs', () => {
     const file = path.join(h, 'cfg', 'mcp.json');
     const r = run(['--config', file]);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(readFileSync(file, 'utf8'), `${JSON.stringify({ mcpServers: { 'stealth-browser': { url: 'http://127.0.0.1:8931/mcp', timeout: 180000 } } }, null, 2)}\n`);
-    assert.match(r.stdout, /Added "stealth-browser"/);
+    assert.equal(readFileSync(file, 'utf8'), `${JSON.stringify({ mcpServers: { 'stealth-web-search': { url: 'http://127.0.0.1:8931/mcp', timeout: 180000 } } }, null, 2)}\n`);
+    assert.match(r.stdout, /Added "stealth-web-search"/);
   });
 
   test('merges into an existing file, keeps other servers and writes a backup', () => {
@@ -52,7 +52,7 @@ describe('setup-lmstudio.mjs', () => {
     const data = JSON.parse(readFileSync(file, 'utf8'));
     assert.deepEqual(data.mcpServers.brave, EXISTING.mcpServers.brave);
     assert.equal(data.otherTopLevel, 1);
-    assert.deepEqual(data.mcpServers['stealth-browser'], {
+    assert.deepEqual(data.mcpServers['stealth-web-search'], {
       url: 'http://127.0.0.1:8931/mcp',
       headers: { Authorization: 'Bearer tok-SECRET-999' },
       timeout: 200000,
@@ -87,7 +87,26 @@ describe('setup-lmstudio.mjs', () => {
     const r = run(['--config', link]);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(lstatSync(link).isSymbolicLink(), true, 'the symlink is kept');
-    assert.ok(JSON.parse(readFileSync(real, 'utf8')).mcpServers['stealth-browser'], 'the real file was updated');
+    assert.ok(JSON.parse(readFileSync(real, 'utf8')).mcpServers['stealth-web-search'], 'the real file was updated');
+  });
+
+  test('writes through a symlink whose target does not exist yet, and through a chain of links', () => {
+    const h = home();
+    const dangling = path.join(h, 'mcp.json');
+    symlinkSync('dotfiles/mcp.json', dangling); // relative, target missing
+    let r = run(['--config', dangling]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(lstatSync(dangling).isSymbolicLink(), true, 'the dangling link is kept');
+    assert.ok(JSON.parse(readFileSync(path.join(h, 'dotfiles', 'mcp.json'), 'utf8')).mcpServers['stealth-web-search']);
+
+    const h2 = home();
+    const first = path.join(h2, 'a.json');
+    symlinkSync(path.join(h2, 'b.json'), first);
+    symlinkSync(path.join(h2, 'store', 'mcp.json'), path.join(h2, 'b.json'));
+    r = run(['--config', first]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(lstatSync(path.join(h2, 'b.json')).isSymbolicLink(), true, 'the middle link is kept');
+    assert.ok(JSON.parse(readFileSync(path.join(h2, 'store', 'mcp.json'), 'utf8')).mcpServers['stealth-web-search']);
   });
 
   test('a token makes a world-readable file private to the user', () => {
@@ -98,7 +117,7 @@ describe('setup-lmstudio.mjs', () => {
     const r = run(['--config', file, '--token', 's3cret-token']);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(statSync(file).mode & 0o777, 0o600);
-    assert.equal(JSON.parse(readFileSync(file, 'utf8')).mcpServers['stealth-browser'].headers.Authorization, 'Bearer s3cret-token');
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).mcpServers['stealth-web-search'].headers.Authorization, 'Bearer s3cret-token');
   });
 
   test('finds LM Studio through ~/.lmstudio-home-pointer', () => {
@@ -107,7 +126,7 @@ describe('setup-lmstudio.mjs', () => {
     writeFileSync(path.join(h, '.lmstudio-home-pointer'), `${lmHome}\n`);
     const r = run([], { HOME: h, USERPROFILE: h });
     assert.equal(r.code, 0, r.stderr);
-    assert.ok(JSON.parse(readFileSync(path.join(lmHome, 'mcp.json'), 'utf8')).mcpServers['stealth-browser']);
+    assert.ok(JSON.parse(readFileSync(path.join(lmHome, 'mcp.json'), 'utf8')).mcpServers['stealth-web-search']);
   });
 
   test('leaves invalid JSON untouched and rejects bad options', () => {
@@ -118,14 +137,14 @@ describe('setup-lmstudio.mjs', () => {
     assert.equal(r.code, 1);
     assert.match(r.stderr, /not valid JSON/);
     assert.equal(readFileSync(file, 'utf8'), '{ not json');
-    assert.equal(run(['--config', file, '--name', 'Stealth_Browser']).code, 2);
+    assert.equal(run(['--config', file, '--name', 'Stealth_Web_Search']).code, 2);
     assert.equal(run(['--config', file, '--timeout', '1.5']).code, 2);
   });
 
   test('--print shows a deeplink whose config decodes to the entry', () => {
     const r = run(['--print', '--url', 'http://127.0.0.1:9000/mcp']);
     assert.equal(r.code, 0, r.stderr);
-    const config = /lmstudio:\/\/add_mcp\?name=stealth-browser&config=([^\s]+)/.exec(r.stdout)?.[1];
+    const config = /lmstudio:\/\/add_mcp\?name=stealth-web-search&config=([^\s]+)/.exec(r.stdout)?.[1];
     assert.ok(config, r.stdout);
     assert.deepEqual(JSON.parse(Buffer.from(decodeURIComponent(config), 'base64').toString('utf8')), { url: 'http://127.0.0.1:9000/mcp', timeout: 180000 });
   });

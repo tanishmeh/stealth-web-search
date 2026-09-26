@@ -1,0 +1,61 @@
+name: Feature request
+description: Suggest a new feature or an improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [documentation](https://tanishmeh.github.io/stealth-web-search/) and the existing issues first: the feature may already exist or be planned.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How it could work. For a new tool or setting, describe its name, parameters and result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Workarounds or other approaches you considered.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Browser tools
+        - Sub-agents
+        - Automation scripts
+        - Model configuration (config/models.json)
+        - LM Studio integration
+        - MCP clients and transports
+        - Dashboard
+        - Logging
+        - Docker and deployment
+        - Documentation
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Example sites, client or model details, or anything else that helps.
+    validations:
+      required: false

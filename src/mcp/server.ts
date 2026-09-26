@@ -5,12 +5,14 @@ import type { Browser } from '../browser/browser.ts';
 import { ToolError } from '../browser/errors.ts';
 import { CdpDisconnectedError, CdpTimeoutError } from '../cdp/client.ts';
 import type { Config } from '../config.ts';
-import type { ActivityEntry, Hub } from '../dashboard/hub.ts';
+import type { AgentManager } from '../agents/manager.ts';
+import { MAIN_BROWSER, type ActivityEntry, type Hub } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import { SERVER_NAME, SERVER_VERSION } from '../version.ts';
 import { previewToolResult, summarize } from '../util/summarize.ts';
 import { ALL_TOOLS, enabledTools } from '../tools/index.ts';
-import { errorResult, type ToolContext, type ToolDefinition } from '../tools/types.ts';
+import type { ScriptService } from '../scripts/service.ts';
+import { errorResult, type ProgressFn, type ToolContext, type ToolDefinition } from '../tools/types.ts';
 import type { SessionRegistry } from './sessions.ts';
 
 export interface McpDeps {
@@ -19,6 +21,24 @@ export interface McpDeps {
   hub: Hub;
   browser: Browser;
   sessions: SessionRegistry;
+  /** Sub-agent runs (null when AGENT_LLM_URL is not set). */
+  agents?: AgentManager | null;
+  /** Stored automation scripts. */
+  scripts?: ScriptService | null;
+}
+
+/** How a tool call is attributed and where it acts, for calls made by sub-agents and scripts. */
+export interface RunToolOptions {
+  /** Browser to act on (default: the main browser). */
+  browser?: Browser;
+  /** Label shown in logs and on the dashboard instead of the MCP client name. */
+  client?: string;
+  /** Sub-agent run that makes the call. */
+  agentRunId?: string;
+  /** MCP progress notifications for the calling client, when it asked for them. */
+  progress?: ProgressFn;
+  /** Aborted when the client cancels the request. */
+  signal?: AbortSignal;
 }
 
 export const SERVER_INSTRUCTIONS = `This server controls a real (headless, stealthy) web browser that fully runs JavaScript.
@@ -30,6 +50,23 @@ Typical workflow:
 Prefer refs over CSS selectors. Use browser_markdown for long articles, browser_extract for structured data,
 browser_wait_for / browser_wait_for_text when content loads asynchronously, and browser_screenshot to check visuals.
 All tabs and cookies are shared by every client of this server; a human may be watching the browser live.`;
+
+const AGENT_INSTRUCTIONS = `Sub-agents: you can hand whole browser jobs to an agent that works in its own isolated browser (own tabs and cookies) and reports back.
+- agent_run: give a TASK and the OUTPUT you want back; the agent does the task and returns that output.
+- agent_automate: the agent does the task, then writes a reusable script for it, verifies it and returns the script's name, parameters and usage. Run it later without any model via script_run.
+- agent_find: give an OBJECTIVE; the agent searches the web, cross-checks several sources and returns the answer with the source links it cited.
+Runs can take minutes. If a call returns "still running", call agent_wait with the run_id to collect the result.`;
+
+const SCRIPT_INSTRUCTIONS = `Stored automation scripts (script_list, script_get, script_run, script_delete) replay a recorded browser job with new parameters, without a model.`;
+
+/** Server instructions for the enabled tools. */
+export function serverInstructions(config: Config): string {
+  const parts = [SERVER_INSTRUCTIONS];
+  const tools = new Set(enabledTools(config).map((t) => t.group));
+  if (tools.has('agents')) parts.push(AGENT_INSTRUCTIONS);
+  if (tools.has('scripts')) parts.push(SCRIPT_INSTRUCTIONS);
+  return parts.join('\n\n');
+}
 
 const SENSITIVE_TARGET = /pass(word)?|passwd|pwd|secret|token|otp|one-time|\bpin\b|cvv|cvc|csc|card-?number|cc-?(num|number)/i;
 const TYPING_TOOLS = new Set(['browser_fill', 'browser_type', 'browser_press_key']);
@@ -47,11 +84,12 @@ export interface RedactedArgs {
 
 type Classification = 'secret' | 'safe' | 'unknown';
 
-function classifyTarget(target: Record<string, any>, browser: Browser): Classification {
+function classifyTarget(target: Record<string, any>, browser: Browser, force: boolean): Classification {
+  if (force) return 'secret';
   if (typeof target.selector === 'string' && SENSITIVE_TARGET.test(target.selector)) return 'secret';
   if (typeof target.ref === 'string') {
     const info = browser.activeTab?.refInfo(target.ref);
-    if (info) return info.type === 'password' || SENSITIVE_TARGET.test(info.label) ? 'secret' : 'safe';
+    if (info) return info.type === 'password' || SENSITIVE_TARGET.test(`${info.label} ${info.hints ?? ''}`) ? 'secret' : 'safe';
   }
   return 'unknown';
 }
@@ -61,7 +99,7 @@ function classifyTarget(target: Record<string, any>, browser: Browser): Classifi
  * values typed into password-like fields and arguments a tool declares sensitive (cookie values,
  * storage state). The real arguments always reach the tool.
  */
-export function redactArgs(toolName: string, args: Record<string, any>, browser: Browser, enabled: boolean): RedactedArgs {
+export function redactArgs(toolName: string, args: Record<string, any>, browser: Browser, enabled: boolean, force = false): RedactedArgs {
   if (!enabled || !args || typeof args !== 'object') return { args, provisional: false };
   let provisional = false;
   let out: Record<string, any> = args;
@@ -73,7 +111,7 @@ export function redactArgs(toolName: string, args: Record<string, any>, browser:
   }
 
   const scrubTyped = (a: Record<string, any>, keys: string[]): Record<string, any> => {
-    const kind = classifyTarget(a, browser);
+    const kind = classifyTarget(a, browser, force);
     if (kind === 'safe') return a;
     const hidden = keys.filter((k) => typeof a[k] === 'string' && a[k] !== '');
     if (!hidden.length) return a;
@@ -83,7 +121,9 @@ export function redactArgs(toolName: string, args: Record<string, any>, browser:
     return copy;
   };
 
-  if (toolName === 'browser_fill_form' && Array.isArray(out.fields)) {
+  if (toolName === 'script_run' && out.params && typeof out.params === 'object') {
+    out = { ...out, params: redactParams(out.params as Record<string, unknown>) };
+  } else if (toolName === 'browser_fill_form' && Array.isArray(out.fields)) {
     out = { ...out, fields: out.fields.map((f: unknown) => (f && typeof f === 'object' ? scrubTyped(f as Record<string, any>, ['value']) : f)) };
   } else if (TYPING_TOOLS.has(toolName)) {
     // a single character sent with press_key could be part of a password; named keys (Enter, Tab…) are not
@@ -91,6 +131,13 @@ export function redactArgs(toolName: string, args: Record<string, any>, browser:
     if (keys.length) out = scrubTyped(out, keys);
   }
   return { args: out, provisional };
+}
+
+/** Script parameters with password-, token-, OTP- or card-like names masked (for logs and the dashboard). */
+export function redactParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(params ?? {})) out[k] = SENSITIVE_TARGET.test(k) && v !== undefined && v !== null && v !== '' ? REDACTED : v;
+  return out;
 }
 
 /** Result shown in logs/dashboard for tools whose results contain secrets. */
@@ -135,13 +182,22 @@ export async function runTool(
   args: Record<string, unknown>,
   sessionId: string | null,
   deps: McpDeps,
+  opts: RunToolOptions = {},
 ): Promise<CallToolResult> {
-  const { browser, hub, config, sessions } = deps;
+  const { hub, config, sessions } = deps;
+  const browser = opts.browser ?? deps.browser;
   const callId = randomUUID().slice(0, 8);
   // A sessionful (2025-era) call gets its client from the session registry; a stateless (modern) call
   // gets it from the per-request scope, so its activity/logs are not "client:null".
-  const client = sessionId ? sessions.clientLabel(sessionId) : (modernScope.getStore()?.client ?? null);
-  const log = deps.log.child({ component: 'tool', tool: tool.name, callId, sessionId: sessionId ?? undefined });
+  const client = opts.client ?? (sessionId ? sessions.clientLabel(sessionId) : (modernScope.getStore()?.client ?? null));
+  const log = deps.log.child({
+    component: 'tool',
+    tool: tool.name,
+    callId,
+    sessionId: sessionId ?? undefined,
+    ...(browser.id !== MAIN_BROWSER ? { browserId: browser.id } : {}),
+    ...(opts.agentRunId ? { agentRunId: opts.agentRunId } : {}),
+  });
   const redaction = redactArgs(tool.name, args, browser, config.log.redactSecrets);
   const safeArgs = summarize(redaction.args, { maxString: config.log.maxStringLength });
   let handledSecret = false;
@@ -149,18 +205,22 @@ export async function runTool(
   sessions.beginCall(sessionId);
 
   const queuedAt = Date.now();
+  // Agent and script tools never touch the main browser: they run outside its queue.
+  const concurrent = Boolean(tool.concurrent);
   const entry: ActivityEntry = {
     id: callId,
     tool: tool.name,
-    status: browser.mutex.busy ? 'queued' : 'running',
+    status: !concurrent && browser.mutex.busy ? 'queued' : 'running',
     args: safeArgs,
     sessionId,
     client,
-    tabId: browser.activeTab?.id ?? null,
+    tabId: concurrent ? null : (browser.activeTab?.id ?? null),
     startedAt: new Date().toISOString(),
   };
+  if (browser.id !== MAIN_BROWSER) entry.browserId = browser.id;
+  if (opts.agentRunId) entry.agentRunId = opts.agentRunId;
   hub.publishActivity(entry);
-  log.info({ args: safeArgs, client, queued: browser.mutex.queued }, `tool call ${tool.name}`);
+  log.info({ args: safeArgs, client, queued: concurrent ? 0 : browser.mutex.queued }, `tool call ${tool.name}`);
 
   const ctx: ToolContext = {
     browser,
@@ -171,19 +231,28 @@ export async function runTool(
     session: { id: sessionId, client },
     tab: () => browser.ensureActiveTab(),
     pointer: (tab, x, y, kind, label) =>
-      hub.publishPointer({ tabId: tab.id, x: Math.round(x), y: Math.round(y), kind, label, at: new Date().toISOString() }),
+      browser.channel.publishPointer({ tabId: tab.id, x: Math.round(x), y: Math.round(y), kind, label, at: new Date().toISOString() }),
     markSensitive: () => {
       handledSecret = true;
     },
+    agents: deps.agents ?? null,
+    scripts: deps.scripts ?? null,
+    progress: opts.progress,
+    signal: opts.signal,
   };
 
   let startedAt = Date.now();
   let result: CallToolResult;
   try {
-    result = await new Promise<CallToolResult>((resolve, reject) => {
+    if (concurrent) result = await tool.handler(args, ctx);
+    else result = await new Promise<CallToolResult>((resolve, reject) => {
       browser.mutex
         .run(async () => {
           startedAt = Date.now();
+          // a sub-agent or script run that was stopped while this call waited in the queue
+          if (opts.signal?.aborted && (opts.agentRunId || opts.browser)) {
+            return void resolve(errorResult('Skipped: the run was stopped before this call started.'));
+          }
           if (entry.status === 'queued') {
             // earlier calls finished: show this one as running from now on
             entry.status = 'running';
@@ -212,7 +281,7 @@ export async function runTool(
         })
         .catch(reject);
     });
-    const notice = browser.consumeResetNotice(sessionId);
+    const notice = concurrent ? null : browser.consumeResetNotice(sessionId);
     if (notice) result = { ...result, content: [{ type: 'text', text: `Note: ${notice}` }, ...result.content] };
   } catch (err) {
     if (err instanceof ToolError) {
@@ -235,9 +304,14 @@ export async function runTool(
 
   const durationMs = Date.now() - startedAt;
   const redactOn = config.log.redactSecrets;
-  // selector-based typing was hidden up front; show it now unless the tool hit a secret field
+  // selector-based typing was hidden up front; show it now unless the tool hit a secret field. A field
+  // the tool found to be secret (e.g. by its autocomplete attribute) stays hidden even if it looked safe.
   const loggedArgs =
-    redaction.provisional && !handledSecret ? summarize(args, { maxString: config.log.maxStringLength }) : safeArgs;
+    redaction.provisional && !handledSecret
+      ? summarize(args, { maxString: config.log.maxStringLength })
+      : handledSecret && config.log.redactSecrets
+        ? summarize(redactArgs(tool.name, args, browser, true, true).args, { maxString: config.log.maxStringLength })
+        : safeArgs;
   const hideResult = redactOn && Boolean(tool.sensitive?.result) && !result.isError;
   const preview = hideResult ? hiddenResultNote(result) : previewToolResult(result as any);
   const done: ActivityEntry = {
@@ -248,8 +322,8 @@ export async function runTool(
     durationMs,
     preview,
     error: result.isError ? preview : undefined,
-    tabId: browser.activeTab?.id ?? entry.tabId,
-    url: browser.activeTab?.url,
+    tabId: concurrent ? null : (browser.activeTab?.id ?? entry.tabId),
+    url: concurrent ? undefined : browser.activeTab?.url,
   };
   hub.publishActivity(done);
   log.info(
@@ -262,15 +336,15 @@ export async function runTool(
     },
     `tool result ${tool.name} (${durationMs} ms)${result.isError ? ' [error]' : ''}`,
   );
-  void browser.liveView.afterAction(startedAt).catch(() => undefined);
+  if (!concurrent) void browser.liveView.afterAction(startedAt).catch(() => undefined);
   return result;
 }
 
 /** Build an McpServer with all enabled tools. One instance is created per MCP session / modern request. */
 export function createMcpServer(deps: McpDeps): McpServer {
   const server = new McpServer(
-    { name: SERVER_NAME, version: SERVER_VERSION, title: 'Stealth Browser MCP' },
-    { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
+    { name: SERVER_NAME, version: SERVER_VERSION, title: 'Stealth Web Search' },
+    { capabilities: { tools: {}, logging: {} }, instructions: serverInstructions(deps.config) },
   );
   for (const tool of enabledTools(deps.config)) {
     server.registerTool(
@@ -280,9 +354,15 @@ export function createMcpServer(deps: McpDeps): McpServer {
         description: tool.description,
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
-        _meta: { 'stealth-browser-mcp/group': tool.group },
+        _meta: { 'stealth-web-search/group': tool.group },
       },
-      async (args: Record<string, unknown>, ctx: { sessionId?: string; mcpReq?: { id?: string | number } }) => {
+      async (
+        args: Record<string, unknown>,
+        ctx: {
+          sessionId?: string;
+          mcpReq?: { id?: string | number; _meta?: { progressToken?: string | number }; signal?: AbortSignal; notify?: (n: any) => Promise<void> };
+        },
+      ) => {
         if (ctx?.sessionId && ctx.mcpReq?.id !== undefined) {
           dispatchedCalls.add(`${ctx.sessionId}:${String(ctx.mcpReq.id)}`);
           if (dispatchedCalls.size > 10_000) dispatchedCalls.clear();
@@ -291,7 +371,19 @@ export function createMcpServer(deps: McpDeps): McpServer {
           // apart from a call the SDK rejected before it ran
           modernScope.getStore()?.dispatched.add(String(ctx.mcpReq.id));
         }
-        return runTool(tool, args ?? {}, ctx?.sessionId ?? null, deps);
+        const token = ctx?.mcpReq?._meta?.progressToken;
+        const notify = ctx?.mcpReq?.notify;
+        const progress: ProgressFn | undefined =
+          tool.concurrent && token !== undefined && notify
+            ? async (p) => {
+                try {
+                  await notify({ method: 'notifications/progress', params: { progressToken: token, ...p } });
+                } catch {
+                  // the client went away; the run continues and can be collected later
+                }
+              }
+            : undefined;
+        return runTool(tool, args ?? {}, ctx?.sessionId ?? null, deps, { progress, signal: ctx?.mcpReq?.signal });
       },
     );
   }

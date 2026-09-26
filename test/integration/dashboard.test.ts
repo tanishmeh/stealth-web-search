@@ -108,7 +108,7 @@ describe('dashboard', () => {
     const page = await fetch(`${srv.baseUrl}/`, { headers: authHeaders() });
     assert.equal(page.status, 200);
     const html = await page.text();
-    assert.match(html, /<title>Stealth Browser MCP<\/title>/);
+    assert.match(html, /<title>Stealth Web Search<\/title>/);
     for (const asset of ['/assets/app.js', '/assets/styles.css', '/assets/theme.js', '/assets/favicon.svg']) {
       assert.ok(html.includes(asset), `index.html references ${asset}`);
     }
@@ -145,7 +145,7 @@ describe('dashboard', () => {
 
   test('state endpoint describes server, engine, browser, live view and history', async () => {
     const state = await getState(srv.baseUrl);
-    assert.equal(state.server.name, 'stealth-browser-mcp');
+    assert.equal(state.server.name, 'stealth-web-search');
     assert.match(state.server.mcpUrl, /\/mcp$/);
     assert.equal(typeof state.server.uptimeSec, 'number');
     assert.equal(state.obscura.ready, true);

@@ -1,8 +1,16 @@
 # Configuration
 
-All settings are environment variables. With Docker Compose, put them in a `.env` file next to `compose.yaml` (start from [`.env.example`](../.env.example)) and run `docker compose up -d` again. Invalid values stop the server at startup with a message naming the variable.
+All settings are environment variables. With Docker Compose, put them in a `.env` file next to `compose.yaml` (start from [`.env.example`](../.env.example)) and run `docker compose up -d` again. Invalid values stop the server at startup with a message naming the variable. The sub-agents' model can also come from a JSON file, `config/models.json`: see [MODELS.md](MODELS.md).
 
-Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`.
+To check the configuration without starting the server, run it in Docker, where it sees `.env` and `config/models.json` exactly as the server does:
+
+```bash
+docker compose run --rm --no-deps stealth-web-search node dist/check-config.js --ping
+```
+
+`--ping` also checks that the sub-agents' model endpoint answers. Without Docker, run `npm run config:check -- --ping`; it reads the variables of your shell, and `--env-file .env` loads a `.env` file first.
+
+Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`. Durations (`*_MS`) are in milliseconds, at most 2147483647 (about 24.8 days).
 
 ## HTTP server
 
@@ -16,7 +24,8 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`.
 | `ALLOWED_HOSTS` | — | Extra accepted `Host` header names (DNS-rebinding protection). `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` are always accepted |
 | `DASHBOARD_ENABLED` | `true` | Serve the live dashboard at `/` |
 | `SESSION_IDLE_TIMEOUT_MS` | `1800000` | Close MCP sessions idle for this long (`0` disables). Clients reconnect automatically |
-| `TOOLSETS` | `all` | Tool groups to expose: `core`, `content`, `forms`, `tabs`, `state`, `debug`, `capture`. Individual tool names are also accepted. See [TOOLS.md](TOOLS.md) |
+| `MAX_SESSIONS` | `100` | Maximum concurrent MCP sessions; further `initialize` requests get HTTP 503 |
+| `TOOLSETS` | `all` | Tool groups to expose: `core`, `content`, `forms`, `tabs`, `state`, `debug`, `capture`, `agents`, `scripts`. Individual tool names are also accepted. See [TOOLS.md](TOOLS.md) |
 
 > **Under Docker Compose, `HOST` and `PORT` are fixed by `compose.yaml`.** The server inside the container must bind `0.0.0.0:8931` (the port the image publishes and health-checks), so `compose.yaml` sets `HOST` and `PORT` explicitly and they override anything you put in `.env`. To change the port you reach the server on, set `HOST_PORT` (published on `127.0.0.1` only), not `PORT`. To change the base URL shown in logs and on the dashboard, set `PUBLIC_URL` in `.env` — Compose respects it and falls back to `http://127.0.0.1:${HOST_PORT}` when it is unset. Running the server directly (`npm run dev`), `HOST` and `PORT` work as documented above.
 
@@ -28,10 +37,11 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`.
 | `OBSCURA_PROXY` | — | `http://…` or `socks5://user:pass@host:port` for all browser traffic |
 | `OBSCURA_USER_AGENT` | — | Custom User-Agent |
 | `ALLOW_PRIVATE_NETWORK` | `false` | Allow browsing `localhost`, RFC 1918 addresses and `host.docker.internal`. Blocked by default as SSRF protection |
-| `OBSCURA_STORAGE_DIR` | — | Persist cookies in this directory. Mount a volume there, for example `./data:/data` with `OBSCURA_STORAGE_DIR=/data` |
+| `OBSCURA_STORAGE_DIR` | — | Persist cookies of the main browser in this directory. Mount a volume there, for example `./data:/data/cookies` with `OBSCURA_STORAGE_DIR=/data/cookies` (on Linux the folder must be writable by uid 1000: `mkdir -p data && sudo chown -R 1000:1000 data`). Sub-agent and script browsers run on the second engine, which has no storage, so they never see these cookies |
 | `OBSCURA_NAV_TIMEOUT_MS` | `30000` | Maximum time for one navigation, including redirects and JS-triggered navigations |
 | `OBSCURA_JS_WATCHDOG_MS` | `30000` | Stops page JavaScript that runs synchronously for longer than this (`0` = off) |
 | `OBSCURA_RESTART_ON_CRASH` | `true` | Restart Obscura with backoff if it exits unexpectedly |
+| `OBSCURA_SEPARATE_ENGINE` | `true` | Run sub-agent and script browsers on a second Obscura process, so a page that crashes the engine there never resets the main browser. Always on with `OBSCURA_STORAGE_DIR` (that engine never persists cookies). Not available with `OBSCURA_CDP_URL` |
 | `OBSCURA_LOG_FILTER` | `warn,obscura=info,obscura_cdp=info,obscura_browser=warn` | Obscura's `RUST_LOG` filter. Its output appears in our logs as `component: obscura-engine` |
 | `OBSCURA_EXTRA_ARGS` | — | Extra arguments for `obscura serve` (quotes supported) |
 | `OBSCURA_CDP_PORT` | random | Internal CDP port (container loopback only). Left unset, the managed engine picks a random free port each start; set it to pin a fixed port |
@@ -64,6 +74,41 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`.
 | `LIVE_VIEW_ENABLED` | `true` | Stream the agent's tab to the dashboard while someone is watching |
 | `LIVE_VIEW_QUALITY` | `60` | JPEG quality of streamed frames |
 | `LIVE_VIEW_MAX_WIDTH` / `LIVE_VIEW_MAX_HEIGHT` | `1280` / `720` | Maximum frame size |
+
+## Sub-agents
+
+See [AGENTS.md](AGENTS.md). A models file (`config/models.json`, see [MODELS.md](MODELS.md)) or `AGENT_LLM_URL` enables the `agent_run`, `agent_automate` and `agent_find` tools. The models file is the recommended way to describe the model. With a models file, the `AGENT_LLM_*` variables you set override the matching fields of the file ([which ones](MODELS.md#environment-overrides)).
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_MODELS_FILE` | `config/models.json` if it exists (`/app/config/models.json` in Docker) | The models file for the sub-agents. `none` ignores the file. A path that does not exist stops the server. See [MODELS.md](MODELS.md#where-the-file-is-read-from) |
+| `AGENT_LLM_URL` | — | OpenAI-compatible chat completions endpoint: a base URL (`http://host:8000/v1`) or the full `…/v1/chat/completions` URL. Reached from inside the container: use `http://host.docker.internal:<port>/v1` for a model server on your machine |
+| `AGENT_LLM_API_KEY` | — | Sent as `Authorization: Bearer <key>` |
+| `AGENT_LLM_MODEL` | first listed | Model id; default: the first model `GET /v1/models` lists. With a models file, it selects a model in the file by id, `<provider name>/<id>` or display name (default: the first model with tool calling) |
+| `AGENT_LLM_TEMPERATURE` / `AGENT_LLM_TOP_P` | `0.4` / `0.95` | Sampling; `none` leaves the field out (OpenAI reasoning models only accept their defaults) |
+| `AGENT_LLM_MAX_TOKENS_FIELD` | `max_tokens` | Name of the output-token limit field: `max_tokens` (vLLM, LM Studio, Ollama, llama.cpp) or `max_completion_tokens` (OpenAI reasoning models) |
+| `AGENT_LLM_REASONING_EFFORT` | `medium` | Sent as `reasoning_effort` (`low`, `medium`, `high`, `xhigh`, …); `none` leaves it out |
+| `AGENT_LLM_THINKING` | — | `true`/`false` sends `chat_template_kwargs.enable_thinking` (Qwen-style templates); empty leaves the model default |
+| `AGENT_LLM_STREAMING` | `true` | Stream responses (reasoning appears live on the dashboard; only silence counts towards the timeout) |
+| `AGENT_LLM_EXTRA_BODY` | — | JSON object merged into every request, e.g. `{"top_k": 20}` |
+| `AGENT_LLM_TIMEOUT_MS` | `300000` | Longest silence from the endpoint before a request fails (retried up to 3 times on network errors, 408, 429 and 5xx) |
+| `AGENT_CONTEXT_TOKENS` | `65536` | Context budget of one run; the transcript is compacted to fit. Capped by the model's `contextWindow` in the models file |
+| `AGENT_MAX_OUTPUT_TOKENS` | `8192` | Output-token limit per model turn (reasoning included), sent in the `AGENT_LLM_MAX_TOKENS_FIELD` field; must be under half of the context budget. Capped by the model's `maxOutputTokens` in the models file |
+| `AGENT_MAX_STEPS` | `40` | Default step budget per run (automation runs get at least 50); the host can pass `max_steps` (up to 200) |
+| `AGENT_MAX_RUNTIME_MS` | `900000` | Wall-clock limit of one run |
+| `AGENT_MAX_CONCURRENT` | `2` | Runs that work at the same time, each with its own browser; more wait in a queue (up to 20) |
+| `AGENT_WAIT_SECONDS` | `170` | How long `agent_*` tools wait before answering "still running" (the host passes `wait_seconds` to change it per call) |
+| `AGENT_MAX_RESULT_CHARS` | `12000` | Tool results longer than this are shortened before they reach the model |
+| `AGENT_SEARCH_ENGINE` | `duckduckgo` | `web_search` engine: `duckduckgo` (Bing as fallback) or `bing` |
+| `AGENT_TRANSCRIPTS` | `true` | Write a JSON transcript of every run to `LOG_DIR/agent-runs/` (the newest 300 are kept) |
+
+## Automation scripts
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCRIPTS_DIR` | `/data/scripts` in Docker (the `scripts` volume), `./data/scripts` locally | Where `agent_automate` stores scripts (`<name>.js` + `<name>.json`) |
+| `SCRIPT_TIMEOUT_MS` | `300000` | Time limit of one script run (also stops endless loops) |
+| `SCRIPT_MEMORY_MB` | `64` | Memory limit of the script sandbox |
 
 ## Logging
 

@@ -68,7 +68,7 @@ describe('stdio bridge', () => {
 
   test('forwards the handshake: server info, instructions and tools', async () => {
     const version = bridge.client.getServerVersion();
-    assert.equal(version?.name, 'stealth-browser-mcp');
+    assert.equal(version?.name, 'stealth-web-search');
     assert.match(bridge.client.getInstructions() ?? '', /browser_snapshot/);
     const { tools } = await bridge.client.listTools();
     const names = tools.map((t) => t.name);
@@ -77,7 +77,7 @@ describe('stdio bridge', () => {
     const s = await state(srv);
     const session = s.sessions.find((x: any) => x.client === 'bridge-test 1.2.3');
     assert.ok(session, `server sees the stdio client's own identity: ${JSON.stringify(s.sessions)}`);
-    assert.match(bridge.stderr(), /connected to stealth-browser-mcp/);
+    assert.match(bridge.stderr(), /connected to stealth-web-search/);
   });
 
   test('calls browser tools through the bridge', async () => {
@@ -163,7 +163,7 @@ describe('stdio bridge', () => {
     const started = Date.now();
     await assert.rejects(
       startBridge('http://127.0.0.1:9/mcp', 'bridge-unreachable', { BRIDGE_CONNECT_TIMEOUT_MS: '1000' }),
-      /Cannot reach the Stealth Browser MCP server/,
+      /Cannot reach the Stealth Web Search server/,
     );
     assert.ok(Date.now() - started < 15_000, 'fails fast');
   });
@@ -281,6 +281,6 @@ describe('stdio bridge', () => {
     await probe.client.listTools();
     await probe.client.close();
     assert.deepEqual(errors.map((e) => e.message), []);
-    assert.match(probe.stderr(), /\[stealth-browser-bridge\]/);
+    assert.match(probe.stderr(), /\[stealth-web-search-bridge\]/);
   });
 });

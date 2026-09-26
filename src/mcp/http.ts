@@ -6,6 +6,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { Browser } from '../browser/browser.ts';
 import type { Config } from '../config.ts';
 import { registerDashboardRoutes } from '../dashboard/routes.ts';
+import type { BrowserRegistry } from '../browser/registry.ts';
 import type { Hub } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
@@ -18,6 +19,10 @@ import type { SessionRegistry } from './sessions.ts';
 
 export interface HttpDeps extends McpDeps {
   obscura: ObscuraProcess;
+  /** Engine of sub-agent and script browsers (null when they share `obscura`: OBSCURA_SEPARATE_ENGINE=false or OBSCURA_CDP_URL). */
+  isolatedObscura?: ObscuraProcess | null;
+  /** Main, sub-agent and script browsers (for the dashboard). */
+  registry: BrowserRegistry;
   logFile: string;
   startedAt: Date;
 }
@@ -114,13 +119,22 @@ export function createHttpApp(deps: HttpDeps): express.Express {
     const obscuraUp = await deps.obscura.probe();
     // In managed mode a reachable CDP endpoint is not enough: it could be a foreign/orphaned Obscura
     // answering while our own child is dead. Require the managed child to actually be running.
-    const ok = status.mode === 'managed' ? obscuraUp && status.running : obscuraUp;
+    let ok = status.mode === 'managed' ? obscuraUp && status.running : obscuraUp;
+    // the second engine of sub-agent and script browsers (OBSCURA_SEPARATE_ENGINE / OBSCURA_STORAGE_DIR)
+    let isolated: Record<string, unknown> | undefined;
+    if (deps.isolatedObscura) {
+      const iso = deps.isolatedObscura.getStatus();
+      const isoUp = await deps.isolatedObscura.probe();
+      isolated = { ...iso, reachable: isoUp };
+      ok = ok && isoUp && iso.running;
+    }
     const body = {
       ok,
       name: SERVER_NAME,
       version: SERVER_VERSION,
       uptimeSec: Math.round((Date.now() - deps.startedAt.getTime()) / 1000),
       obscura: { ...status, reachable: obscuraUp },
+      ...(isolated ? { obscuraIsolated: isolated } : {}),
       browser: { connected: deps.browser.connected, tabs: deps.browser.tabCount },
       sessions: sessions.size,
     };
@@ -337,9 +351,15 @@ async function tapModernResponse(response: globalThis.Response, scope: ModernSco
   for (const m of (Array.isArray(parsed) ? parsed : [parsed]) as any[]) {
     if (!m || m.id === undefined || (m.result === undefined && m.error === undefined)) continue;
     const isError = Boolean(m.error || m.result?.isError);
-    log.debug({ dir: 'out', era: 'modern', rpcId: m.id, isError, message: summarize(m, { maxString }) }, `MCP → ${m.error ? 'error' : 'result'} (modern era)`);
+    // results that contain secrets (cookies, session state) are hidden, as on the sessionful path
+    const call = scope.calls.get(String(m.id));
+    const def = call ? ALL_TOOLS.find((t) => t.name === call.name) : undefined;
+    const logged =
+      deps.config.log.redactSecrets && def?.sensitive?.result && m.result && !m.result.isError
+        ? { ...m, result: { ...m.result, content: hiddenResultNote(m.result), structuredContent: undefined } }
+        : m;
+    log.debug({ dir: 'out', era: 'modern', rpcId: m.id, isError, message: summarize(logged, { maxString }) }, `MCP → ${m.error ? 'error' : 'result'} (modern era)`);
     if (!scope.dispatched.has(String(m.id))) {
-      const call = scope.calls.get(String(m.id));
       if (call) {
         const joined = (m.result?.content ?? []).map((c: any) => (typeof c.text === 'string' ? c.text : '')).join(' ').trim();
         const message = m.error?.message ?? (joined || 'rejected');
@@ -356,9 +376,12 @@ async function tapModernResponse(response: globalThis.Response, scope: ModernSco
 function recordRejectedCall(deps: McpDeps, sessionId: string | undefined, name: string, args: unknown, message: string, clientOverride?: string | null): void {
   const now = new Date().toISOString();
   const client = clientOverride ?? deps.sessions.clientLabel(sessionId ?? null);
-  deps.log
-    .child({ component: 'tool', tool: name, sessionId })
-    .warn({ args, client, error: message }, `tool call ${name} rejected before running: ${message}`);
+  const log = deps.log.child({ component: 'tool', tool: name, sessionId });
+  // Free text (an agent TASK, a script's parameters) may hold secrets: the warning names the
+  // arguments; their values go to the debug level only.
+  const argKeys = args && typeof args === 'object' && !Array.isArray(args) ? Object.keys(args) : undefined;
+  log.warn({ argKeys, client, error: message }, `tool call ${name} rejected before running: ${message}`);
+  log.debug({ args }, `arguments of the rejected ${name} call`);
   deps.hub.publishActivity({
     id: randomUUID().slice(0, 8),
     tool: name,
@@ -402,7 +425,7 @@ function tapTransport(t: NodeStreamableHTTPServerTransport, log: Logger, deps: M
       calls.delete(String(m.id));
       const def = ALL_TOOLS.find((tool) => tool.name === call.name);
       if (deps.config.log.redactSecrets && def?.sensitive?.result && m.result && !m.result.isError) {
-        logged = { ...m, result: { ...m.result, content: hiddenResultNote(m.result) } };
+        logged = { ...m, result: { ...m.result, content: hiddenResultNote(m.result), structuredContent: undefined } };
       }
       if (!consumeDispatchedCall(t.sessionId, m.id)) {
         const message = m.error?.message ?? (m.result?.content ?? []).map((c: any) => c.text ?? '').join(' ').trim() ?? 'rejected';

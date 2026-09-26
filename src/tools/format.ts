@@ -16,6 +16,8 @@ export interface InteractiveItem {
   role: string;
   name: string;
   label: string;
+  /** id and autocomplete attributes */
+  hints?: string;
   visible: boolean;
   inViewport: boolean;
   disabled: boolean;
@@ -33,7 +35,7 @@ export interface InteractiveItem {
  */
 export function formatInteractive(tab: Tab, items: InteractiveItem[]): string[] {
   return items.map((it) => {
-    const ref = tab.assignRef(it.nid, it.tag, it.label, it.type);
+    const ref = tab.assignRef(it.nid, it.tag, it.label, it.type, `${it.name} ${it.hints ?? ''}`.trim());
     const kind = it.type ? `${it.tag}[${it.type}]` : it.role ? `${it.tag}[role=${it.role}]` : it.tag;
     const extras: string[] = [];
     if (it.name) extras.push(`name=${JSON.stringify(it.name)}`);

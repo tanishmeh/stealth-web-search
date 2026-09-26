@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "stealth-browser": {
+    "stealth-web-search": {
       "url": "http://127.0.0.1:8931/mcp",
       "timeout": 180000
     }

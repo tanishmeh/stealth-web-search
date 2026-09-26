@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { startTestServer, type TestServer } from '../helpers/harness.ts';
 
 /** Cross-cutting guarantees: secrets stay out of logs, rejected calls are recorded, refs survive SPA routing. */
@@ -64,6 +65,35 @@ describe('hardening', () => {
     const dashboard = JSON.stringify(state.history);
     assert.equal(dashboard.includes('manual-cookie-secret-88'), false);
     assert.equal(dashboard.includes('server-cookie-secret-77'), false);
+  });
+
+  test('a value typed by ref into a field that is secret only by its autocomplete attribute stays out of the logs', { skip: !!process.env.MCP_URL }, async () => {
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/secret.html` });
+    const snap = await srv.call('browser_snapshot');
+    const ref = /ref=(e\d+)\s+input\S*\s+"Code"/.exec(snap.text)?.[1];
+    assert.ok(ref, snap.text);
+    const typed = await srv.call('browser_fill', { ref, value: 'otp-code-913377' });
+    assert.equal(typed.isError, false, typed.text);
+    await settle();
+    assert.equal(rawLogs().includes('otp-code-913377'), false, 'one-time code leaked into logs');
+    const state = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+    assert.equal(JSON.stringify(state.history).includes('otp-code-913377'), false, 'one-time code shown on the dashboard');
+  });
+
+  test('cookie values stay out of the logs for clients of the 2026-07-28 protocol too', { skip: !!process.env.MCP_URL }, async () => {
+    const client = new Client({ name: 'modern-redaction-test', version: '1.0.0' }, { versionNegotiation: { mode: 'auto' } } as any);
+    await client.connect(new StreamableHTTPClientTransport(new URL(srv.mcpUrl)));
+    try {
+      assert.equal((client as any).getNegotiatedProtocolVersion?.(), '2026-07-28');
+      const reversed = Array.from('modern-cookie-secret-55').reverse().join('');
+      await client.callTool({ name: 'browser_navigate', arguments: { url: `${fx.baseUrl}/set-cookie?name=modern&reverse=1&value=${reversed}` } });
+      const got: any = await client.callTool({ name: 'browser_get_cookies', arguments: {} });
+      assert.match(got.content[0].text, /modern-cookie-secret-55/, 'the client still receives the value');
+      await settle();
+      assert.equal(rawLogs().includes('modern-cookie-secret-55'), false, 'cookie value leaked into logs via the modern-era response log');
+    } finally {
+      await client.close();
+    }
   });
 
   test('tool calls rejected by input validation are logged and shown in the activity feed', async () => {
@@ -192,6 +222,6 @@ describe('hardening', () => {
   test('tools/list advertises each tool group in _meta', async () => {
     const { tools } = await srv.client.listTools();
     const nav = tools.find((t) => t.name === 'browser_navigate') as any;
-    assert.equal(nav._meta?.['stealth-browser-mcp/group'], 'core');
+    assert.equal(nav._meta?.['stealth-web-search/group'], 'core');
   });
 });

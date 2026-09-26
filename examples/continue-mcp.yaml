@@ -1,0 +1,8 @@
+# Continue: save as .continue/mcpServers/stealth-web-search.yaml in your workspace.
+name: Stealth Web Search
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: stealth-web-search
+    type: streamable-http
+    url: http://127.0.0.1:8931/mcp

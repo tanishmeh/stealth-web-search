@@ -3,7 +3,7 @@
 #   npm run test:docker
 # The test fixture website runs on the host, so the browser must be allowed to reach host.docker.internal.
 services:
-  stealth-browser-mcp:
+  stealth-web-search:
     environment:
       ALLOW_PRIVATE_NETWORK: "true"
       LOG_LEVEL: info

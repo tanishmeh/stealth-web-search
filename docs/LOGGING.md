@@ -31,6 +31,15 @@ Every entry has `time`, `level`/`levelName`, `component` and `msg`. Components:
 | `obscura-engine` | per line | Obscura's own log output, parsed into levels (`target` = Rust module) |
 | `live-view` | info/debug | Viewers connecting and leaving, screencast start and stop |
 | `dashboard` | debug | Dashboard event streams opened and closed |
+| `agent` | info/warn | Sub-agent runs: created (input), started (browser), finished (status, steps, duration, token usage, compactions, outcome, sources, script tests) |
+| `agent-llm` | debug/info | Every model request (messages, tools, prompt size) and response (duration, finish reason, token usage, tool calls, answer text), retries |
+| `script` | info | Script runs (parameters, result, duration, browser calls) and each `log()` line of the script |
+
+Everything a sub-agent or script does carries `agentRunId` (sub-agent run), `browserId` (its private browser, e.g. `agent-r1a2b3c4`) or `script`/`scriptRunId`. Tool calls made by sub-agents appear under `component: "tool"` like any other call, with the `client` label `agent:<kind> <run id>`.
+
+### Sub-agent transcripts
+
+With `AGENT_TRANSCRIPTS=true` (the default), every run also writes `logs/agent-runs/<time>_<kind>_<run id>.json`. It contains the input, the outcome, the saved notes, cited sources, visited pages, script tests, every step (model timing, token usage, full reasoning, tool calls and result previews) and the complete message transcript. The newest 300 transcripts are kept.
 
 ### Payload summarization
 
@@ -62,6 +71,12 @@ jq -s '[.[] | select(.component=="cdp" and .durationMs!=null) | {method, duratio
 
 # Page JavaScript errors
 jq -r 'select(.component=="page-console" and (.pageLevel=="error" or .pageLevel=="exception")) | "\(.pageUrl): \(.msg)"' logs/current.log
+
+# One sub-agent run, start to finish (tool calls and model turns)
+jq -c 'select(.agentRunId=="<run id>" or .runId=="<run id>") | {time, component, msg, tool, durationMs}' logs/current.log
+
+# Model latency and token usage per sub-agent step
+jq -c 'select(.component=="agent-llm" and .usage) | {runId, step, durationMs, usage, finishReason}' logs/current.log
 
 # Pretty-print the live stream
 tail -F logs/current.log | npx pino-pretty

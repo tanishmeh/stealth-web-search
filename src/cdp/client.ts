@@ -141,7 +141,8 @@ export class CdpConnection extends EventEmitter {
   send<T = any>(method: string, params: Record<string, unknown> = {}, opts: SendOptions = {}): Promise<T> {
     if (!this.ws || !this.isOpen) return Promise.reject(new CdpDisconnectedError('not connected'));
     const id = this.nextId++;
-    const timeoutMs = opts.timeoutMs ?? this.defaultTimeoutMs;
+    // setTimeout cannot wait longer than 2^31-1 ms (a larger value fires at once)
+    const timeoutMs = Math.min(opts.timeoutMs ?? this.defaultTimeoutMs, 2_147_483_647);
     const message: Record<string, unknown> = { id, method, params };
     if (opts.sessionId) message.sessionId = opts.sessionId;
     const frame = sanitizeOutgoingFrame(JSON.stringify(message));

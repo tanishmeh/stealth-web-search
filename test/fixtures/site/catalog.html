@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Gadget Catalog</title></head>
+<body>
+  <h1>Gadget Catalog</h1>
+  <form id="search" action="catalog.html" method="get">
+    <input name="q" id="search-box" aria-label="Search products" placeholder="Search products">
+    <button type="submit">Search</button>
+  </form>
+  <p id="count">Loading…</p>
+  <ul id="results"></ul>
+  <script>
+    // Results are rendered by JavaScript after a short delay, like a real single-page search.
+    // (No global named like an element id: Obscura v0.2.2 lets id="x" shadow a global var x.)
+    var items = [
+      { name: 'Red Apple Phone', price: 699 },
+      { name: 'Green Apple Watch', price: 299 },
+      { name: 'Blue Pear Tablet', price: 499 },
+      { name: 'Red Pear Laptop', price: 1299 },
+      { name: 'Yellow Banana Buds', price: 99 }
+    ];
+    var query = (new URLSearchParams(location.search).get('q') || '').toLowerCase();
+    document.getElementById('search-box').value = query;
+    setTimeout(function () {
+      var hits = items.filter(function (i) { return !query || i.name.toLowerCase().indexOf(query) >= 0; });
+      document.getElementById('results').innerHTML = hits.map(function (i) {
+        return '<li class="product" data-sku="' + i.name.toLowerCase().replace(/ /g, '-') + '"><a class="name" href="#' + i.name.replace(/ /g, '') + '">' + i.name + '</a> <span class="price">$' + i.price + '</span></li>';
+      }).join('');
+      document.getElementById('count').textContent = hits.length + ' results';
+    }, 200);
+  </script>
+</body>
+</html>

@@ -1,21 +1,23 @@
-# Stealth Browser MCP — docker compose up -d --build
+# Stealth Web Search — docker compose up -d --build
 #
 # MCP endpoint:    http://127.0.0.1:8931/mcp
 # Live dashboard:  http://127.0.0.1:8931/
-# Logs:            ./logs/ (JSON lines, rotated daily / by size)
+# Logs:            ./logs/ (JSON lines, rotated daily / by size; sub-agent transcripts in ./logs/agent-runs/)
+# Scripts:         the "scripts" volume (automation scripts made by agent_automate)
 #
-# Configure with a .env file next to this one (copy .env.example).
+# Configure with a .env file next to this one (copy .env.example). Sub-agents need a model:
+# config/models.json (copy config/models.example.json) or AGENT_LLM_URL in .env.
 
-name: stealth-browser-mcp
+name: stealth-web-search
 
 services:
-  stealth-browser-mcp:
+  stealth-web-search:
     build:
       context: .
       args:
         OBSCURA_VERSION: ${OBSCURA_VERSION:-v0.2.2}
-    image: stealth-browser-mcp:latest
-    container_name: stealth-browser-mcp
+    image: stealth-web-search:latest
+    container_name: stealth-web-search
     env_file:
       - path: .env
         required: false
@@ -33,8 +35,14 @@ services:
       - "127.0.0.1:${HOST_PORT:-8931}:8931"
     volumes:
       - ./logs:/app/logs
-      # Persist cookies between restarts: uncomment and set OBSCURA_STORAGE_DIR=/data in .env
-      # - ./data:/data
+      # The sub-agents' model settings: copy config/models.example.json to config/models.json.
+      - ./config:/app/config:ro
+      # Automation scripts survive rebuilds and restarts. To keep them in a host folder instead, replace
+      # this line with "- ./scripts-data:/data/scripts" (the folder must be writable by uid 1000).
+      - scripts:/data/scripts
+      # Persist cookies between restarts: uncomment and set OBSCURA_STORAGE_DIR=/data/cookies in .env
+      # (on Linux: mkdir -p data && sudo chown -R 1000:1000 data)
+      # - ./data:/data/cookies
     extra_hosts:
       # Lets the browser reach services on your machine (with ALLOW_PRIVATE_NETWORK=true) on Linux too.
       - "host.docker.internal:host-gateway"
@@ -48,3 +56,6 @@ services:
     mem_limit: 2g
     pids_limit: 512
     restart: unless-stopped
+
+volumes:
+  scripts:

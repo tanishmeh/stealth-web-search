@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync } from 'node:fs';
+import { accessSync, constants, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 import pino, { type Logger, type StreamEntry } from 'pino';
@@ -47,7 +47,11 @@ export interface LoggingHandle {
 
 export async function createLogging(config: Config): Promise<LoggingHandle> {
   const { log } = config;
-  mkdirSync(log.dir, { recursive: true }); // pino-roll's symlink creation races without this
+  try {
+    mkdirSync(log.dir, { recursive: true }); // pino-roll's symlink creation races without this
+  } catch {
+    // reported below, when the file stream cannot be opened
+  }
 
   const levelValue = (l: string) => (l === 'silent' ? Infinity : pino.levels.values[l]);
   const tap = new LogTap();
@@ -69,22 +73,53 @@ export async function createLogging(config: Config): Promise<LoggingHandle> {
     },
   });
 
-  const logFile = path.join(log.dir, 'stealth-browser-mcp.log');
-  const fileStream = await roll({
-    file: logFile,
-    size: log.fileMaxSize,
-    frequency: 'daily',
-    dateFormat: 'yyyy-MM-dd',
-    limit: { count: log.fileMaxFiles },
-    mkdir: true,
-    symlink: true,
-  });
+  const logFile = path.join(log.dir, 'stealth-web-search.log');
+  // A log directory the server cannot write to (e.g. a ./logs bind mount owned by another user on a
+  // Linux host) must not stop the server: log to stdout only and say so.
+  let fileStream: Awaited<ReturnType<typeof roll>> | null = null;
+  if (log.fileLevel !== 'silent') {
+    let stream: Awaited<ReturnType<typeof roll>> | null = null;
+    try {
+      mkdirSync(log.dir, { recursive: true });
+      accessSync(log.dir, constants.W_OK);
+      stream = await roll({
+        file: logFile,
+        size: log.fileMaxSize,
+        frequency: 'daily',
+        dateFormat: 'yyyy-MM-dd',
+        limit: { count: log.fileMaxFiles },
+        mkdir: true,
+        symlink: true,
+      });
+      // the file opens asynchronously: an existing file we cannot write (e.g. today's log, created by
+      // another user) only fails here
+      const opening = stream;
+      await new Promise<void>((resolve, reject) => {
+        if ((opening as any).fd >= 0) return resolve();
+        opening.once('ready', () => resolve());
+        opening.once('error', reject);
+      });
+      fileStream = stream;
+    } catch (err) {
+      if (stream) {
+        // pino-roll already scheduled its rotation on this stream: closing it cancels that, so the
+        // failed stream cannot throw later (at the next rotation) with nobody listening
+        stream.on('error', () => undefined);
+        stream.emit('close');
+      }
+      process.stderr.write(
+        `stealth-web-search: cannot write log files to ${log.dir} (${(err as Error)?.message ?? err}); logging to stdout only. ` +
+          `Make the directory and its files writable by the server's user (in Docker: uid 1000, e.g. \`sudo chown -R 1000:1000 logs\`).\n`,
+      );
+      fileStream = null;
+    }
+  }
   // The underlying SonicBoom stream emits 'error' (e.g. the log directory was removed at runtime, so
   // rotation fails). Without a listener that becomes an uncaught exception that would crash the
   // process (and orphan the browser). Logging must degrade, not crash: warn to stderr and try to
   // recreate the directory so the next write can recover.
-  fileStream.on('error', (err: Error) => {
-    process.stderr.write(`stealth-browser-mcp: log file stream error: ${err?.message ?? String(err)}\n`);
+  fileStream?.on('error', (err: Error) => {
+    process.stderr.write(`stealth-web-search: log file stream error: ${err?.message ?? String(err)}\n`);
     try {
       mkdirSync(log.dir, { recursive: true });
     } catch {
@@ -106,16 +141,38 @@ export async function createLogging(config: Config): Promise<LoggingHandle> {
 
   const streams: StreamEntry[] = [];
   if (log.level !== 'silent') streams.push({ level: log.level as pino.Level, stream: stdoutStream });
-  if (log.fileLevel !== 'silent') streams.push({ level: log.fileLevel as pino.Level, stream: fileStream });
+  if (fileStream) {
+    // A file stream that lost its file (fd -1 after an error) throws on write: drop lines instead,
+    // until rotation or recovery reopens it.
+    const file = fileStream;
+    const guarded = {
+      write(chunk: string): boolean {
+        if (typeof (file as any).fd === 'number' && (file as any).fd < 0) return true;
+        try {
+          return file.write(chunk);
+        } catch {
+          return true;
+        }
+      },
+      flushSync(): void {
+        try {
+          (file as any).flushSync?.();
+        } catch {
+          // nothing to flush into
+        }
+      },
+    };
+    streams.push({ level: log.fileLevel as pino.Level, stream: guarded as any });
+  }
   streams.push({ level: tapLevel, stream: tapStream });
 
-  const minLevel = [log.level, log.fileLevel, tapLevel]
+  const minLevel = [log.level, fileStream ? log.fileLevel : 'silent', tapLevel]
     .filter((l) => l !== 'silent')
     .sort((a, b) => levelValue(a) - levelValue(b))[0];
 
   const logger = pino(
     {
-      name: 'stealth-browser-mcp',
+      name: 'stealth-web-search',
       level: minLevel ?? 'info',
       timestamp: pino.stdTimeFunctions.isoTime,
       base: { pid: process.pid },
@@ -147,6 +204,6 @@ export async function createLogging(config: Config): Promise<LoggingHandle> {
       setTimeout(resolve, 150);
     });
 
-  // pino-roll writes stealth-browser-mcp.<date>.<n>.log and keeps current.log pointing at it
+  // pino-roll writes stealth-web-search.<date>.<n>.log and keeps current.log pointing at it
   return { logger, tap, logFile: path.join(log.dir, 'current.log'), flush };
 }

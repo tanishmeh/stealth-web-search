@@ -1,4 +1,4 @@
-// Stealth Browser MCP live dashboard.
+// Stealth Web Search live dashboard.
 // Vanilla ES2022 module, no dependencies. Every string that comes from the
 // server, the agent or a web page is inserted with textContent (never innerHTML).
 
@@ -243,6 +243,11 @@ const model = {
   tabsSignature: '',
   lastBrowserEvent: null,
   clockSkew: null, // ms the browser clock is ahead of the server clock
+  browsers: [], // main + sub-agent/script browsers the server runs
+  agents: new Map(), // run id -> summary
+  agentsInfo: null,
+  scripts: [],
+  scriptsLoadedAt: 0,
 };
 
 /** The server's current time on the browser clock, for ages of server timestamps. */
@@ -251,6 +256,8 @@ const serverNow = () => Date.now() - (model.clockSkew ?? 0);
 const tabExists = (tabId) => model.tabs.some((t) => t.id === tabId);
 
 const ui = {
+  /** Browser whose live view, tabs, console and network are shown ("main" or a sub-agent/script browser id). */
+  watch: store.get('watch', 'main'),
   paused: false,
   suspended: false,
   hiddenTimer: null,
@@ -307,7 +314,11 @@ function connect() {
   clearTimeout(conn.retryTimer);
   conn.retryTimer = null;
   if (conn.es) conn.es.close();
-  const es = new EventSource(wantLive() ? '/api/events?live=1' : '/api/events');
+  const params = new URLSearchParams();
+  if (wantLive()) params.set('live', '1');
+  if (ui.watch && ui.watch !== 'main') params.set('browser', ui.watch);
+  const query = params.toString();
+  const es = new EventSource(query ? `/api/events?${query}` : '/api/events');
   conn.es = es;
   conn.lastMessageAt = Date.now();
   es.addEventListener('error', () => {
@@ -444,9 +455,25 @@ const handlers = {
     model.sessions = Array.isArray(list) ? list : [];
     mark('header', 'sessions');
   },
+  agent(summary) {
+    upsertAgent(summary);
+  },
+  browsers(list) {
+    if (!Array.isArray(list)) return;
+    model.browsers = list;
+    mark('browsers', 'agents', 'stage');
+  },
   browser(ev) {
     if (!ev || typeof ev !== 'object') return;
     model.lastBrowserEvent = ev;
+    if (ev.event === 'closed') {
+      // the watched sub-agent/script browser was discarded: keep its last frame on screen
+      const info = model.browsers.find((b) => b.id === (ev.browserId ?? 'main'));
+      if (info) info.status = 'closed';
+      if (model.browser) model.browser = { ...model.browser, connected: false, closed: true };
+      mark('browsers', 'stage', 'header');
+      return;
+    }
     if (model.browser && (ev.event === 'connected' || ev.event === 'disconnected')) {
       model.browser = { ...model.browser, connected: ev.event === 'connected' };
     }
@@ -459,21 +486,37 @@ const handlers = {
 function hydrate(state) {
   if (!state || typeof state !== 'object') return;
   const restarted = model.server && state.server && model.server.startedAt !== state.server.startedAt;
-  if (!model.hydrated || restarted) resetData();
+  // the server shows another browser than the one we asked for (it is gone): start from a clean slate
+  const fellBack = typeof state.watching === 'string' && state.watching !== ui.watch;
+  if (!model.hydrated || restarted || fellBack) resetData();
+  if (fellBack) {
+    model.tabs = [];
+    model.activeTabId = null;
+    model.tabsSignature = '';
+  }
   model.hydrated = true;
   applyStatus(state);
   model.sessions = Array.isArray(state.sessions) ? state.sessions : [];
   const history = state.history ?? {};
+  // the server's list is authoritative: runs of a restarted server are gone
+  model.agents = new Map();
+  for (const a of Array.isArray(history.agents) ? history.agents : []) upsertAgent(a);
+  for (const id of [...agentsUi.open]) if (!model.agents.has(id)) agentsUi.open.delete(id);
+  for (const id of [...agentsUi.details.keys()]) if (!model.agents.has(id)) agentsUi.details.delete(id);
   const browserEvents = Array.isArray(history.browserEvents) ? history.browserEvents : [];
   if (browserEvents.length) model.lastBrowserEvent = browserEvents[browserEvents.length - 1];
   for (const entry of Array.isArray(history.activity) ? history.activity : []) upsertActivity(entry, false);
   addConsole(Array.isArray(history.console) ? history.console : [], true);
   for (const entry of Array.isArray(history.network) ? history.network : []) upsertNetwork(entry);
   addLogs(Array.isArray(history.logs) ? history.logs : [], true);
-  mark('header', 'stage', 'sessions', 'framemeta');
+  mark('header', 'stage', 'sessions', 'framemeta', 'agents', 'browsers');
 }
 
 function resetData() {
+  act.filterTool = '';
+  logs.component = '';
+  if ($('activity-tool')) $('activity-tool').value = '';
+  if ($('logs-component')) $('logs-component').value = '';
   for (const rec of act.map.values()) rec.el?.remove();
   act.map.clear();
   act.dirty.clear();
@@ -509,11 +552,21 @@ function applyStatus(state) {
     model.clockSkew = updateClockSkew(model.clockSkew, state.server.now, Date.now());
   }
   if (state.obscura) model.obscura = state.obscura;
+  if ('obscuraIsolated' in state) model.obscuraIsolated = state.obscuraIsolated ?? null;
   if (state.browser) {
     model.browser = state.browser;
     if (Array.isArray(state.browser.tabs)) applyTabs({ tabs: state.browser.tabs, activeTabId: state.browser.activeTabId });
   }
   if (state.liveView) model.liveView = state.liveView;
+  if (Array.isArray(state.browsers)) model.browsers = state.browsers;
+  if (state.agents) model.agentsInfo = state.agents;
+  mark('agents');
+  if (typeof state.watching === 'string' && state.watching !== ui.watch) {
+    // the browser we asked for is gone (e.g. after a server restart): the server shows the main one
+    ui.watch = state.watching;
+    store.set('watch', ui.watch);
+  }
+  mark('browsers');
   if (Array.isArray(state.sessions)) {
     model.sessions = state.sessions;
     mark('sessions');
@@ -530,8 +583,9 @@ function applyTabs(data) {
   model.tabsSignature = signature;
   model.tabs = tabs;
   model.activeTabId = activeTabId;
-  // a closed tab's frame must not keep showing its page (while disconnected it stays, dimmed, for context)
-  if (live.frame && !tabExists(live.frame.tabId) && model.browser?.connected !== false) clearFrame();
+  // a closed tab's frame must not keep showing its page (while disconnected it stays, dimmed, for context;
+  // a finished sub-agent's browser keeps its last frame)
+  if (live.frame && !tabExists(live.frame.tabId) && model.browser?.connected !== false && !watchingClosed()) clearFrame();
   mark('tabs', 'stage');
 }
 
@@ -565,7 +619,7 @@ function renderHeader() {
     setText($('version'), server.version ? `v${server.version}` : '');
     setText($('mcp-url'), server.mcpUrl ?? '');
     $('mcp-url').title = server.mcpUrl ?? '';
-    const title = `Stealth Browser MCP${server.version ? ` ${server.version}` : ''}`;
+    const title = `Stealth Web Search${server.version ? ` ${server.version}` : ''}`;
     if (document.title !== title) document.title = title;
   }
 
@@ -584,7 +638,7 @@ function renderHeader() {
   if (obscura) {
     const restarts = num(obscura.restarts) ?? 0;
     const suffix = restarts ? ` · ${restarts} restart${restarts === 1 ? '' : 's'}` : '';
-    const details = [
+    let details = [
       `Obscura ${obscura.version ?? ''}`.trim(),
       `mode: ${obscura.mode ?? '?'}`,
       obscura.pid ? `pid ${obscura.pid}` : null,
@@ -592,14 +646,25 @@ function renderHeader() {
     ]
       .filter(Boolean)
       .join('\n');
-    if (obscura.ready) pill('pill-obscura', `Obscura ready${suffix}`, restarts ? 'warn' : 'ok', details);
+    const iso = model.obscuraIsolated;
+    if (iso) details += `\nSub-agent engine: ${iso.ready ? 'ready' : iso.running ? 'starting' : 'down'}${iso.restarts ? ` (${iso.restarts} restart${iso.restarts === 1 ? '' : 's'})` : ''}${iso.pid ? `, pid ${iso.pid}` : ''}`;
+    if (obscura.ready && iso && !iso.ready) pill('pill-obscura', 'Obscura ready · sub-agent engine down', 'warn', details);
+    else if (obscura.ready) pill('pill-obscura', `Obscura ready${suffix}`, restarts ? 'warn' : 'ok', details);
     else if (obscura.running) pill('pill-obscura', `Obscura starting${suffix}`, 'warn', details);
     else pill('pill-obscura', `Obscura down${suffix}`, 'err', details);
   }
 
+  // between switching browsers and the new stream's first message
+  if (!browser) pill('pill-cdp', 'CDP …', 'muted', 'Waiting for the server');
   if (browser) {
     const connected = browser.connected !== false;
-    pill('pill-cdp', connected ? 'CDP connected' : 'CDP disconnected', connected ? 'ok' : 'err', model.lastBrowserEvent?.reason ? `Last event: ${model.lastBrowserEvent.event} (${model.lastBrowserEvent.reason})` : 'Chrome DevTools Protocol connection to Obscura');
+    const watchedOther = ui.watch !== 'main';
+    const cdpTitle = model.lastBrowserEvent?.reason ? `Last event: ${model.lastBrowserEvent.event} (${model.lastBrowserEvent.reason})` : 'Chrome DevTools Protocol connection to Obscura';
+    if (connected) pill('pill-cdp', 'CDP connected', 'ok', cdpTitle);
+    // a sub-agent's browser is closed when its run ends, or not connected until its first page: not an error
+    else if (watchedOther && (browser.closed || watchingClosed())) pill('pill-cdp', 'Browser closed', 'muted', cdpTitle);
+    else if (watchedOther && !model.tabs.length && model.lastBrowserEvent?.event !== 'disconnected') pill('pill-cdp', 'CDP idle', 'muted', cdpTitle);
+    else pill('pill-cdp', 'CDP disconnected', 'err', cdpTitle);
     const stealthTitle = [
       browser.stealth ? 'Obscura runs with --stealth' : 'Stealth mode is off (OBSCURA_STEALTH=false)',
       browser.proxy ? 'Proxy: configured' : 'Proxy: none',
@@ -643,7 +708,8 @@ live.ctx = live.canvas.getContext('2d', { alpha: false });
 
 function onFrame(frame) {
   if (!frame || typeof frame.data !== 'string' || !frame.data || !wantLive()) return;
-  if (frame.tabId && !tabExists(frame.tabId)) return; // tabs are always announced before their frames
+  if ((frame.browserId ?? 'main') !== ui.watch) return; // a frame of the browser we watched before switching
+  if (frame.tabId && !tabExists(frame.tabId) && !watchingClosed()) return; // tabs are always announced before their frames
   const now = performance.now();
   live.arrivals.push(now);
   while (live.arrivals.length && now - live.arrivals[0] > 3000) live.arrivals.shift();
@@ -680,8 +746,8 @@ async function pumpFrames() {
         image.close?.();
         break;
       }
-      if (frame.tabId && !tabExists(frame.tabId)) {
-        // the tab closed (or the data was reset) while this frame was decoding
+      if ((frame.browserId ?? 'main') !== ui.watch || (frame.tabId && !tabExists(frame.tabId) && !watchingClosed())) {
+        // the tab closed, the data was reset or another browser was selected while this frame was decoding
         image.close?.();
         continue;
       }
@@ -853,18 +919,36 @@ function stageState() {
   if (model.liveView && model.liveView.enabled === false) {
     return { icon: 'eye-off', title: 'Live view is disabled', sub: 'Set LIVE_VIEW_ENABLED=true (and DASHBOARD_ENABLED=true) on the server to watch the browser here.' };
   }
-  const ob = model.obscura;
+  const watched = watchInfo();
+  // a finished run's browser: listed as closed, or already dropped from the list
+  if ((watched && watched.kind !== 'main' && watched.status === 'closed') || (!watched && ui.watch !== 'main' && model.browser?.closed)) {
+    if (live.hasFrame) return null; // the last frame shows where the run ended
+    return {
+      icon: 'browser',
+      title: `${watched?.label ?? ui.watch} is closed`,
+      sub: 'The run finished and its private browser was discarded. Watch the main browser or a running agent.',
+      action: { label: 'Watch the main browser', run: () => switchBrowser('main') },
+    };
+  }
+  // sub-agent and script browsers run on the second engine when there is one
+  const ob = ui.watch !== 'main' && model.obscuraIsolated ? model.obscuraIsolated : model.obscura;
   if (ob && ob.mode === 'managed' && !ob.ready) {
     return ob.running
       ? { icon: 'cpu', spin: false, tone: 'warn', title: 'Browser engine is starting…', sub: ob.restarts ? `Obscura has restarted ${ob.restarts} time${ob.restarts === 1 ? '' : 's'}.` : '' }
       : { icon: 'alert', tone: 'err', title: 'Browser engine is down', sub: 'Obscura exited. The server restarts it automatically; check the Logs tab for details.' };
+  }
+  if (watched && watched.kind !== 'main' && !model.tabs.length && model.lastBrowserEvent?.event !== 'disconnected') {
+    // a sub-agent's or script's browser that has not opened a page yet (it connects on first use)
+    return { icon: 'bot', breathe: true, tone: 'accent', title: `${watched.label}: waiting for its first page`, sub: 'This is the private browser of a sub-agent or script run. Its live view appears as soon as it opens a page.' };
   }
   if (model.browser && model.browser.connected === false) {
     const reason = model.lastBrowserEvent?.event === 'disconnected' ? str(model.lastBrowserEvent.reason) : '';
     return { icon: 'unplug', tone: 'err', title: 'Browser disconnected', sub: `${reason ? `${reason}. ` : ''}The next tool call reconnects automatically.` };
   }
   if (!model.tabs.length) {
-    return { icon: 'browser', breathe: true, tone: 'accent', title: 'Waiting for the agent to open a page', sub: 'The live view appears here as soon as a tool call opens a tab.' };
+    return watched && watched.kind !== 'main'
+      ? { icon: 'bot', breathe: true, tone: 'accent', title: `${watched.label}: waiting for its first page`, sub: 'This is the private browser of a sub-agent or script run. Its live view appears as soon as it opens a page.' }
+      : { icon: 'browser', breathe: true, tone: 'accent', title: 'Waiting for the agent to open a page', sub: 'The live view appears here as soon as a tool call opens a tab.' };
   }
   if (!live.hasFrame) {
     return { icon: 'browser', breathe: true, title: 'Waiting for the first frame…', sub: '' };
@@ -901,6 +985,7 @@ function renderStage() {
     }
   }
   const noTab = !model.tabs.length || conn.state !== 'open';
+  setAttr($('btn-shot'), 'href', `/api/screenshot?browser=${encodeURIComponent(ui.watch)}`);
   setAttr($('btn-shot'), 'aria-disabled', noTab ? 'true' : null);
   setAttr($('btn-shot'), 'tabindex', noTab ? '-1' : null);
   renderOmnibox();
@@ -997,7 +1082,10 @@ function renderFrameMeta() {
 }
 
 function renderWorking() {
-  const running = [...act.running].map((id) => act.map.get(id)).filter(Boolean);
+  // only calls acting on the watched browser; agent/script tools (which wait on other browsers) are left out
+  const running = [...act.running]
+    .map((id) => act.map.get(id))
+    .filter((r) => r && (r.entry.browserId ?? 'main') === ui.watch && !/^(agent|script)_/.test(str(r.entry.tool)));
   const box = $('working');
   const busy = running.length > 0 && conn.state === 'open';
   box.hidden = !busy;
@@ -1155,6 +1243,7 @@ function updateActivityCard(rec) {
   const firstErrorLine = status === 'error' ? str(entry.error ?? entry.preview).split('\n').find((l) => l.trim()) ?? 'Failed' : '';
   setText(refs.error, firstErrorLine.replace(/^Error:\s*/, ''));
   refs.error.hidden = !firstErrorLine;
+  el.classList.toggle('from-agent', Boolean(entry.agentRunId));
   refs.meta.replaceChildren(
     ...[fmtClock(entry.startedAt), entry.client ? str(entry.client) : null, entry.tabId ? str(entry.tabId) : null]
       .filter(Boolean)
@@ -1805,10 +1894,405 @@ function renderSessions() {
   }
 }
 
+// ------------------------------------------------------------------ browsers + sub-agents
+
+function watchInfo() {
+  return model.browsers.find((b) => b.id === ui.watch) ?? null;
+}
+
+/** Watching the (discarded) browser of a finished run: only its last frame remains. */
+function watchingClosed() {
+  const info = watchInfo();
+  return Boolean(info && info.kind !== 'main' && info.status === 'closed');
+}
+
+function switchBrowser(id) {
+  id = str(id) || 'main';
+  if (id === ui.watch) return;
+  ui.watch = id;
+  store.set('watch', id);
+  // everything browser-specific comes again from the new stream's 'hello'
+  resetData();
+  model.tabs = [];
+  model.activeTabId = null;
+  model.tabsSignature = '';
+  model.browser = null; // the previous browser's state must not show until the new one's arrives
+  mark('tabs', 'stage', 'framemeta', 'browsers', 'header');
+  connect();
+}
+
+const KIND_LABEL = { task: 'Agentic', automation: 'Automation', finder: 'Finder' };
+
+function browserLabel(b) {
+  if (b.kind === 'main') return 'Main browser';
+  const run = b.runId ? model.agents.get(b.runId) : null;
+  const status = b.status === 'closed' ? 'closed' : run ? run.status : 'running';
+  return `${b.label} · ${status}`;
+}
+
+function renderBrowsers() {
+  const select = $('browser-select');
+  const list = model.browsers.length ? model.browsers : [{ id: 'main', kind: 'main', label: 'Main browser', status: 'open' }];
+  const options = list.map((b) => [b.id, browserLabel(b)]);
+  if (!options.some(([id]) => id === ui.watch)) options.push([ui.watch, ui.watch]);
+  const sig = JSON.stringify(options);
+  if (select.dataset.sig !== sig) {
+    select.dataset.sig = sig;
+    select.replaceChildren(...options.map(([id, label]) => h('option', { value: id, text: label })));
+  }
+  if (select.value !== ui.watch) select.value = ui.watch;
+  const others = list.filter((b) => b.kind !== 'main' && b.status === 'open').length;
+  $('browser-pick').classList.toggle('has-others', others > 0);
+  $('browser-pick').classList.toggle('watching-other', ui.watch !== 'main');
+}
+
+const agentsUi = {
+  open: new Set(),
+  details: new Map(), // run id -> { data, loadedAt, loading }
+};
+
+function upsertAgent(summary) {
+  if (!summary || typeof summary !== 'object' || typeof summary.id !== 'string') return;
+  const previous = model.agents.get(summary.id);
+  model.agents.set(summary.id, summary);
+  while (model.agents.size > 100) model.agents.delete(model.agents.keys().next().value);
+  if (agentsUi.open.has(summary.id) && (!previous || previous.step !== summary.step || previous.status !== summary.status || previous.transcript !== summary.transcript)) {
+    void loadAgentDetails(summary.id);
+  }
+  if (previous && previous.status !== summary.status && ['completed', 'failed', 'cancelled'].includes(summary.status)) void loadScripts();
+  mark('agents', 'browsers');
+}
+
+async function loadAgentDetails(id) {
+  const rec = agentsUi.details.get(id) ?? { data: null, loadedAt: 0, loading: false };
+  agentsUi.details.set(id, rec);
+  if (rec.loading) {
+    rec.stale = true; // fetch again when the current request is done
+    return;
+  }
+  rec.loading = true;
+  rec.stale = false;
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(id)}`, { cache: 'no-store', credentials: 'same-origin' });
+    if (res.ok) {
+      rec.data = await res.json();
+      rec.loadedAt = Date.now();
+      rec.failed = false;
+    } else {
+      rec.failed = true;
+    }
+  } catch {
+    rec.failed = true; // keep the previous details
+  } finally {
+    rec.loading = false;
+    mark('agents');
+    if (rec.stale) void loadAgentDetails(id);
+  }
+}
+
+async function loadScripts() {
+  model.scriptsLoadedAt = Date.now();
+  try {
+    const res = await fetch('/api/scripts', { cache: 'no-store', credentials: 'same-origin' });
+    if (res.ok) {
+      const body = await res.json();
+      model.scripts = Array.isArray(body.scripts) ? body.scripts : [];
+      mark('agents');
+    }
+  } catch {
+    // retried on the next tick
+  }
+}
+
+function onAgentsClick(ev) {
+  const btn = ev.target instanceof Element ? ev.target.closest('[data-action]') : null;
+  if (!btn) return;
+  const id = btn.dataset.run;
+  if (btn.dataset.action === 'watch' && btn.dataset.browser) {
+    switchBrowser(btn.dataset.browser);
+  } else if (btn.dataset.action === 'details' && id) {
+    if (agentsUi.open.has(id)) agentsUi.open.delete(id);
+    else {
+      agentsUi.open.add(id);
+      void loadAgentDetails(id);
+    }
+    mark('agents');
+  }
+}
+
+function statusTone(a) {
+  if (a.status === 'running') return 'live';
+  if (a.status === 'queued') return 'warn';
+  if (a.status === 'completed') return a.success === false ? 'warn' : 'ok';
+  if (a.status === 'failed') return 'err';
+  return 'muted';
+}
+
+function safeLink(url, text) {
+  const u = str(url);
+  return /^https?:\/\//i.test(u) ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer', text: text ?? u }) : h('span', { text: text ?? u });
+}
+
+function agentDetailsBlock(id) {
+  const rec = agentsUi.details.get(id);
+  if (!rec?.data) return h('div', { class: 'agent-details muted', text: rec?.loading ? 'Loading…' : rec?.failed ? 'Could not load the details of this run (it may have left the server’s history).' : 'No details yet.' });
+  const d = rec.data;
+  const parts = [];
+  parts.push(h('div', { class: 'act-label', text: d.summary?.kind === 'finder' ? 'Objective' : 'Task' }), h('pre', { class: 'code', dataset: { key: 'task' }, text: str(d.input?.task) }));
+  parts.push(h('div', { class: 'act-label', text: 'Requested output' }), h('pre', { class: 'code', dataset: { key: 'output' }, text: str(d.input?.output) }));
+  const steps = Array.isArray(d.steps) ? d.steps : [];
+  if (steps.length) {
+    parts.push(h('div', { class: 'act-label', text: `Steps (${steps.length}${d.summary?.step > steps.length ? ` of ${d.summary.step}` : ''})` }));
+    parts.push(
+      h(
+        'ol',
+        { class: 'agent-steps' },
+        ...steps.map((st) =>
+          h(
+            'li',
+            { dataset: { step: String(st.step) } },
+            h(
+              'div',
+              { class: 'agent-step-head' },
+              h('b', { text: `#${st.step}` }),
+              h('span', { class: 'muted', text: `model ${fmtDuration(st.llmMs)}${st.promptTokens ? ` · ${st.promptTokens} prompt tokens` : ''}` }),
+            ),
+            st.reasoning ? h('details', null, h('summary', { text: 'Reasoning' }), h('pre', { class: 'code', dataset: { key: `reasoning-${st.step}` }, text: str(st.reasoning) })) : null,
+            st.content ? h('pre', { class: 'code', dataset: { key: `content-${st.step}` }, text: str(st.content) }) : null,
+            ...(Array.isArray(st.toolCalls) ? st.toolCalls : []).map((c) =>
+              h(
+                'div',
+                { class: `agent-call ${c.ok ? 'ok' : 'err'}` },
+                icon(c.ok ? 'check' : 'x'),
+                h('span', { class: 'agent-call-name', text: str(c.name) }),
+                h('span', { class: 'agent-call-args', text: argsSummary(c.args) }),
+                h('div', { class: 'agent-call-preview', text: truncate(str(c.preview), 300) }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  if (Array.isArray(d.sources) && d.sources.length) {
+    parts.push(h('div', { class: 'act-label', text: 'Sources' }));
+    parts.push(
+      h(
+        'ol',
+        { class: 'agent-sources' },
+        ...d.sources.map((src) =>
+          h(
+            'li',
+            null,
+            safeLink(src.url, str(src.title) || str(src.url)),
+            ...(Array.isArray(src.quotes) ? src.quotes : []).map((q) => h('div', { class: `agent-quote${q.verified ? '' : ' unverified'}`, text: `“${truncate(str(q.text), 300)}”${q.verified ? '' : ' (not verified on the page)'}` })),
+          ),
+        ),
+      ),
+    );
+  }
+  if (Array.isArray(d.notes) && d.notes.length) {
+    parts.push(h('div', { class: 'act-label', text: 'Notes' }), h('pre', { class: 'code', dataset: { key: 'notes' }, text: d.notes.map((n, i) => `${i + 1}. ${n}`).join('\n') }));
+  }
+  if (d.outcome) {
+    const block = jsonBlock(d.outcome);
+    block.dataset.key = 'outcome';
+    parts.push(h('div', { class: 'act-label', text: 'Result' }), block);
+  }
+  if (d.error) parts.push(h('div', { class: 'act-label err', text: 'Error' }), h('pre', { class: 'code error', dataset: { key: 'error' }, text: str(d.error) }));
+  if (d.transcript) parts.push(h('div', { class: 'act-foot', text: `Transcript: ${d.transcript}` }));
+  return h('div', { class: 'agent-details' }, ...parts);
+}
+
+function agentElapsed(a) {
+  const started = parseTime(a.startedAt);
+  if (started === null) return null;
+  const ended = parseTime(a.endedAt);
+  return Math.max(0, (ended ?? serverNow()) - started);
+}
+
+function agentMetaText(a) {
+  const elapsed = agentElapsed(a);
+  return [a.status === 'queued' ? null : `step ${a.step ?? 0}/${a.maxSteps ?? '?'}`, elapsed === null ? null : fmtDuration(elapsed), a.client ? str(a.client) : null]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function buildAgentCard(a) {
+  const open = agentsUi.open.has(a.id);
+  const browser = (a.browserId && model.browsers.find((b) => b.id === a.browserId)) || (a.status === 'running' && a.browserId);
+  const watching = Boolean(a.browserId) && ui.watch === a.browserId;
+  const statusText = a.status === 'completed' ? (a.success === false ? 'completed · no success' : 'completed') : a.status;
+  return h(
+    'div',
+    { class: `agent-card${open ? ' open' : ''}`, dataset: { id: a.id } },
+    h(
+      'div',
+      { class: 'agent-head' },
+      h('span', { class: `agent-kind kind-${str(a.kind)}`, text: KIND_LABEL[a.kind] ?? str(a.kind) }),
+      h('span', { class: 'pill agent-status', dataset: { tone: statusTone(a) } }, h('span', { class: 'dot' }), h('span', { class: 'pill-text', text: statusText })),
+      h('span', { class: 'agent-id mono', text: a.id }),
+      h('span', { class: 'agent-meta muted', dataset: { run: a.id }, text: agentMetaText(a) }),
+      h(
+        'span',
+        { class: 'agent-actions' },
+        a.browserId
+          ? h(
+              'button',
+              {
+                class: `chip${watching ? ' on' : ''}`,
+                type: 'button',
+                dataset: { action: 'watch', browser: a.browserId, run: a.id },
+                'aria-pressed': String(watching),
+                disabled: browser ? undefined : true,
+                title: browser ? 'Show this agent\'s browser in the live view' : 'Its browser is no longer listed',
+              },
+              icon('eye'),
+              watching ? 'Watching' : 'Watch',
+            )
+          : null,
+        h('button', { class: 'chip', type: 'button', dataset: { action: 'details', run: a.id }, 'aria-expanded': String(open) }, icon('chevron', open ? 'rot' : ''), 'Details'),
+      ),
+    ),
+    h('div', { class: 'agent-task', text: truncate(str(a.task), 400), title: str(a.task) }),
+    a.status === 'running' || a.status === 'queued' ? h('div', { class: 'agent-activity' }, h('span', { class: 'spinner' }), h('span', { class: 'agent-activity-text', text: truncate(str(a.activity), 200) })) : null,
+    a.status === 'running' && a.thinking ? h('div', { class: 'agent-thinking', text: `… ${str(a.thinking).slice(-400)}` }) : null,
+    a.script
+      ? h('div', { class: 'agent-script' }, icon('script'), h('span', { text: `Script ${str(a.script.name)} v${a.script.version}${a.script.lastTest === true ? ' · last test passed' : a.script.lastTest === false ? ' · last test failed' : ''}` }))
+      : null,
+    a.result ? h('div', { class: 'agent-result', text: truncate(str(a.result), 500) }) : null,
+    a.error ? h('div', { class: 'agent-error', text: str(a.error) }) : null,
+    open ? agentDetailsBlock(a.id) : null,
+  );
+}
+
+/** Everything a card shows except its elapsed time (that ticks in place, see tickAgents). */
+function agentCardSig(a) {
+  const browser = a.browserId && model.browsers.find((b) => b.id === a.browserId);
+  return JSON.stringify([
+    a.status, a.success, a.step, a.maxSteps, Boolean(a.thinking), a.result, a.error, a.script, a.task, a.client, a.kind,
+    agentsUi.open.has(a.id), agentsUi.details.get(a.id)?.loadedAt ?? 0, agentsUi.details.get(a.id)?.loading ?? false, agentsUi.details.get(a.id)?.failed ?? false,
+    ui.watch === a.browserId, Boolean(browser),
+  ]);
+}
+
+/** The fields that change while the model streams are updated in place (no rebuild). */
+function patchAgentCard(card, a) {
+  const activity = card.querySelector('.agent-activity-text');
+  if (activity) setText(activity, truncate(str(a.activity), 200));
+  const thinking = card.querySelector('.agent-thinking');
+  if (thinking) setText(thinking, `… ${str(a.thinking).slice(-400)}`);
+  return card;
+}
+
+/** Refresh the elapsed time of running cards without rebuilding them. */
+function tickAgents() {
+  for (const el of $('agents-rows').querySelectorAll('.agent-meta[data-run]')) {
+    const a = model.agents.get(el.dataset.run);
+    if (a && (a.status === 'running' || a.status === 'queued')) setText(el, agentMetaText(a));
+  }
+}
+
+function renderAgents() {
+  const runs = [...model.agents.values()].sort((a, b) => str(b.createdAt).localeCompare(str(a.createdAt)));
+  const box = $('agents-rows');
+  // one card per run, rebuilt only when that run's data changed (keeps focus, selection and open sections)
+  const existing = new Map([...box.children].map((el) => [el.dataset.id, el]));
+  const wanted = runs.map((a) => {
+    const sig = agentCardSig(a);
+    const old = existing.get(a.id);
+    if (old && old.dataset.sig === sig) return patchAgentCard(old, a);
+    const card = buildAgentCard(a);
+    card.dataset.sig = sig;
+    if (old) {
+      // keep open reasoning sections and scroll positions of the details, matched by step and block
+      const openSteps = new Set([...old.querySelectorAll('.agent-steps > li')].filter((li) => li.querySelector('details[open]')).map((li) => li.dataset.step));
+      for (const li of card.querySelectorAll('.agent-steps > li')) {
+        const d = li.querySelector('details');
+        if (d && openSteps.has(li.dataset.step)) d.open = true;
+      }
+      const scrolls = new Map([...old.querySelectorAll('.code[data-key]')].map((c) => [c.dataset.key, c.scrollTop]));
+      const focused = old.contains(document.activeElement) ? document.activeElement?.dataset?.action : null;
+      old.replaceWith(card);
+      // scroll positions apply once the card is in the document
+      for (const c of card.querySelectorAll('.code[data-key]')) {
+        const top = scrolls.get(c.dataset.key);
+        if (top) c.scrollTop = top;
+      }
+      if (focused) card.querySelector(`[data-action="${focused}"]`)?.focus();
+    }
+    return patchAgentCard(card, a);
+  });
+  for (const [id, el] of existing) if (!model.agents.has(id)) el.remove();
+  wanted.forEach((card, i) => {
+    if (box.children[i] !== card) box.insertBefore(card, box.children[i] ?? null);
+  });
+
+  const info = model.agentsInfo;
+  $('agents-empty').hidden = runs.length > 0;
+  setText(
+    $('agents-empty'),
+    info && info.enabled === false
+      ? 'Sub-agents are off: add config/models.json (or set AGENT_LLM_URL) with an OpenAI-compatible model to enable agent_run, agent_automate and agent_find.'
+      : 'No agent runs yet. The host agent starts them with agent_run, agent_automate or agent_find.',
+  );
+  const running = runs.filter((a) => a.status === 'running').length;
+  const queued = runs.filter((a) => a.status === 'queued').length;
+  const count = $('count-agents');
+  setText(count, running || queued ? [running ? `${running} running` : null, queued ? `${queued} queued` : null].filter(Boolean).join(' · ') : String(runs.length));
+  count.classList.toggle('warn', running + queued > 0);
+
+  const scripts = model.scripts.filter((sc) => sc && typeof sc === 'object');
+  const rowsEl = $('scripts-rows');
+  const scriptsSig = JSON.stringify(scripts);
+  if (rowsEl.dataset.sig !== scriptsSig) {
+    rowsEl.dataset.sig = scriptsSig;
+    rowsEl.replaceChildren(
+      ...scripts.map((sc) =>
+        h(
+          'div',
+          { class: 'script-row' },
+          h('span', { class: 'script-name mono', text: `${str(sc.name)} v${sc.version}` }),
+          h('span', { class: 'pill', dataset: { tone: sc.verification?.status === 'passed' ? 'ok' : sc.verification?.status === 'failed' ? 'err' : 'muted' } }, h('span', { class: 'pill-text', text: `verification ${str(sc.verification?.status ?? 'not_run')}` })),
+          h('span', { class: 'muted', text: `${sc.runs ?? 0} run${sc.runs === 1 ? '' : 's'}` }),
+          h('span', {
+            class: 'script-params mono',
+            text:
+              (Array.isArray(sc.params) ? sc.params : [])
+                .filter((p) => p && typeof p === 'object')
+                .map((p) => `${str(p.name)}${p.required ? '' : '?'}: ${str(p.type)}`)
+                .join(', ') || 'no parameters',
+          }),
+          h('span', { class: 'script-desc', text: str(sc.description) }),
+        ),
+      ),
+    );
+  }
+  $('scripts-empty').hidden = scripts.length > 0;
+  setText($('count-scripts'), String(scripts.length));
+  const foot = $('agents-foot');
+  const footSig = JSON.stringify(info ?? null);
+  if (info && foot.dataset.sig !== footSig) {
+    foot.dataset.sig = footSig;
+    const item = (label, value) => h('span', null, `${label} `, h('b', { text: value }));
+    foot.replaceChildren(
+      ...[
+        item('Agents', info.enabled ? 'on' : 'off'),
+        info.enabled ? item('Model', str(info.model) || '(first listed)') : null,
+        info.enabled && info.config ? item('Config', str(info.config)) : null,
+        info.enabled && info.endpoint ? item('Endpoint', str(info.endpoint)) : null,
+        info.enabled ? item('Context', `${Math.round((info.contextTokens ?? 0) / 1024)}k tokens`) : null,
+        info.enabled ? item('Running', `${info.running ?? 0}/${info.maxConcurrent ?? '?'}${info.queued ? ` (+${info.queued} queued)` : ''}`) : null,
+        info.scriptsDir ? item('Scripts', str(info.scriptsDir)) : null,
+      ].filter(Boolean),
+    );
+  }
+}
+
 // ------------------------------------------------------------------ inspector tabs + splitter
 
 function selectView(name) {
-  if (!['console', 'network', 'logs', 'sessions'].includes(name)) name = 'console';
+  if (!['console', 'network', 'logs', 'sessions', 'agents'].includes(name)) name = 'console';
   ui.view = name;
   store.set('view', name);
   for (const tab of document.querySelectorAll('.itab')) {
@@ -1820,6 +2304,7 @@ function selectView(name) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `view-${name}`;
   const follow = { console: cons.follow, network: net.follow, logs: logs.follow }[name];
   if (follow) requestAnimationFrame(() => follow.stick());
+  if (name === 'agents') void loadScripts();
   mark(name);
 }
 
@@ -1886,6 +2371,8 @@ const renderers = {
   network: renderNetwork,
   logs: renderLogs,
   sessions: renderSessions,
+  agents: renderAgents,
+  browsers: renderBrowsers,
 };
 
 function debounce(fn, ms) {
@@ -1930,8 +2417,10 @@ function init() {
       ev.preventDefault();
       return;
     }
-    $('btn-shot').href = `/api/screenshot?t=${Date.now()}`;
+    $('btn-shot').href = `/api/screenshot?browser=${encodeURIComponent(ui.watch)}&t=${Date.now()}`;
   });
+  $('browser-select').addEventListener('change', (ev) => switchBrowser(ev.target.value));
+  $('agents-rows').addEventListener('click', onAgentsClick);
 
   // activity filters
   $('activity-tool').addEventListener('change', (ev) => {
@@ -2059,9 +2548,15 @@ function init() {
     if (conn.state !== 'open') mark('stage');
   }, 1000);
   setInterval(() => mark('sessions'), 5000);
+  setInterval(() => {
+    if (ui.view === 'agents' && !document.hidden) {
+      tickAgents();
+      if (Date.now() - model.scriptsLoadedAt > 15_000) void loadScripts();
+    }
+  }, 1000);
 
   $('app').dataset.conn = conn.state;
-  mark('header', 'stage', 'tabs', 'framemeta', 'activity', 'console', 'network', 'logs', 'sessions');
+  mark('header', 'stage', 'tabs', 'framemeta', 'activity', 'console', 'network', 'logs', 'sessions', 'agents', 'browsers');
   connect();
 }
 

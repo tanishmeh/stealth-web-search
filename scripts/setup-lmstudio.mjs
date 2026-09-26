@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Add, update or remove the Stealth Browser MCP server in LM Studio's mcp.json.
+ * Add, update or remove the Stealth Web Search server in LM Studio's mcp.json.
  *
- *   npm run lmstudio:setup                       # add http://127.0.0.1:8931/mcp as "stealth-browser"
+ *   npm run lmstudio:setup                       # add http://127.0.0.1:8931/mcp as "stealth-web-search"
  *   npm run lmstudio:setup -- --token s3cret     # server started with AUTH_TOKEN
  *   npm run lmstudio:setup -- --print            # show the JSON and an "Add to LM Studio" deeplink only
  *   npm run lmstudio:setup -- --remove
@@ -11,18 +11,18 @@
  * next to the file before any change, and the result is 2-space indented JSON.
  * LM Studio watches the file and reloads it; no restart is needed.
  */
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
-const DEFAULT_NAME = 'stealth-browser';
+const DEFAULT_NAME = 'stealth-web-search';
 const DEFAULT_URL = 'http://127.0.0.1:8931/mcp';
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 const USAGE = `Usage: node scripts/setup-lmstudio.mjs [options]
 
-Adds the Stealth Browser MCP server to LM Studio's mcp.json (or updates it).
+Adds the Stealth Web Search server to LM Studio's mcp.json (or updates it).
 
 Options:
   --url <url>        MCP endpoint (default ${DEFAULT_URL})
@@ -30,8 +30,8 @@ Options:
   --token <token>    add "Authorization: Bearer <token>" (the server's AUTH_TOKEN)
   --no-token         remove a previously configured Authorization header
   --timeout <ms>     tool call timeout in milliseconds (default ${DEFAULT_TIMEOUT_MS})
-  --config <path>    mcp.json to edit (default $LMSTUDIO_HOME/mcp.json, else the LM Studio home
-                     named in ~/.lmstudio-home-pointer, else ~/.lmstudio/mcp.json)
+  --config <path>    mcp.json to edit (default: mcp.json in the LM Studio home named in
+                     ~/.lmstudio-home-pointer, else ~/.lmstudio/mcp.json)
   --remove           remove the server entry
   --dry-run          show the resulting file without writing it
   --print            print the server JSON and an lmstudio://add_mcp deeplink; change nothing
@@ -118,9 +118,8 @@ function parse() {
   };
 }
 
-/** LM Studio's home: LMSTUDIO_HOME, else the path LM Studio records in ~/.lmstudio-home-pointer, else ~/.lmstudio. */
+/** LM Studio's home: the path LM Studio records in ~/.lmstudio-home-pointer, else ~/.lmstudio (LM Studio has no environment variable for it). */
 function lmStudioHome() {
-  if (process.env.LMSTUDIO_HOME) return process.env.LMSTUDIO_HOME;
   try {
     const pointed = readFileSync(path.join(homedir(), '.lmstudio-home-pointer'), 'utf8').trim();
     if (pointed && path.isAbsolute(pointed)) return pointed;
@@ -204,11 +203,23 @@ function redactConfig(data) {
 
 /** The file that really holds the config: follow a symlink (dotfile managers) instead of replacing it. */
 function writeTarget(file) {
-  try {
-    return lstatSync(file).isSymbolicLink() ? realpathSync(file) : file;
-  } catch {
-    return file;
+  // follow symlinks, including one whose target does not exist yet (dotfile managers)
+  let p = file;
+  for (let i = 0; i < 40; i++) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch {
+      return p; // missing: write here
+    }
+    if (!st.isSymbolicLink()) return p;
+    try {
+      return realpathSync(p);
+    } catch {
+      p = path.resolve(path.dirname(p), readlinkSync(p)); // dangling: follow one hop
+    }
   }
+  return file;
 }
 
 function main() {

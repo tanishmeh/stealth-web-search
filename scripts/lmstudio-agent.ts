@@ -1,6 +1,6 @@
 /**
  * Command-line browser agent: a local LLM served by LM Studio drives the
- * Stealth Browser MCP server.
+ * Stealth Web Search server.
  *
  *   node scripts/lmstudio-agent.ts "Open https://example.com and tell me the heading"
  *
@@ -12,9 +12,10 @@
  *
  * `runAgent()` is exported for scripts/lmstudio-e2e.ts.
  */
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { pathToFileURL } from 'node:url';
 import { parseArgs, styleText } from 'node:util';
 import { Client, StreamableHTTPClientTransport, type CallToolResult, type Tool } from '@modelcontextprotocol/client';
 
@@ -26,7 +27,7 @@ export const REASONING_MODES: readonly ReasoningMode[] = ['none', 'low', 'medium
 
 export interface AgentOptions {
   task: string;
-  /** Streamable HTTP endpoint of the Stealth Browser MCP server. */
+  /** Streamable HTTP endpoint of the Stealth Web Search server. */
   mcpUrl?: string;
   /** Bearer token for the MCP server (its AUTH_TOKEN). */
   authToken?: string;
@@ -40,7 +41,7 @@ export interface AgentOptions {
   reasoning?: ReasoningMode;
   /** Only offer these tools to the model. */
   tools?: string[];
-  /** Only offer tools from these groups (core, content, forms, tabs, state, debug, capture). */
+  /** Only offer tools from these groups or with these names (core, content, forms, tabs, state, debug, capture, agents, scripts, or all). */
   toolsets?: string[];
   /** Forward screenshots to the model as images (default: when the model supports vision). */
   vision?: boolean;
@@ -709,7 +710,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     messages.push({ role: 'user', content: options.task });
 
     out.line(
-      out.style('bold', 'Stealth Browser agent') +
+      out.style('bold', 'Stealth Web Search agent') +
         out.style(
           'dim',
           ` | model ${model.id}${!model.listed ? ' (not in LM Studio\'s model list; check the id with `lms ls`)' : model.loaded ? '' : ' (not loaded yet: LM Studio loads it on the first request)'} | reasoning ${reasoning} | vision ${vision ? 'on' : 'off'} | ${tools.length} tools | ${mcpUrl}`,
@@ -956,14 +957,14 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
 const USAGE = `Usage: node scripts/lmstudio-agent.ts "task" [options]
 
-Runs a local LM Studio model as a browser agent against the Stealth Browser MCP server.
+Runs a local LM Studio model as a browser agent against the Stealth Web Search server.
 
 Options:
   --model <id>             LM Studio model (default: LMSTUDIO_MODEL, else the first loaded tool-use LLM)
   --max-steps <n>          model rounds before giving up (default 25)
   --reasoning <mode>       none | low | medium | high | on (default low; "on" keeps the model default)
   --tools <a,b,...>        only offer these tools
-  --toolsets <g,...>       only offer tools from these groups: core, content, forms, tabs, state, debug, capture
+  --toolsets <g,...>       only offer tools from these groups (or tool names): core, content, forms, tabs, state, debug, capture, agents, scripts, or all
   --no-vision              never send screenshots to the model as images
   --json <file>            write the full transcript as JSON
   --quiet                  print only the final answer
@@ -1071,7 +1072,9 @@ async function main(): Promise<void> {
   process.exitCode = result.ok ? 0 : result.stopReason === 'max_steps' ? 3 : result.stopReason === 'aborted' ? 130 : 1;
 }
 
-if (import.meta.main) {
+// import.meta.main needs Node 24.2; compare the script path on older 24.x releases
+const isMain = import.meta.main ?? (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href);
+if (isMain) {
   main().catch((err) => {
     process.stderr.write(`fatal: ${(err as Error)?.stack ?? err}\n`);
     process.exit(1);

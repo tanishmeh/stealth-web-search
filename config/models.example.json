@@ -1,0 +1,62 @@
+[
+  {
+    "name": "Local vLLM",
+    "vendor": "customendpoint",
+    "apiKey": "your-api-key",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "qwen3.8-27b",
+        "name": "Qwen3.8 27B (vLLM)",
+        "url": "http://192.168.1.50:8000/v1/chat/completions",
+        "toolCalling": true,
+        "vision": false,
+        "streaming": true,
+        "contextWindow": 262144,
+        "maxOutputTokens": 32768,
+        "thinking": true,
+        "supportsReasoningEffort": ["low", "medium", "xhigh"],
+        "reasoningEffortFormat": "chat-completions",
+        "modelOptions": {
+          "temperature": 0.4,
+          "top_p": 0.95
+        }
+      }
+    ],
+    "settings": {
+      "qwen3.8-27b": {
+        "reasoningEffort": "medium"
+      }
+    }
+  },
+  {
+    "name": "LM Studio",
+    "vendor": "lmstudio",
+    "apiKey": "lm-studio",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "qwen/qwen3.8-27b",
+        "name": "Qwen3.8 27B (LM Studio)",
+        "url": "http://host.docker.internal:1234/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "streaming": true,
+        "contextWindow": 32768,
+        "maxOutputTokens": 8192,
+        "thinking": true,
+        "supportsReasoningEffort": ["low", "medium", "high"],
+        "reasoningEffortFormat": "chat-completions",
+        "modelOptions": {
+          "temperature": 0.4,
+          "top_p": 0.95
+        }
+      }
+    ],
+    "settings": {
+      "qwen/qwen3.8-27b": {
+        "reasoningEffort": "low"
+      }
+    }
+  }
+]

@@ -1,0 +1,5 @@
+# OpenAI Codex CLI: add to ~/.codex/config.toml (or .codex/config.toml in a trusted project).
+[mcp_servers.stealth_web_search]
+url = "http://127.0.0.1:8931/mcp"
+# Codex's default is 60 s. The sub-agent tools wait up to 170 s before they answer "still running".
+tool_timeout_sec = 180

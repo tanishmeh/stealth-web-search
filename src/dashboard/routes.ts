@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { MCP_PATH } from '../mcp/constants.ts';
 import type { HttpDeps } from '../mcp/http.ts';
 import { SERVER_NAME, SERVER_VERSION } from '../version.ts';
-import type { FrameData, HubEvent } from './hub.ts';
+import { MAIN_BROWSER, type FrameData, type HubEvent } from './hub.ts';
 
 const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
 const FRAME_INTERVAL_MS = 80; // at most ~12 fps per viewer; latest frame always delivered
@@ -14,9 +15,36 @@ const FRAME_BACKLOG_BYTES = 1024 * 1024;
 // The dashboard reconnects on its own and rehydrates from 'hello'.
 const MAX_BACKLOG_BYTES = 32 * 1024 * 1024;
 
+/** The browser a viewer asked to watch, if it exists (else the main browser). */
+export function resolveWatch(deps: HttpDeps, requested: unknown): string {
+  const id = typeof requested === 'string' ? requested.trim() : '';
+  if (!id || id === MAIN_BROWSER) return MAIN_BROWSER;
+  return deps.registry?.has(id) ? id : MAIN_BROWSER;
+}
+
+function watchedBrowserStatus(deps: HttpDeps, watch: string) {
+  const { config } = deps;
+  const browser = watch === MAIN_BROWSER ? deps.browser : (deps.registry?.browser(watch) ?? null);
+  const common = {
+    stealth: config.obscura.stealth,
+    viewport: config.browser.viewport,
+    proxy: config.obscura.proxy ? 'configured' : null,
+    allowPrivateNetwork: config.obscura.allowPrivateNetwork,
+  };
+  if (!browser) return { connected: false, closed: true, tabs: [], activeTabId: null, queuedCalls: 0, ...common };
+  return {
+    connected: browser.connected,
+    tabs: browser.listTabs(),
+    activeTabId: browser.activeTab?.id ?? null,
+    queuedCalls: browser.mutex.queued,
+    ...common,
+  };
+}
+
 /** Server, engine, browser, live view and session status (no history): sent to every viewer every few seconds. */
-export function buildStatus(deps: HttpDeps) {
+export function buildStatus(deps: HttpDeps, watch: string = MAIN_BROWSER) {
   const { config, obscura, browser, sessions, hub } = deps;
+  const watched = watch === MAIN_BROWSER ? browser : (deps.registry?.browser(watch) ?? null);
   return {
     server: {
       name: SERVER_NAME,
@@ -30,23 +58,29 @@ export function buildStatus(deps: HttpDeps) {
       toolsets: config.browser.toolsets,
     },
     obscura: obscura.getStatus(),
-    browser: {
-      connected: browser.connected,
-      tabs: browser.listTabs(),
-      activeTabId: browser.activeTab?.id ?? null,
-      queuedCalls: browser.mutex.queued,
-      stealth: config.obscura.stealth,
-      viewport: config.browser.viewport,
-      proxy: config.obscura.proxy ? 'configured' : null,
-      allowPrivateNetwork: config.obscura.allowPrivateNetwork,
-    },
-    liveView: { enabled: browser.liveView.enabled, viewers: hub.viewerCount, frames: browser.liveView.frameCount },
+    obscuraIsolated: deps.isolatedObscura ? deps.isolatedObscura.getStatus() : null,
+    browser: watchedBrowserStatus(deps, watch),
+    liveView: { enabled: browser.liveView.enabled, viewers: hub.viewerCount, frames: (watched ?? browser).liveView.frameCount },
     sessions: sessions.list(),
+    watching: watch,
+    browsers: deps.registry?.list() ?? [{ id: MAIN_BROWSER, label: 'Main browser', kind: 'main', status: 'open', createdAt: deps.startedAt.toISOString() }],
+    agents: {
+      enabled: config.agent.enabled,
+      model: config.agent.model,
+      // config/models.json (provider) or the AGENT_LLM_* variables
+      config: config.agent.source.type === 'file' ? `${path.basename(config.agent.source.file)} (${config.agent.source.provider})` : 'environment',
+      endpoint: config.agent.endpoint ? new URL(config.agent.endpoint).origin : null, // origin only: never credentials
+      contextTokens: config.agent.contextTokens,
+      running: deps.agents?.activeCount ?? 0,
+      queued: deps.agents?.queuedCount ?? 0,
+      maxConcurrent: config.agent.maxConcurrent,
+      scriptsDir: config.scripts.dir,
+    },
   };
 }
 
-export function buildState(deps: HttpDeps) {
-  return { ...buildStatus(deps), history: deps.hub.history() };
+export function buildState(deps: HttpDeps, watch: string = MAIN_BROWSER) {
+  return { ...buildStatus(deps, watch), history: deps.hub.history(watch) };
 }
 
 export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
@@ -61,19 +95,47 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
   // browsers request /favicon.ico regardless of <link rel="icon">; avoid a 404 warning per dashboard load
   app.get('/favicon.ico', (_req, res) => res.redirect(301, '/assets/favicon.svg'));
 
-  app.get('/api/state', (_req, res) => {
+  app.get('/api/state', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.json(buildState(deps));
+    res.json(buildState(deps, resolveWatch(deps, req.query.browser)));
+  });
+
+  // Sub-agent run details for the dashboard: progress, each step's reasoning and tool calls, result.
+  app.get('/api/agents/:id', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const run = deps.agents?.get(String(req.params.id));
+    if (!run) return void res.status(404).json({ error: 'no such agent run' });
+    res.json({
+      summary: run.summary(),
+      input: run.input,
+      outcome: run.outcome,
+      error: run.error,
+      notes: run.notes,
+      sources: run.sources,
+      script: run.scriptName ? { name: run.scriptName, version: run.scriptVersion, tests: run.tests.map((t) => ({ ...t, output: undefined, ok: t.ok })) } : null,
+      steps: run.steps.slice(-60).map((st) => ({ ...st, reasoning: st.reasoning.slice(-1_500), content: st.content.slice(0, 1_500) })),
+      transcript: run.transcriptFile,
+    });
+  });
+
+  app.get('/api/scripts', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      res.json({ scripts: (await deps.scripts?.store.list()) ?? [] });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.get('/api/logs/download', (_req, res) => {
-    res.download(deps.logFile, 'stealth-browser-mcp.log', (err) => {
+    res.download(deps.logFile, 'stealth-web-search.log', (err) => {
       if (err && !res.headersSent) res.status(404).json({ error: 'log file not available yet' });
     });
   });
 
-  app.get('/api/screenshot', async (_req: Request, res: Response) => {
-    const tab = deps.browser.activeTab;
+  app.get('/api/screenshot', async (req: Request, res: Response) => {
+    const watch = resolveWatch(deps, req.query.browser);
+    const tab = (watch === MAIN_BROWSER ? deps.browser : deps.registry?.browser(watch))?.activeTab;
     if (!tab) return res.status(404).json({ error: 'no open tab' });
     try {
       const shot = await tab.send<{ data: string }>('Page.captureScreenshot', { format: 'png' }, 30_000);
@@ -86,6 +148,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
 
   app.get('/api/events', (req: Request, res: Response) => {
     const live = req.query.live === '1';
+    const watch = resolveWatch(deps, req.query.browser);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -135,19 +198,25 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
 
     // The history is captured before subscribing (so nothing is delivered twice); events raised while
     // subscribing, such as the "viewer connected" log line, are held back until 'hello' is out.
-    const hello = buildState(deps);
+    const hello = buildState(deps, watch);
     let held: HubEvent[] | null = [];
-    const unsubscribe = deps.hub.subscribe((event: HubEvent) => {
-      if (held) held.push(event);
-      else onEvent(event);
-    }, live);
+    const unsubscribe = deps.hub.subscribe(
+      (event: HubEvent) => {
+        if (held) held.push(event);
+        else onEvent(event);
+      },
+      live,
+      watch,
+    );
     hello.liveView.viewers = deps.hub.viewerCount; // include this viewer
     const helloChunk = encode('hello', hello);
     backlogLimit += Buffer.byteLength(helloChunk);
     write(helloChunk);
     // only the active tab's last frame: a frame of a closed tab would show a page that no longer exists
-    const latest = deps.hub.latestFrame;
-    if (live && latest && latest.tabId === deps.browser.activeTab?.id) {
+    // (a finished sub-agent's browser is gone; its last frame shows where it ended)
+    const latest = deps.hub.latestFrameFor(watch);
+    const watchedBrowser = watch === MAIN_BROWSER ? deps.browser : (deps.registry?.browser(watch) ?? null);
+    if (live && latest && (watchedBrowser ? latest.tabId === watchedBrowser.activeTab?.id : watch !== MAIN_BROWSER)) {
       send('frame', latest);
       lastFrameSent = Date.now();
     }
@@ -158,9 +227,9 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
     const heartbeat = setInterval(() => {
       if (!closed && !res.writableEnded) res.write(`: keep-alive ${Date.now()}\n\n`);
     }, 15_000);
-    const statusTimer = setInterval(() => send('status', buildStatus(deps)), 5_000);
+    const statusTimer = setInterval(() => send('status', buildStatus(deps, watch)), 5_000);
 
-    log.debug({ live, remoteAddress: req.socket.remoteAddress }, 'dashboard event stream opened');
+    log.debug({ live, watch, remoteAddress: req.socket.remoteAddress }, 'dashboard event stream opened');
     const cleanup = () => {
       if (closed) return;
       closed = true;

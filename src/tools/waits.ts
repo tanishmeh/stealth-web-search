@@ -141,7 +141,18 @@ interface TextState {
 
 type SelectorWaitState = 'visible' | 'attached' | 'hidden' | 'detached';
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Resolves after `ms`, or early when the calling run is stopped (a cancelled sub-agent or script). */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
 
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`;
@@ -158,7 +169,13 @@ function waitBudgetMs(ctx: ToolContext, timeoutSec: number | undefined): number 
  * awaitPromise, which would block the CDP connection and the live view).
  * Errors while the page is navigating count as "not yet".
  */
-async function poll<T>(tab: Tab, budgetMs: number, read: () => Promise<T>, done: (value: T) => boolean): Promise<{ ok: boolean; elapsedMs: number; last: T | null }> {
+async function poll<T>(
+  tab: Tab,
+  budgetMs: number,
+  read: () => Promise<T>,
+  done: (value: T) => boolean,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; elapsedMs: number; last: T | null }> {
   const started = Date.now();
   let last: T | null = null;
   for (;;) {
@@ -172,7 +189,8 @@ async function poll<T>(tab: Tab, budgetMs: number, read: () => Promise<T>, done:
     const elapsed = Date.now() - started;
     if (elapsed >= budgetMs || tab.closed) return { ok: false, elapsedMs: elapsed, last };
     const interval = elapsed < 1_000 ? 100 : 250;
-    await sleep(Math.min(interval, budgetMs - elapsed));
+    await sleep(Math.min(interval, budgetMs - elapsed), signal);
+    if (signal?.aborted) throw new ToolError('Stopped: the run was cancelled.');
   }
 }
 
@@ -223,6 +241,7 @@ export const waitFor = defineTool({
       budget,
       () => tab.callFunction<SelectorStatus>(SELECTOR_STATUS, [selector]),
       (s) => selectorReached(wanted, s),
+      ctx.signal,
     );
     const sel = JSON.stringify(selector);
     const nav = navigationDuring(tab, navSeq);
@@ -274,6 +293,7 @@ export const waitForText = defineTool({
       budget,
       () => tab.callFunction<TextState>(TEXT_STATE, [text]),
       (s) => s.visible !== Boolean(gone),
+      ctx.signal,
     );
     const quoted = JSON.stringify(text);
     const nav = navigationDuring(tab, navSeq);
@@ -296,7 +316,8 @@ export const wait = defineTool({
   annotations: { ...READ_ONLY, title: 'Wait' },
   handler: async ({ seconds: secs }, ctx) => {
     const ms = Math.max(0, Math.min(Math.round(secs * 1000), ctx.config.browser.toolTimeoutMs - 3_000));
-    await sleep(ms);
+    await sleep(ms, ctx.signal);
+    if (ctx.signal?.aborted) throw new ToolError('Stopped: the run was cancelled.');
     return textResult(`Waited ${Number((ms / 1000).toFixed(3))} s`);
   },
 });

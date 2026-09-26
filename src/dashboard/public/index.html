@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#0a0d13">
-  <title>Stealth Browser MCP</title>
+  <title>Stealth Web Search</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/styles.css">
   <script src="/assets/theme.js"></script>
@@ -49,6 +49,9 @@
     <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11.5M9 12h11.5M9 18h11.5M4 6h.01M4 12h.01M4 18h.01"/></symbol>
     <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></symbol>
     <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4.5" y="8" width="15" height="11.5" rx="3"/><path d="M12 8V4.5M12 4.5h.01M9 13h.01M15 13h.01M9.5 16.5h5M2.5 12.5v3M21.5 12.5v3"/></symbol>
+    <symbol id="i-script" viewBox="0 0 24 24"><path d="M7 3.5h8.5L20 8v12.5H7z"/><path d="M15.5 3.5V8H20M10 12.5l-1.8 1.8L10 16M14 12.5l1.8 1.8L14 16"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
   </svg>
 
   <div class="app" id="app">
@@ -56,7 +59,7 @@
       <div class="brand">
         <img class="brand-logo" src="/assets/favicon.svg" alt="" width="28" height="28">
         <div class="brand-text">
-          <span class="brand-name">Stealth Browser MCP</span>
+          <span class="brand-name">Stealth Web Search</span>
           <span class="brand-version" id="version">&nbsp;</span>
         </div>
       </div>
@@ -90,6 +93,10 @@
         <div class="chrome">
           <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Browser tabs (read-only)"></div>
           <div class="toolbar">
+            <label class="browser-pick" id="browser-pick" title="Browser to watch: the main browser MCP clients drive, or the private browser of a sub-agent or script run">
+              <svg class="icon"><use href="#i-browser"/></svg>
+              <select class="select" id="browser-select" aria-label="Browser to watch"><option value="main">Main browser</option></select>
+            </label>
             <div class="omnibox" id="omnibox">
               <svg class="icon omnibox-icon" id="omnibox-icon"><use href="#i-globe"/></svg>
               <span class="omnibox-url" id="omnibox-url"><span class="u-muted">No page open</span></span>
@@ -166,6 +173,9 @@
             <button class="itab" role="tab" type="button" id="itab-sessions" data-view="sessions" aria-selected="false" aria-controls="view-sessions">
               <svg class="icon"><use href="#i-users"/></svg>Sessions <span class="count" id="count-sessions">0</span>
             </button>
+            <button class="itab" role="tab" type="button" id="itab-agents" data-view="agents" aria-selected="false" aria-controls="view-agents">
+              <svg class="icon"><use href="#i-bot"/></svg>Agents <span class="count" id="count-agents">0</span>
+            </button>
           </div>
 
           <div class="view-tools" data-for="console">
@@ -209,6 +219,9 @@
           <div class="view-tools" data-for="sessions" hidden>
             <span class="tools-note" id="sessions-note">Sessionful (Streamable HTTP) clients</span>
           </div>
+          <div class="view-tools" data-for="agents" hidden>
+            <span class="tools-note" id="agents-note">Sub-agent runs and stored automation scripts</span>
+          </div>
         </div>
 
         <div class="views">
@@ -239,6 +252,16 @@
               <div class="view-empty inline" id="sessions-empty">No MCP clients connected.</div>
             </div>
             <div class="view-foot" id="server-foot"></div>
+          </div>
+          <div class="view" id="view-agents" role="tabpanel" aria-labelledby="itab-agents" hidden>
+            <div class="rows agents-scroll" id="agents-scroll">
+              <div id="agents-rows"></div>
+              <div class="view-empty inline" id="agents-empty">No agent runs yet.</div>
+              <div class="section-title"><svg class="icon"><use href="#i-script"/></svg>Stored scripts <span class="count" id="count-scripts">0</span></div>
+              <div id="scripts-rows"></div>
+              <div class="view-empty inline" id="scripts-empty">No scripts stored yet. agent_automate creates them.</div>
+            </div>
+            <div class="view-foot" id="agents-foot"></div>
           </div>
         </div>
       </section>

@@ -46,6 +46,7 @@ function spawnMain(port: number, env: Record<string, string | null> = {}): RawSe
     LOG_FORMAT: 'json',
     LOG_LEVEL: 'info',
     SBM_EXIT_WITH_PARENT: '1',
+    AGENT_MODELS_FILE: 'none',
   };
   for (const [k, v] of Object.entries(env)) {
     if (v === null) delete merged[k];

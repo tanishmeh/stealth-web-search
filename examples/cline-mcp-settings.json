@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "stealth-web-search": {
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:8931/mcp",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

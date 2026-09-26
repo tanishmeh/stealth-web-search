@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://tanishmeh.github.io/stealth-web-search/
+    about: Setup, configuration, sub-agents, LM Studio and troubleshooting guides.
+  - name: Report a security vulnerability
+    url: https://github.com/tanishmeh/stealth-web-search/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue for them.

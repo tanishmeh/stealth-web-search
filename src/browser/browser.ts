@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { CdpConnection, type CdpEvent } from '../cdp/client.ts';
 import type { Config } from '../config.ts';
-import type { Hub } from '../dashboard/hub.ts';
+import { MAIN_BROWSER, type BrowserChannel, type Hub } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
 import { ToolError } from './errors.ts';
@@ -49,10 +49,12 @@ export class Mutex {
 }
 
 /**
- * The single shared browser behind the MCP server. Owns the CDP connection to
- * Obscura, the tab registry and the active tab. All MCP sessions drive this
- * same browser (like one person's browser window), and tool calls are
- * serialized so agents observe consistent, ordered effects.
+ * A browser behind the MCP server. Owns one CDP connection to Obscura, the tab
+ * registry and the active tab. The main browser (id "main") is shared by all
+ * MCP sessions (like one person's browser window), and tool calls are
+ * serialized so agents observe consistent, ordered effects. Sub-agents and
+ * scripts get browsers of their own: Obscura isolates pages and cookies per
+ * CDP connection, so they never disturb the main browser or each other.
  *
  * Obscura keeps all page state per CDP connection, so if the connection drops
  * (e.g. Obscura crashed and was restarted) every tab is gone; the next tool
@@ -78,21 +80,31 @@ export class Browser extends EventEmitter {
   private readonly rootLog: Logger;
   private readonly config: Config;
   private readonly obscura: ObscuraProcess;
-  private readonly hub: Hub;
+  private readonly hub: BrowserChannel;
+  private readonly onEngineExit: (info: { code: number | null; signal: string | null } | undefined) => void;
+  /** "main", or the id of a sub-agent's / script's own browser. */
+  readonly id: string;
 
-  constructor(config: Config, log: Logger, obscura: ObscuraProcess, hub: Hub) {
+  constructor(config: Config, log: Logger, obscura: ObscuraProcess, hub: Hub, opts: { id?: string } = {}) {
     super();
+    this.id = opts.id ?? MAIN_BROWSER;
     this.config = config;
-    this.rootLog = log;
-    this.log = log.child({ component: 'browser' });
+    this.rootLog = this.id === MAIN_BROWSER ? log : log.child({ browserId: this.id });
+    this.log = this.rootLog.child({ component: 'browser' });
     this.obscura = obscura;
-    this.hub = hub;
-    this.liveView = new LiveView(this, hub, config, log);
-    obscura.on('exit', (info: { code: number | null; signal: string | null } | undefined) => {
+    this.hub = hub.channel(this.id);
+    this.liveView = new LiveView(this, this.hub, config, this.rootLog);
+    this.onEngineExit = (info) => {
       const why = info?.signal ? `browser engine exited (signal ${info.signal})` : info?.code != null ? `browser engine exited (code ${info.code})` : 'browser engine exited';
       this.pendingCloseReason = why;
       this.conn?.close();
-    });
+    };
+    obscura.on('exit', this.onEngineExit);
+  }
+
+  /** Dashboard channel of this browser (tags events with its id). */
+  get channel(): BrowserChannel {
+    return this.hub;
   }
 
   /** Refuse new work once shutdown starts, so queued/late tool calls don't reconnect mid-shutdown. */
@@ -102,6 +114,11 @@ export class Browser extends EventEmitter {
 
   get connected(): boolean {
     return this.conn?.isOpen ?? false;
+  }
+
+  /** How many times the connection was lost with open tabs (their pages and cookies are gone). */
+  get resetCount(): number {
+    return this.resetGeneration;
   }
 
   get tabCount(): number {
@@ -131,6 +148,11 @@ export class Browser extends EventEmitter {
           this.config.log.redactSecrets,
         );
         await conn.connect();
+        if (this.shuttingDown) {
+          // disposed while connecting: do not keep a connection nobody will close
+          conn.close();
+          throw new ToolError('This browser has been closed.');
+        }
         const gen = ++this.generation;
         conn.on('event', (ev: CdpEvent) => this.routeEvent(ev));
         conn.once('disconnected', (reason: string) => this.onDisconnected(gen, reason));
@@ -301,12 +323,31 @@ export class Browser extends EventEmitter {
   }
 
   publishTabs(): void {
-    this.hub.publish('tabs', { tabs: this.listTabs(), activeTabId: this.activeTabId });
+    this.hub.publishTabs({ tabs: this.listTabs(), activeTabId: this.activeTabId });
   }
 
   async shutdown(): Promise<void> {
     this.liveView.stop();
     this.conn?.close();
+  }
+
+  /**
+   * Close a sub-agent's or script's browser for good: its pages, cookies and storage are discarded
+   * (Obscura keeps them per connection) and it stops listening for engine restarts.
+   */
+  async dispose(): Promise<void> {
+    this.shuttingDown = true;
+    this.obscura.off('exit', this.onEngineExit);
+    this.liveView.stop();
+    const conn = this.conn;
+    this.generation++; // the close below must not be reported as a lost connection
+    for (const tab of this.tabs.values()) tab.dispose();
+    this.tabs.clear();
+    this.activeTabId = null;
+    this.conn = null;
+    conn?.close();
+    this.hub.publishBrowserEvent('closed');
+    this.publishTabs();
   }
 }
 

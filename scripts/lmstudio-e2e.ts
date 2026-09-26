@@ -1,6 +1,6 @@
 /**
  * End-to-end checks with a real local model: LM Studio drives the Stealth
- * Browser MCP server through the same loop as scripts/lmstudio-agent.ts, and
+ * Web Search server through the same loop as scripts/lmstudio-agent.ts, and
  * every scenario is judged by objective assertions (answer text, requests the
  * fixture site received, the server's own activity feed).
  *
@@ -13,7 +13,8 @@
  * When the server runs in Docker, set FIXTURE_HOST=host.docker.internal and run the
  * container with ALLOW_PRIVATE_NETWORK=true so the browser can reach the fixture site.
  */
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { parseArgs, styleText } from 'node:util';
 import { startFixtureServer, type FixtureServer } from '../test/helpers/fixture-server.ts';
 import { startTestServer, type TestServer } from '../test/helpers/harness.ts';
@@ -260,7 +261,7 @@ async function main(): Promise<number> {
   let spawned: TestServer | null = null;
   let mcpUrl = values['mcp-url'] ?? process.env.MCP_URL;
   if (values.spawn || (!mcpUrl && !(await isHealthy(DEFAULT_MCP_URL)))) {
-    console.log(style('dim', 'Starting a local Stealth Browser MCP server for this run...'));
+    console.log(style('dim', 'Starting a local Stealth Web Search server for this run...'));
     const saved = process.env.MCP_URL;
     delete process.env.MCP_URL;
     try {
@@ -408,7 +409,9 @@ async function main(): Promise<number> {
   return failed ? 1 : 0;
 }
 
-if (import.meta.main) {
+// import.meta.main needs Node 24.2; compare the script path on older 24.x releases
+const isMain = import.meta.main ?? (process.argv[1] !== undefined && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href);
+if (isMain) {
   main().then(
     (code) => process.exit(code),
     (err) => {
