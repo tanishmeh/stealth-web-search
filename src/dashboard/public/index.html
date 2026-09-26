@@ -1,14 +1,14 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="dark light">
-  <meta name="referrer" content="no-referrer">
-  <meta name="theme-color" content="#0a0d13">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="theme-color" content="#252526" />
   <title>Stealth Web Search</title>
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/assets/styles.css" />
   <script src="/assets/theme.js"></script>
   <script type="module" src="/assets/app.js"></script>
 </head>
@@ -52,33 +52,24 @@
     <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4.5" y="8" width="15" height="11.5" rx="3"/><path d="M12 8V4.5M12 4.5h.01M9 13h.01M15 13h.01M9.5 16.5h5M2.5 12.5v3M21.5 12.5v3"/></symbol>
     <symbol id="i-script" viewBox="0 0 24 24"><path d="M7 3.5h8.5L20 8v12.5H7z"/><path d="M15.5 3.5V8H20M10 12.5l-1.8 1.8L10 16M14 12.5l1.8 1.8L14 16"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M2.75 12S6.25 5.75 12 5.75 21.25 12 21.25 12 17.75 18.25 12 18.25 2.75 12 2.75 12z"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/></symbol>
   </svg>
 
   <div class="app" id="app">
+    <!-- top bar: product, connection state, MCP endpoint, theme -->
     <header class="topbar">
       <div class="brand">
-        <img class="brand-logo" src="/assets/favicon.svg" alt="" width="28" height="28">
-        <div class="brand-text">
-          <span class="brand-name">Stealth Web Search</span>
-          <span class="brand-version" id="version">&nbsp;</span>
-        </div>
+        <svg class="brand-mark" aria-hidden="true" focusable="false"><use href="#i-logo"/></svg>
+        <span class="brand-name">Stealth Web Search</span>
+        <span class="brand-version" id="version">&nbsp;</span>
       </div>
-
-      <div class="statusbar" id="statusbar" aria-label="Server status">
-        <span class="pill" id="pill-conn" data-tone="warn"><span class="dot"></span><span class="pill-text">Connecting</span></span>
-        <span class="pill" id="pill-obscura"><svg class="icon"><use href="#i-cpu"/></svg><span class="pill-text">Obscura</span></span>
-        <span class="pill" id="pill-cdp"><svg class="icon"><use href="#i-link"/></svg><span class="pill-text">CDP</span></span>
-        <span class="pill" id="pill-stealth"><svg class="icon"><use href="#i-shield"/></svg><span class="pill-text">Stealth</span></span>
-        <span class="pill" id="pill-viewers"><svg class="icon"><use href="#i-eye"/></svg><span class="pill-text">0 viewers</span></span>
-        <span class="pill" id="pill-clients"><svg class="icon"><use href="#i-plug"/></svg><span class="pill-text">0 MCP clients</span></span>
-        <span class="pill" id="pill-uptime"><svg class="icon"><use href="#i-clock"/></svg><span class="pill-text">Up –</span></span>
-      </div>
-
+      <span class="topbar-sep" aria-hidden="true"></span>
+      <span class="conn" id="pill-conn" data-tone="warn"><span class="dot" aria-hidden="true"></span><span class="pill-text">Connecting</span></span>
       <div class="topbar-end">
         <div class="endpoint" title="MCP endpoint (Streamable HTTP)">
           <span class="endpoint-label">MCP</span>
           <code class="endpoint-url" id="mcp-url">…</code>
-          <button class="icon-btn endpoint-copy" id="copy-mcp" type="button" aria-label="Copy MCP endpoint URL" title="Copy MCP endpoint URL">
+          <button class="endpoint-copy" id="copy-mcp" type="button" aria-label="Copy MCP endpoint URL" title="Copy MCP endpoint URL">
             <svg class="icon"><use href="#i-copy"/></svg>
           </button>
         </div>
@@ -89,35 +80,32 @@
     </header>
 
     <main class="layout" id="layout">
-      <section class="panel live" id="live-panel" aria-label="Live browser view">
-        <div class="chrome">
+      <!-- live view: the hero, right column, top row -->
+      <section class="pane live" id="live-panel" aria-label="Live browser view">
+        <div class="live-bar">
+          <label class="browser-pick" id="browser-pick" title="Browser to watch: the main browser MCP clients drive, or the private browser of a sub-agent or script run">
+            <select class="select" id="browser-select" aria-label="Browser to watch"><option value="main">Main browser</option></select>
+          </label>
           <div class="tabstrip" id="tabstrip" role="tablist" aria-label="Browser tabs (read-only)"></div>
-          <div class="toolbar">
-            <label class="browser-pick" id="browser-pick" title="Browser to watch: the main browser MCP clients drive, or the private browser of a sub-agent or script run">
-              <svg class="icon"><use href="#i-browser"/></svg>
-              <select class="select" id="browser-select" aria-label="Browser to watch"><option value="main">Main browser</option></select>
-            </label>
-            <div class="omnibox" id="omnibox">
-              <svg class="icon omnibox-icon" id="omnibox-icon"><use href="#i-globe"/></svg>
-              <span class="omnibox-url" id="omnibox-url"><span class="u-muted">No page open</span></span>
-              <span class="omnibox-title" id="omnibox-title"></span>
-            </div>
-            <span class="framemeta" id="framemeta" data-tone="idle" title="Live view status">
-              <span class="framemeta-dot"></span><span id="framemeta-text">No frames</span>
-            </span>
-            <div class="live-actions">
-              <button class="btn" id="btn-pause" type="button" aria-pressed="false" title="Pause the live view (P)">
-                <svg class="icon"><use href="#i-pause"/></svg><span>Pause</span>
-              </button>
-              <a class="icon-btn" id="btn-shot" href="/api/screenshot" target="_blank" rel="noopener noreferrer" title="Open a full-resolution screenshot of the active tab" aria-label="Open full-resolution screenshot">
-                <svg class="icon"><use href="#i-image"/></svg>
-              </a>
-              <button class="icon-btn" id="btn-fullscreen" type="button" title="Fullscreen (F)" aria-label="Toggle fullscreen">
-                <svg class="icon"><use href="#i-expand"/></svg>
-              </button>
-            </div>
+        </div>
+        <div class="toolbar live-toolbar">
+          <div class="omnibox" id="omnibox">
+            <svg class="icon omnibox-icon" id="omnibox-icon"><use href="#i-globe"/></svg>
+            <span class="omnibox-url" id="omnibox-url"><span class="u-muted">No page open</span></span>
+            <span class="omnibox-title" id="omnibox-title"></span>
           </div>
-          <div class="busybar" id="busybar" hidden></div>
+          <span class="framemeta" id="framemeta" data-tone="idle" title="Live view status"><span class="framemeta-dot"></span><span id="framemeta-text">No frames</span></span>
+          <span class="tb-sep" aria-hidden="true"></span>
+          <button class="btn" id="btn-pause" type="button" aria-pressed="false" title="Pause the live view (P)">
+            <svg class="icon"><use href="#i-pause"/></svg><span>Pause</span><kbd aria-hidden="true">P</kbd>
+          </button>
+          <a class="icon-btn" id="btn-shot" href="/api/screenshot" target="_blank" rel="noopener noreferrer" title="Open a full-resolution screenshot of the active tab" aria-label="Open full-resolution screenshot">
+            <svg class="icon"><use href="#i-image"/></svg>
+          </a>
+          <button class="icon-btn" id="btn-fullscreen" type="button" title="Fullscreen (F)" aria-label="Toggle fullscreen">
+            <svg class="icon"><use href="#i-expand"/></svg>
+          </button>
+          <div class="busybar" id="busybar" hidden=""></div>
         </div>
 
         <div class="stage" id="stage" data-state="overlay">
@@ -139,57 +127,50 @@
         </div>
       </section>
 
-      <section class="panel activity" id="activity-panel" aria-label="Activity timeline">
-        <div class="panel-head">
-          <h2 class="panel-title"><svg class="icon"><use href="#i-activity"/></svg>Activity <span class="count" id="activity-count">0</span></h2>
-          <div class="panel-tools">
-            <select class="select" id="activity-tool" aria-label="Filter by tool"><option value="">All tools</option></select>
-            <button class="chip" id="activity-errors" type="button" aria-pressed="false" title="Show only failed tool calls">
-              <svg class="icon"><use href="#i-alert"/></svg>Errors
-            </button>
-          </div>
+      <!-- activity: the command log, left rail spanning both rows -->
+      <section class="pane activity" id="activity-panel" aria-label="Activity timeline">
+        <div class="pane-head">
+          <h2 class="pane-title">Activity <span class="count" id="activity-count">0</span></h2>
+        </div>
+        <div class="toolbar pane-toolbar">
+          <select class="select" id="activity-tool" aria-label="Filter by tool"><option value="">All tools</option></select>
+          <button class="check" id="activity-errors" type="button" aria-pressed="false" title="Show only failed tool calls"><span class="check-box" aria-hidden="true"></span>Errors only</button>
         </div>
         <ol class="timeline" id="activity-list"></ol>
         <div class="list-empty" id="activity-empty">
-          <svg class="icon"><use href="#i-activity"/></svg>
           <div class="list-empty-title" id="activity-empty-title">No tool calls yet</div>
           <div class="list-empty-sub" id="activity-empty-sub">Connect an MCP client and ask it to browse. Every tool call shows up here.</div>
         </div>
       </section>
 
-      <section class="panel inspector" id="inspector" aria-label="Inspector">
+      <!-- inspector: right column, bottom row; its top border is the splitter -->
+      <section class="pane inspector" id="inspector" aria-label="Inspector">
         <div class="splitter" id="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize panels" tabindex="0"></div>
         <div class="inspector-head">
           <div class="itabs" role="tablist" aria-label="Inspector views">
-            <button class="itab" role="tab" type="button" id="itab-console" data-view="console" aria-selected="true" aria-controls="view-console">
-              <svg class="icon"><use href="#i-terminal"/></svg>Console <span class="count" id="count-console">0</span>
-            </button>
-            <button class="itab" role="tab" type="button" id="itab-network" data-view="network" aria-selected="false" aria-controls="view-network">
-              <svg class="icon"><use href="#i-network"/></svg>Network <span class="count" id="count-network">0</span>
-            </button>
-            <button class="itab" role="tab" type="button" id="itab-logs" data-view="logs" aria-selected="false" aria-controls="view-logs">
-              <svg class="icon"><use href="#i-list"/></svg>Logs <span class="count" id="count-logs">0</span>
-            </button>
-            <button class="itab" role="tab" type="button" id="itab-sessions" data-view="sessions" aria-selected="false" aria-controls="view-sessions">
-              <svg class="icon"><use href="#i-users"/></svg>Sessions <span class="count" id="count-sessions">0</span>
-            </button>
-            <button class="itab" role="tab" type="button" id="itab-agents" data-view="agents" aria-selected="false" aria-controls="view-agents">
-              <svg class="icon"><use href="#i-bot"/></svg>Agents <span class="count" id="count-agents">0</span>
-            </button>
+            <button class="itab" role="tab" type="button" id="itab-console" data-view="console" aria-selected="true" aria-controls="view-console">Console <span class="count" id="count-console">0</span></button>
+            <button class="itab" role="tab" type="button" id="itab-network" data-view="network" aria-selected="false" aria-controls="view-network">Network <span class="count" id="count-network">0</span></button>
+            <button class="itab" role="tab" type="button" id="itab-logs" data-view="logs" aria-selected="false" aria-controls="view-logs">Logs <span class="count" id="count-logs">0</span></button>
+            <button class="itab" role="tab" type="button" id="itab-sessions" data-view="sessions" aria-selected="false" aria-controls="view-sessions">Sessions <span class="count" id="count-sessions">0</span></button>
+            <button class="itab" role="tab" type="button" id="itab-agents" data-view="agents" aria-selected="false" aria-controls="view-agents">Agents <span class="count" id="count-agents">0</span></button>
           </div>
+        </div>
 
+        <div class="toolbar inspector-tools">
           <div class="view-tools" data-for="console">
-            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="console-search" placeholder="Filter messages" aria-label="Filter console messages" spellcheck="false"></label>
+            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="console-search" placeholder="Filter messages" aria-label="Filter console messages" spellcheck="false" /></label>
             <select class="select" id="console-level" aria-label="Console level">
               <option value="all">All levels</option>
               <option value="warn">Warnings &amp; errors</option>
               <option value="error">Errors only</option>
             </select>
-            <button class="chip" id="console-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest entry"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
+            <span class="tools-spacer"></span>
+            <button class="toggle" id="console-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest entry"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
+            <span class="tb-sep" aria-hidden="true"></span>
             <button class="icon-btn" id="console-clear" type="button" title="Clear console view" aria-label="Clear console view"><svg class="icon"><use href="#i-ban"/></svg></button>
           </div>
-          <div class="view-tools" data-for="network" hidden>
-            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="network-search" placeholder="Filter URLs" aria-label="Filter requests" spellcheck="false"></label>
+          <div class="view-tools" data-for="network" hidden="">
+            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="network-search" placeholder="Filter URLs" aria-label="Filter requests" spellcheck="false" /></label>
             <select class="select" id="network-type" aria-label="Resource type">
               <option value="">All types</option>
               <option value="doc">Document</option>
@@ -200,24 +181,28 @@
               <option value="font">Font</option>
               <option value="other">Other</option>
             </select>
-            <button class="chip" id="network-failed" type="button" aria-pressed="false" title="Show only failed requests (HTTP 4xx/5xx)"><svg class="icon"><use href="#i-alert"/></svg>Failed</button>
-            <button class="chip" id="network-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest request"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
+            <button class="check" id="network-failed" type="button" aria-pressed="false" title="Show only failed requests (HTTP 4xx/5xx)"><span class="check-box" aria-hidden="true"></span>Failed only</button>
+            <span class="tools-spacer"></span>
+            <button class="toggle" id="network-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest request"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
+            <span class="tb-sep" aria-hidden="true"></span>
             <button class="icon-btn" id="network-clear" type="button" title="Clear network view" aria-label="Clear network view"><svg class="icon"><use href="#i-ban"/></svg></button>
           </div>
-          <div class="view-tools" data-for="logs" hidden>
-            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="logs-search" placeholder="Search logs" aria-label="Search logs" spellcheck="false"></label>
+          <div class="view-tools" data-for="logs" hidden="">
+            <label class="search"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="logs-search" placeholder="Search logs" aria-label="Search logs" spellcheck="false" /></label>
             <select class="select" id="logs-level" aria-label="Minimum log level">
-              <option value="debug">Debug +</option>
-              <option value="info">Info +</option>
-              <option value="warn">Warn +</option>
-              <option value="error">Error +</option>
+              <option value="debug">Debug and up</option>
+              <option value="info">Info and up</option>
+              <option value="warn">Warn and up</option>
+              <option value="error">Error and up</option>
             </select>
             <select class="select" id="logs-component" aria-label="Component"><option value="">All components</option></select>
-            <button class="chip" id="logs-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest log line"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
-            <a class="icon-btn" id="logs-download" href="/api/logs/download" download title="Download the server log file" aria-label="Download the server log file"><svg class="icon"><use href="#i-download"/></svg></a>
+            <span class="tools-spacer"></span>
+            <button class="toggle" id="logs-follow" type="button" aria-pressed="true" title="Keep scrolled to the newest log line"><svg class="icon"><use href="#i-arrow-down"/></svg>Follow</button>
+            <span class="tb-sep" aria-hidden="true"></span>
+            <a class="icon-btn" id="logs-download" href="/api/logs/download" download="" title="Download the server log file" aria-label="Download the server log file"><svg class="icon"><use href="#i-download"/></svg></a>
           </div>
-          <div class="view-tools" data-for="sessions" hidden>
-            <span class="tools-note" id="sessions-note">Sessionful (Streamable HTTP) clients</span>
+          <div class="view-tools" data-for="sessions" hidden="">
+            <span class="tools-note" id="sessions-note">Sessionful (Streamable HTTP) MCP clients</span>
           </div>
           <div class="view-tools" data-for="agents" hidden>
             <span class="tools-note" id="agents-note">Sub-agent runs and stored automation scripts</span>
@@ -257,7 +242,7 @@
             <div class="rows agents-scroll" id="agents-scroll">
               <div id="agents-rows"></div>
               <div class="view-empty inline" id="agents-empty">No agent runs yet.</div>
-              <div class="section-title"><svg class="icon"><use href="#i-script"/></svg>Stored scripts <span class="count" id="count-scripts">0</span></div>
+              <div class="section-title">Stored scripts <span class="count" id="count-scripts">0</span></div>
               <div id="scripts-rows"></div>
               <div class="view-empty inline" id="scripts-empty">No scripts stored yet. agent_automate creates them.</div>
             </div>
@@ -266,6 +251,18 @@
         </div>
       </section>
     </main>
+
+    <!-- status bar: server health on the left, audience and uptime on the right -->
+    <footer class="statusbar" id="statusbar" aria-label="Server status">
+      <span class="status-item" id="pill-obscura"><span class="dot" aria-hidden="true"></span><span class="pill-text">Obscura</span></span>
+      <span class="status-item" id="pill-cdp"><span class="dot" aria-hidden="true"></span><span class="pill-text">CDP</span></span>
+      <span class="status-item" id="pill-stealth"><span class="dot" aria-hidden="true"></span><span class="pill-text">Stealth</span></span>
+      <span class="statusbar-spacer" aria-hidden="true"></span>
+      <span class="status-item" id="pill-viewers"><span class="dot" aria-hidden="true"></span><span class="pill-text">0 viewers</span></span>
+      <span class="status-item" id="pill-clients"><span class="dot" aria-hidden="true"></span><span class="pill-text">0 MCP clients</span></span>
+      <span class="status-item" id="pill-uptime"><span class="dot" aria-hidden="true"></span><span class="pill-text">Up –</span></span>
+    </footer>
   </div>
+
 </body>
 </html>

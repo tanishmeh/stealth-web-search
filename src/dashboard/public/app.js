@@ -603,7 +603,7 @@ function applyTheme(theme) {
   btn.title = label;
   btn.setAttribute('aria-label', label);
   const dark = ui.theme === 'dark' || (ui.theme === 'system' && !matchMedia('(prefers-color-scheme: light)').matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0d13' : '#ffffff');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#252526' : '#f3f3f3');
 }
 
 function pill(id, text, tone, title) {
