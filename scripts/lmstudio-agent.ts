@@ -445,6 +445,7 @@ const SUB_AGENT_QUESTIONS = `Sub-agent questions: a sub-agent run (agent_run, ag
 - Answer from the user's task when it decides the question.
 - The user cannot answer: reply "No" to a confirm question (placing an order, paying, sending a message, deleting) that the task did not explicitly approve, and say so in your final answer.
 - Never send a password. Give a one-time code only if the task contains it; otherwise reply that you do not have it.
+- Answer only the questions of runs you started in this task; runs other clients started are theirs to answer.
 - If you cannot answer at all, call agent_cancel for that run.`;
 
 export function buildSystemPrompt(serverInstructions: string | undefined, vision: boolean, extra?: string, subAgents = false): string {

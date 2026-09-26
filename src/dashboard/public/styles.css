@@ -2668,15 +2668,14 @@ kbd {
   font-weight: 400;
 }
 
+/* the whole question (at most 1000 characters), with the actual question usually at its end; only a
+   text of very many short lines scrolls */
 .agent-question-text {
-  display: -webkit-box;
-  overflow: hidden;
+  max-height: 40em;
+  overflow-y: auto;
   color: var(--fg-strong);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 8;
-  line-clamp: 8;
 }
 
 .agent-question-options {
@@ -3089,6 +3088,11 @@ kbd {
 
 .snapshot-row.confirming {
   background: var(--bg-open);
+}
+
+/* after a delete the focus rests on the neighbouring row: its ring is drawn inside the scroll box */
+.snapshot-row:focus-visible {
+  outline-offset: -2px;
 }
 
 .snapshot-head {

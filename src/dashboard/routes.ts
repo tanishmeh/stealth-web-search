@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
+import { DEFAULT_ALLOWED_HOSTS } from '../config.ts';
 import { MCP_PATH } from '../mcp/constants.ts';
 import type { HttpDeps } from '../mcp/http.ts';
 import { SnapshotError, SnapshotNotFoundError, normalizeSnapshotName } from '../snapshots/store.ts';
@@ -86,28 +87,44 @@ export function buildState(deps: HttpDeps, watch: string = MAIN_BROWSER) {
   return { ...buildStatus(deps, watch), history: deps.hub.history(watch) };
 }
 
+/** "name:port" or "[v6]:port" (a bare IPv6 address such as "::1" has no port). */
+const WITH_PORT = /^(\[[^\]]*\]|[^:[\]]+):\d+$/;
+
+/**
+ * Whether an ALLOWED_HOSTS entry is the Origin's host. An entry with a port matches exactly; a name
+ * without one (as ALLOWED_HOSTS is usually written, like the Host check) matches that name on any port,
+ * since behind a proxy on a non-default port the Origin carries the port. The built-in loopback names
+ * stay exact: another port there is another local server.
+ */
+function allowedOrigin(entry: string, url: URL): boolean {
+  const e = entry.toLowerCase();
+  if (e === url.host.toLowerCase()) return true;
+  return !WITH_PORT.test(e) && !DEFAULT_ALLOWED_HOSTS.includes(e) && e === url.hostname.toLowerCase();
+}
+
 /**
  * Why a state-changing dashboard request is refused (null: allowed): it must carry X-SBM-Request: 1
- * and an Origin whose host (host:port) is this server's (the Host header, ALLOWED_HOSTS or PUBLIC_URL,
- * so it also works behind a TLS proxy), and Sec-Fetch-Site, when sent, must be same-origin or none.
+ * and an Origin whose host (host:port) is this server's (the Host header, ALLOWED_HOSTS on any port or
+ * PUBLIC_URL, so it also works behind a TLS proxy), and Sec-Fetch-Site, when sent, must be same-origin or none.
  */
 export function csrfRefusal(req: Request, deps: Pick<HttpDeps, 'config'>): string | null {
   if (req.header('x-sbm-request') !== '1') return 'missing X-SBM-Request header';
   const origin = req.header('origin');
   if (!origin) return 'missing Origin header';
-  let host: string;
+  let url: URL;
   try {
-    host = new URL(origin).host.toLowerCase();
+    url = new URL(origin);
   } catch {
     return 'invalid Origin header';
   }
+  const host = url.host.toLowerCase();
   let publicHost: string | null = null;
   try {
     publicHost = new URL(deps.config.publicUrl).host.toLowerCase();
   } catch {
     publicHost = null;
   }
-  const own = host === (req.header('host') ?? '').toLowerCase() || deps.config.allowedHosts.some((h) => h.toLowerCase() === host) || host === publicHost;
+  const own = host === (req.header('host') ?? '').toLowerCase() || deps.config.allowedHosts.some((h) => allowedOrigin(h, url)) || host === publicHost;
   if (!own) return 'the request comes from another site (Origin)';
   const site = req.header('sec-fetch-site');
   if (site !== undefined && site !== 'same-origin' && site !== 'none') return 'the request comes from another site (Sec-Fetch-Site)';

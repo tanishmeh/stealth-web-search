@@ -74,10 +74,19 @@ async function spawnServer(port: number, extraEnv: Record<string, string> = {}):
 }
 const call = (name: string, args: Record<string, unknown>): FakeTurn => ({ reasoning: `Thinking about ${name}.`, toolCalls: [{ name, arguments: args }] });
 
-// the ASK-UI run asks the host twice: an order to approve, then a one-time code (secret)
-const ORDER_QUESTION = 'Place the order for 1 Red Apple Phone, total $10.00, delivered to the saved address?';
+// the ASK-UI run asks the host twice: an order to approve, then a one-time code (secret). The first
+// question is long, with the question itself at the end, as models write them.
+const ORDER_QUESTION =
+  'I searched the fixture shop for phones and compared what it has. The Red Apple Phone costs $10.00 and is in stock, with free delivery in 2 days. ' +
+  'The Green Apple Phone costs $12.50 and ships in a week. The Blue Apple Phone costs $9.00 but is sold out, and the shop does not say when it is back. ' +
+  'The cart is empty, so the order would hold one item only. The saved address is the one on the account, and the saved card pays for it; ' +
+  'no coupon applies to this order. The checkout page shows the total with tax and delivery included, and the shop does not accept returns of opened phones. ' +
+  'Place the order for 1 Red Apple Phone, total $10.00, delivered to the saved address?';
 const CODE_QUESTION = 'The shop sent a 6-digit sign-in code to the account email. What is the code?';
 const CODE = '482913';
+// keeps every EventSource the page opens, so a test can hand the dashboard events the server did not send
+const SSE_TAP = `(() => { const Real = window.EventSource; window.__streams = []; window.EventSource = class extends Real { constructor(...args) { super(...args); window.__streams.push(this); } }; })();`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_PATH)' }, () => {
   let chrome: Chrome;
@@ -106,6 +115,34 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
   const openConfirm = async (name: string) => {
     await page.click(`${row(name)} [data-action="delete"]`);
     await page.waitFor(`the delete confirmation of ${name}`, `${exists(`${row(name)} [role="group"] [data-action="confirm-delete"]`)} && ${focusedOn('confirm-delete', name)}`);
+  };
+  const focusedRow = (name: string) => `(document.activeElement === document.querySelector(${JSON.stringify(row(name))}))`;
+  // Enter the way a keyboard sends it; held down, it repeats (after 375 ms, every 33 ms: a fast repeat setting).
+  // Only on buttons: headless Chrome on macOS re-sends an Enter that nothing handles, in a loop.
+  const enter = (type: 'keyDown' | 'keyUp', autoRepeat = false) =>
+    page.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, autoRepeat, ...(type === 'keyDown' ? { text: '\r', unmodifiedText: '\r' } : {}) });
+  const holdEnter = async (ms: number) => {
+    const start = Date.now();
+    await enter('keyDown');
+    await sleep(375);
+    while (Date.now() - start < ms) {
+      await enter('keyDown', true);
+      await sleep(33);
+    }
+    await enter('keyUp');
+  };
+  // what a screen reader announces for an element: its accessible name and description
+  const ax = async (selector: string) => {
+    const { root } = await page.send('DOM.getDocument', { depth: 0 });
+    const { nodeId } = await page.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+    const { nodes } = await page.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+    return { name: String(nodes[0]?.name?.value ?? ''), description: String(nodes[0]?.description?.value ?? '') };
+  };
+  const saveCookieSnapshot = async (name: string, description: string, expires?: number) => {
+    const cookie = await srv.call('browser_set_cookie', { name: 'fixture', value: name, domain: `${name}.test`, ...(expires ? { expires } : {}) });
+    assert.equal(cookie.isError, false, cookie.text);
+    const saved = await srv.call('snapshot_save', { name, description, domains: [`${name}.test`] });
+    assert.equal(saved.isError, false, saved.text);
   };
 
   before(async () => {
@@ -301,7 +338,10 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
   test('network: requests, failed and type filters, search, clear', async () => {
     await openTab('network');
     await srv.call('browser_navigate', { url: `${site.baseUrl}/network.html` });
-    await page.waitFor('network rows', `document.querySelectorAll('#network-rows > *').length >= 3`);
+    // the list keeps earlier pages' requests: wait for every request of this page before counting (in stealth
+    // mode Obscura does not report the page's fetch calls)
+    const pageRows = ['/network.html', '/network-style.css', '/network-script.js', '/status/404?img=1'];
+    await page.waitFor('network rows', `${JSON.stringify(pageRows)}.every((u) => [...document.querySelectorAll('#network-rows > *')].some((r) => r.textContent.includes(u)))`);
     const all = await count('#network-rows > *');
     await page.click('#network-failed');
     await page.waitFor('failed only', `${shown('#network-rows > *')}.length > 0 && ${shown('#network-rows > *')}.every((r) => r.textContent.includes('404'))`);
@@ -312,7 +352,8 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     await typeInto('network-search', 'network-script');
     await page.waitFor('the search', `${shown('#network-rows > *')}.length === 1`);
     await typeInto('network-search', '');
-    await page.waitFor('all rows', `${shown('#network-rows > *')}.length === ${all}`);
+    // every row again (a late request, such as an image, may have added one since the count)
+    await page.waitFor('all rows', `${shown('#network-rows > *')}.length === document.querySelectorAll('#network-rows > *').length && ${shown('#network-rows > *')}.length >= ${all}`);
     assert.ok((await text('network-foot')).length > 0, 'the footer shows totals');
     await page.click('#network-clear');
     await page.waitFor('a cleared list', `document.querySelectorAll('#network-rows > *').length === 0`);
@@ -427,6 +468,10 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     await openConfirm('ui-local');
     assert.equal(await page.eval(`document.querySelector(${JSON.stringify(`${row('ui-local')} [data-action="delete"]`)}).getAttribute('aria-expanded')`), 'true');
     assert.match(await page.eval<string>(textOf(`${row('ui-local')} [role="group"]`)), /Delete snapshot "ui-local" for good\?/);
+    // the focused button carries the warning, so a screen reader reads it too
+    const confirm = await ax(`${row('ui-local')} [data-action="confirm-delete"]`);
+    assert.equal(confirm.name, 'Delete snapshot ui-local for good');
+    assert.match(confirm.description, /Cookies it already put into a browser stay until cleared/);
     await page.click(`${row('ui-local')} [data-action="cancel-delete"]`);
     await page.waitFor('the confirmation to close (Cancel)', `!${exists(`${row('ui-local')} [data-action="confirm-delete"]`)} && ${focusedOn('delete', 'ui-local')}`);
 
@@ -448,8 +493,8 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
 
     await page.click(`${row('ui-local')} [data-action="confirm-delete"]`);
     await page.waitFor('the row to go', `!${exists(row('ui-local'))} && document.getElementById('count-snapshots').textContent === '1'`);
-    // focus moves to the neighbouring row
-    await page.waitFor('the focus on the next row', focusedOn('delete', 'ui-shop'));
+    // focus moves to the neighbouring row itself (not its Delete button, where another Enter would ask again)
+    await page.waitFor('the focus on the next row', focusedRow('ui-shop'));
     assert.deepEqual(await savedNames(), ['ui-shop']);
     const listed = await srv.call('snapshot_list', {});
     assert.ok(!listed.text.includes('ui-local'), listed.text);
@@ -469,6 +514,70 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     } finally {
       await page.eval(`(() => { window.fetch = window.__realFetch; return true; })()`);
     }
+    // a live update rebuilds the row: the error stays on screen, but it is not announced again
+    await page.eval(`(() => { document.querySelector(${JSON.stringify(row('ui-shop'))}).dataset.before = '1'; return true; })()`);
+    const described = await srv.call('snapshot_describe', { name: 'ui-shop', description: 'Fixture shop, account ui-tester (checked)' });
+    assert.equal(described.isError, false, described.text);
+    await page.waitFor('the live update', `${textOf(row('ui-shop'))}.includes('(checked)')`);
+    assert.equal(await page.eval(`document.querySelector(${JSON.stringify(row('ui-shop'))}).dataset.before ?? null`), null, 'the row was rebuilt');
+    assert.ok((await page.eval<string>(textOf(row('ui-shop')))).includes('X-SBM-Request'), 'the error is still shown');
+    assert.equal(await page.eval(exists(`${row('ui-shop')} [role="alert"]`)), false, 'the rebuilt row holds no new alert');
+  });
+
+  test('snapshots: holding Enter deletes at most the one snapshot it confirmed', async () => {
+    const names = ['hold-a', 'hold-b', 'hold-c'];
+    for (const name of names) await saveCookieSnapshot(name, `Hold test ${name}`);
+    await page.waitFor('the new rows', names.map((n) => exists(row(n))).join(' && '));
+    // held on Delete: the first keydown opens the confirmation, the repeats do not confirm it
+    await page.eval(`(() => { document.querySelector(${JSON.stringify(`${row('hold-a')} [data-action="delete"]`)}).focus(); return true; })()`);
+    await holdEnter(1200);
+    await page.waitFor('the confirmation of hold-a', focusedOn('confirm-delete', 'hold-a'));
+    await sleep(300);
+    assert.deepEqual((await savedNames()).sort(), [...names, 'ui-shop']);
+    // held on the red Delete: hold-a goes, and the focus rests on the next row itself (not a button, so
+    // another Enter there does nothing)
+    await holdEnter(1500);
+    await page.waitFor('the focus on the next row', `!${exists(row('hold-a'))} && ${focusedRow('hold-b')}`);
+    await sleep(300);
+    assert.deepEqual((await savedNames()).sort(), ['hold-b', 'hold-c', 'ui-shop']);
+    assert.equal(await page.eval(exists('#snapshots-rows [data-action="confirm-delete"]')), false);
+    assert.equal(await page.eval(focusedRow('hold-b')), true);
+  });
+
+  test('snapshots: after a delete the focus goes to the neighbouring row, also when the new list arrives first', async () => {
+    // the server publishes the new list before it answers the DELETE: hold the answer back, so the list is drawn first
+    await page.eval(`(() => { const real = window.fetch; window.__realFetch = real; window.__answered = 0; window.fetch = async (url, init) => { const res = await real(url, init); if (init?.method === 'DELETE') { await new Promise((r) => setTimeout(r, 400)); window.__answered++; } return res; }; return true; })()`);
+    try {
+      await page.eval(`(() => { document.querySelector(${JSON.stringify(`${row('hold-c')} [data-action="delete"]`)}).focus(); return true; })()`);
+      await enter('keyDown');
+      await enter('keyUp');
+      await page.waitFor('the confirmation of hold-c', focusedOn('confirm-delete', 'hold-c'));
+      await enter('keyDown');
+      await enter('keyUp');
+      await page.waitFor('the row to go', `!${exists(row('hold-c'))}`);
+      await page.waitFor('the DELETE answer', `window.__answered === 1`);
+      await sleep(300); // the answer is drawn
+      const where = await page.eval<string>(`(() => { const el = document.activeElement; return [el?.dataset?.name, el?.dataset?.action ?? 'row'].join(':'); })()`);
+      assert.equal(await page.eval(focusedRow('ui-shop')), true, `the focus is on ${where}`);
+      assert.deepEqual((await savedNames()).sort(), ['hold-b', 'ui-shop']);
+    } finally {
+      await page.eval(`(() => { window.fetch = window.__realFetch; return true; })()`);
+      for (const name of ['hold-a', 'hold-b', 'hold-c']) await srv.call('snapshot_delete', { name }).catch(() => undefined);
+    }
+    await page.waitFor('only ui-shop left', `document.querySelectorAll('#snapshots-rows > [data-name]').length === 1`);
+  });
+
+  test('snapshots: a cookie that expires while the tab stays open turns its pill to expired', async () => {
+    try {
+      await saveCookieSnapshot('ui-soon', 'Expires in a few seconds', Math.floor(Date.now() / 1000) + 5);
+      await page.waitFor('the ui-soon row', `${textOf(row('ui-soon'))}.includes('1 cookie')`);
+      assert.doesNotMatch(await page.eval<string>(textOf(row('ui-soon'))), /expired/);
+      // nothing changes on the server when the cookie expires: the page notices it by itself
+      await page.waitFor('the expired pill', `${textOf(row('ui-soon'))}.includes('all expired')`, 20_000);
+    } finally {
+      await srv.call('snapshot_delete', { name: 'ui-soon' }).catch(() => undefined);
+    }
+    await page.waitFor('the ui-soon row to go', `!${exists(row('ui-soon'))}`);
   });
 
   let askRun = '';
@@ -495,11 +604,43 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     assert.doesNotMatch(await text('count-agents'), /running|queued/);
     await page.waitFor('the footer', `/1 waiting/.test(document.getElementById('agents-foot').textContent)`);
 
+    // a phone shows the whole question, and 100 newer runs that finish do not push the waiting run out
+    const phone = await chrome.newPage(390, 844);
+    try {
+      await phone.send('Page.addScriptToEvaluateOnNewDocument', { source: SSE_TAP });
+      await phone.navigate(`${srv.baseUrl}/`);
+      await phone.waitFor('the event stream', `document.getElementById('app').dataset.conn === 'open'`);
+      await phone.click('#inspector [role="tab"][data-view="agents"]');
+      await phone.waitFor('the question on the card', `${textOf(question)}.includes(${JSON.stringify(ORDER_QUESTION)})`, 20_000);
+      const shown = await phone.eval<string>(
+        `(() => { const el = [...document.querySelectorAll(${JSON.stringify(`${question} *`)})].find((e) => e.textContent === ${JSON.stringify(ORDER_QUESTION)}); if (!el || !el.getClientRects().length) return 'not shown'; return el.scrollHeight > el.clientHeight + 1 ? 'cut off' : 'whole'; })()`,
+      );
+      assert.equal(shown, 'whole', 'the question on the card of a phone');
+      await phone.eval(`(() => {
+        const es = window.__streams.at(-1);
+        const t0 = Date.now();
+        for (let i = 0; i < 100; i++) {
+          const at = new Date(t0 + i).toISOString();
+          const run = { id: 'rdone' + i, kind: 'finder', status: 'completed', success: true, task: 'A quick finished run', createdAt: at, startedAt: at, endedAt: at, step: 1, maxSteps: 10, result: 'done' };
+          es.dispatchEvent(new MessageEvent('agent', { data: JSON.stringify(run) }));
+        }
+        return true;
+      })()`);
+      await phone.waitFor('the finished runs', `document.querySelectorAll('#agents-rows > [data-id^="rdone"]').length >= 90`);
+      assert.equal(await phone.eval(`${textOf(question)}.includes(${JSON.stringify(ORDER_QUESTION)})`), true, 'the waiting run keeps its card and question');
+      assert.match(await phone.eval<string>(`document.getElementById('count-agents').textContent`), /1 waiting/);
+      assert.deepEqual(phone.problems, []);
+    } finally {
+      await phone.navigate('about:blank').catch(() => undefined); // closes its event stream
+      await page.send('Page.bringToFront'); // a page in the background renders late
+    }
+
     // the snapshot's row says the run's browser has it, and its delete confirmation names the run
     await openTab('snapshots');
     await page.waitFor('the agent browser in loaded-in', `${textOf(row('ui-shop'))}.includes(${JSON.stringify(askRun)})`);
     await openConfirm('ui-shop');
     assert.ok((await page.eval<string>(textOf(`${row('ui-shop')} [role="group"]`))).includes(`In use by run ${askRun} (waiting)`));
+    assert.ok((await ax(`${row('ui-shop')} [data-action="confirm-delete"]`)).description.includes(`In use by run ${askRun} (waiting)`), 'a screen reader hears the run too');
     await page.press('Escape');
     await page.waitFor('the confirmation to close', `!${exists(`${row('ui-shop')} [data-action="confirm-delete"]`)}`);
     await openTab('agents');

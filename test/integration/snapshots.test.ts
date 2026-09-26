@@ -73,8 +73,9 @@ describe('snapshots (host tools)', () => {
     origin = new URL(fx.baseUrl).origin;
   });
   after(async () => {
-    // a shared server (MCP_URL) keeps running: leave no snapshot and no sign-in behind
-    for (const name of [shop, www]) await srv?.call('snapshot_delete', { name }).catch(() => undefined);
+    // a shared server (MCP_URL) keeps running: leave no snapshot and no sign-in behind (also the ones a
+    // test expects to be refused, in case a regression saved them)
+    for (const name of [shop, www, `none-${id}`, `all-${id}`]) await srv?.call('snapshot_delete', { name }).catch(() => undefined);
     await srv?.call('browser_clear_cookies').catch(() => undefined);
     await srv?.stop();
     await fx?.close();
@@ -102,6 +103,8 @@ describe('snapshots (host tools)', () => {
   });
 
   test('save a sign-in, list it, and load it back after signing out: the cookie and the site storage return', async () => {
+    // the next steps name agent_run only when this server offers it (a model is configured)
+    const agentRun = (await srv.client.listTools()).tools.some((t) => t.name === 'agent_run');
     alice = await signIn(srv, fx, 'alice');
     const noDescription = await srv.call('snapshot_save', { name: shop });
     assert.equal(noDescription.isError, true);
@@ -114,7 +117,7 @@ describe('snapshots (host tools)', () => {
       saved.text,
       new RegExp(`^Created snapshot "${shop}" \\(v1, "Fixture shop — alice"\\): 1 cookie for ${esc(host)}, and the site storage of ${esc(origin)}\\. It is loaded in this browser\\.`),
     );
-    assert.match(saved.text, new RegExp(`agent_run with \\{"snapshot": "${shop}"\\}`));
+    assert.equal(new RegExp(`agent_run with \\{"snapshot": "${shop}"\\}`).test(saved.text), agentRun, saved.text);
     assert.deepEqual(saved.raw.structuredContent, {
       action: 'created',
       snapshot: { name: shop, version: 1, description: 'Fixture shop — alice', domains: [host], cookie_count: 1, cookie_domains: [host], origins: [origin] },
@@ -128,7 +131,11 @@ describe('snapshots (host tools)', () => {
       list.text,
       new RegExp(`^- ${shop} — Fixture shop — alice · 1 cookie for ${esc(host)} · storage for 1 site · v1, updated just now by integration-test[^·]* · loaded in: this browser \\(active\\)$`, 'm'),
     );
-    assert.match(list.text, /Use one: snapshot_load \{"name": ".+"\} signs your browser in; agent_run \{"snapshot": ".+", …\} starts a sub-agent signed in\./);
+    // an example name only when it is the one to use; agent_run only when it is offered
+    const usable = list.raw.structuredContent.snapshots.filter((s: any) => !s.incomplete).length;
+    const example = usable === 1 ? shop : '<name>';
+    assert.match(list.text, new RegExp(`${usable === 1 ? 'Use it' : 'Pick one by its description'}: snapshot_load \\{"name": "${esc(example)}"\\} signs your browser in(;|\\.)`));
+    assert.equal(/agent_run \{"snapshot": ".+", …\} starts a sub-agent signed in\./.test(list.text), agentRun, list.text);
     const e = entry(list, shop);
     assert.equal(e.cookie_count, 1);
     assert.equal(e.session_cookie_count, 1);
@@ -140,7 +147,12 @@ describe('snapshots (host tools)', () => {
     assert.ok(list.raw.structuredContent.loaded_here.includes(shop));
     assert.equal(list.raw.structuredContent.active_here, shop);
     const shown = JSON.stringify(list.raw);
-    for (const secret of [alice.token, alice.profile, '\\"session\\"']) assert.ok(!shown.includes(secret), `${secret} in snapshot_list`);
+    for (const secret of [alice.token, alice.profile]) assert.ok(!shown.includes(secret), `${secret} in snapshot_list`);
+    // never the cookie's name ("session"), quoted or not, in the text or the structured entry (this test's
+    // own snapshot only: another one's description on a shared server may say anything)
+    const line = list.text.split('\n').find((l) => l.startsWith(`- ${shop} `))!;
+    assert.doesNotMatch(line, /\bsession\b/, 'a cookie name in the text');
+    assert.ok(!JSON.stringify(e).includes('"session"'), 'a cookie name in structuredContent');
 
     // sign out, then load it back
     await srv.call('browser_navigate', { url: `${fx.baseUrl}/logout` });
@@ -221,7 +233,11 @@ describe('snapshots (host tools)', () => {
     assert.deepEqual(s.cookie_domains, ['example.test', 'www.example.test']);
     assert.deepEqual(s.origins, [], 'the active tab is on another site: no site storage');
 
-    await srv.call('browser_clear_cookies');
+    // clearing the cookies also unloads the snapshots whose cookies they were
+    const cleared = await srv.call('browser_clear_cookies');
+    assert.match(cleared.text, /^Cleared all cookies \(\d+ removed\)\. Snapshots ".+" are no longer loaded in this browser\.$/);
+    for (const name of [shop, www]) assert.ok(cleared.text.includes(`"${name}"`), `${name} unloaded: ${cleared.text}`);
+    assert.deepEqual((await srv.call('snapshot_list')).raw.structuredContent.loaded_here, []);
     const loaded = await srv.call('snapshot_load', { name: www });
     assert.match(loaded.text, /restored 2 of 2 cookies for example\.test, www\.example\.test\./);
     const names = JSON.parse(`[${(await srv.call('browser_get_cookies')).text.split('\n').join(',')}]`).map((c: any) => `${c.name}@${c.domain}`);
@@ -261,7 +277,8 @@ describe('snapshots (host tools)', () => {
     await killEngine(srv, 'obscura');
     const notice = await srv.call('browser_tab_list');
     assert.match(notice.text, /The browser connection was lost \(.*\) and has been re-established;/);
-    assert.match(notice.text, new RegExp(`The snapshots "${shop}", "${www}" loaded in this browser were lost; load them again with snapshot_load\\.`));
+    // www was loaded again after the cookies were cleared, shop just now
+    assert.match(notice.text, new RegExp(`The snapshots "${www}", "${shop}" loaded in this browser were lost; load them again with snapshot_load\\.`));
     const list = await srv.call('snapshot_list');
     assert.deepEqual(list.raw.structuredContent.loaded_here, []);
     assert.equal(list.raw.structuredContent.active_here, null);
@@ -308,6 +325,175 @@ describe('snapshots (host tools)', () => {
     assert.equal(save.isError, true);
     assert.match(save.text, /does not exist yet: give a description/);
     assert.equal(entry(await srv.call('snapshot_list'), shop), undefined);
+  });
+});
+
+describe('snapshots of several accounts, cleared cookies and odd cookies (host tools)', { skip: OWN }, () => {
+  let srv: TestServer;
+  let fx: FixtureServer;
+  let dir: string;
+  let host: string;
+  let origin: string;
+
+  before(async () => {
+    fx = await startFixtureServer();
+    dir = mkdtempSync(path.join(tmpdir(), 'sbm-snapaccounts-'));
+    srv = await startTestServer({ SNAPSHOTS_DIR: dir });
+    host = new URL(fx.baseUrl).hostname;
+    origin = new URL(fx.baseUrl).origin;
+  });
+  after(async () => {
+    await srv?.stop();
+    await fx?.close();
+  });
+
+  const loadedHere = async (): Promise<string[]> => (await srv.call('snapshot_list')).raw.structuredContent.loaded_here;
+
+  test('loading or saving one account of a site unloads the other one, so a plain save never stores one account in the other', async () => {
+    await signIn(srv, fx, 'alice');
+    assert.equal((await srv.call('snapshot_save', { name: 'personal', description: 'Fixture shop — alice' })).isError, false);
+
+    // signed in to another account by hand while "personal" is loaded: its seed writes alice's storage into every page
+    await signIn(srv, fx, 'bob');
+    const mixed = await srv.call('snapshot_save', { name: 'work', description: 'Fixture shop — bob' });
+    assert.equal(mixed.isError, true);
+    assert.equal(
+      mixed.text,
+      `Error: Snapshot "personal" is loaded in this browser and writes its saved site storage into ${origin} on every page load, so that storage would be saved into "work"; no snapshot was saved. ` +
+        'To save another account\'s sign-in, clear the cookies first (browser_clear_cookies, which also unloads "personal"), sign in again, then save.',
+    );
+    assert.equal(existsSync(path.join(dir, 'work.state')), false);
+
+    const cleared = await srv.call('browser_clear_cookies');
+    assert.match(cleared.text, /^Cleared all cookies \(\d+ removed\)\. Snapshot "personal" is no longer loaded in this browser\.$/);
+    assert.deepEqual(await loadedHere(), []);
+    await signIn(srv, fx, 'bob');
+    const work = await srv.call('snapshot_save', { name: 'work', description: 'Fixture shop — bob' });
+    assert.equal(work.isError, false, work.text);
+    assert.deepEqual(await loadedHere(), ['work']);
+
+    // a load replaces the other account's cookies for the site: that one is no longer loaded
+    const personal = await srv.call('snapshot_load', { name: 'personal' });
+    assert.equal(personal.isError, false, personal.text);
+    assert.match(personal.text, /^Snapshot "work" is no longer loaded in this browser: this load replaced its cookies\.$/m);
+    assert.deepEqual(personal.raw.structuredContent.unloaded, ['work']);
+    assert.deepEqual(await loadedHere(), ['personal']);
+    assert.equal((await srv.call('snapshot_load', { name: 'work' })).isError, false);
+    const list = await srv.call('snapshot_list');
+    assert.deepEqual(list.raw.structuredContent.loaded_here, ['work']);
+    assert.equal(list.raw.structuredContent.active_here, 'work');
+    assert.deepEqual(entry(list, 'personal').loaded_in, []);
+    assert.doesNotMatch(list.text, /^- personal .*loaded in/m);
+
+    // so saving "personal" is refused instead of storing bob's sign-in in it
+    const refresh = await srv.call('snapshot_save', { name: 'personal' });
+    assert.equal(refresh.isError, true);
+    assert.match(refresh.text, /^Error: Snapshot "personal" is not loaded in this browser\./);
+    assert.equal(entry(await srv.call('snapshot_list'), 'personal').version, 1);
+    assert.equal((await srv.call('snapshot_load', { name: 'personal' })).isError, false);
+    assert.deepEqual(await accountPage(srv, fx), { who: 'Signed in as alice', profile: 'profile: restored' });
+
+    // a new snapshot of the same site takes the place of the loaded one too (saved from another origin's page)
+    await srv.call('browser_navigate', { url: `http://localhost:${fx.port}/index.html` });
+    const again = await srv.call('snapshot_save', { name: 'same-site', description: 'Fixture shop — alice, again', domains: [host] });
+    assert.equal(again.isError, false, again.text);
+    assert.match(again.text, /It is loaded in this browser\. Snapshot "personal" is no longer loaded in this browser: this browser's cookies for its sites are now saved as "same-site"\./);
+    assert.deepEqual(again.raw.structuredContent.unloaded, ['personal']);
+    assert.deepEqual(await loadedHere(), ['same-site']);
+  });
+
+  test('clearing the cookies stops restoring the site storage of the snapshots it unloads', async () => {
+    assert.equal((await srv.call('snapshot_load', { name: 'personal' })).isError, false);
+    assert.deepEqual(await accountPage(srv, fx), { who: 'Signed in as alice', profile: 'profile: restored' });
+    await srv.call('browser_clear_cookies');
+    assert.deepEqual(await accountPage(srv, fx), { who: 'Signed out', profile: 'profile: none' }, "alice's storage is no longer written into the site's pages");
+  });
+
+  test('a page without site storage is not saved as site storage', async () => {
+    await signIn(srv, fx, 'carol');
+    // a persistent preference that stays when the site signs the browser out; this page writes no storage
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/set-cookie?name=pref&value=dark&max_age=86400` });
+    const saved = await srv.call('snapshot_save', { name: 'carol', description: 'Fixture shop — carol' });
+    assert.equal(saved.isError, false, saved.text);
+    assert.match(saved.text, new RegExp(`^Created snapshot "carol" \\(v1, "Fixture shop — carol"\\): 2 cookies for ${esc(host)}\\. It is loaded in this browser\\.`));
+    assert.deepEqual(saved.raw.structuredContent.snapshot.origins, []);
+    const list = await srv.call('snapshot_list');
+    assert.deepEqual(entry(list, 'carol').origins, []);
+    assert.match(list.text, /^- carol — Fixture shop — carol · 2 cookies for [^·]+ · v1, /m);
+  });
+
+  test('a refresh after the site signed the browser out is refused, so it never overwrites the saved sign-in', async () => {
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/logout` });
+    const refresh = await srv.call('snapshot_save', { name: 'carol' });
+    assert.equal(refresh.isError, true);
+    assert.equal(
+      refresh.text,
+      'Error: This browser lost 1 of the sign-in cookies saved in snapshot "carol" (signed out?); snapshot not changed. ' +
+        'If this browser is signed in to the account this snapshot is for, call again with replace: true to overwrite it; otherwise load it again with snapshot_load.',
+    );
+    assert.equal(entry(await srv.call('snapshot_list'), 'carol').version, 1);
+    assert.equal((await srv.call('snapshot_load', { name: 'carol' })).isError, false);
+    assert.equal((await accountPage(srv, fx)).who, 'Signed in as carol', 'the saved sign-in still works');
+  });
+
+  test("loading a snapshot of every site says that all of this browser's cookies were replaced", async () => {
+    await srv.call('browser_clear_cookies');
+    assert.equal((await srv.call('browser_set_cookie', { name: 'keep', value: 'k', domain: 'k.example' })).isError, false);
+    const star = await srv.call('snapshot_save', { name: 'star', description: 'Every site', domains: ['*'] });
+    assert.equal(star.isError, false, star.text);
+    assert.equal((await srv.call('browser_set_cookie', { name: 'other', value: 'o', domain: 'other.example' })).isError, false);
+    const loaded = await srv.call('snapshot_load', { name: 'star' });
+    assert.equal(loaded.isError, false, loaded.text);
+    assert.match(loaded.text, /This snapshot covers every site \(domains \["\*"\]\): all of this browser's cookies were replaced by the saved ones, so other sign-ins in this browser are gone\./);
+    assert.doesNotMatch(loaded.text, /were not changed/);
+    const cookies = (await srv.call('browser_get_cookies')).text;
+    assert.match(cookies, /"name":"keep"/);
+    assert.doesNotMatch(cookies, /"name":"other"/);
+    const { tools } = await srv.client.listTools();
+    assert.match((tools.find((t) => t.name === 'snapshot_load') as any).description, /except for a snapshot saved with domains \["\*"\], which replaces every cookie/);
+  });
+
+  test('cookies that expire in year 9999 or later are saved capped at 400 days and restored, and the list keeps working', async () => {
+    await srv.call('browser_clear_cookies');
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/set-cookie?name=far&value=1&expires=${encodeURIComponent('Fri, 31 Dec 9999 23:59:59 GMT')}` });
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/set-cookie?name=huge&value=2&max_age=99999999999999` });
+    const saved = await srv.call('snapshot_save', { name: 'forever', description: 'Fixture shop — never-expiring cookies' });
+    assert.equal(saved.isError, false, saved.text);
+    const limit = Math.floor(Date.now() / 1000) + 400 * 86_400;
+    const state = JSON.parse(readFileSync(path.join(dir, 'forever.state'), 'utf8'));
+    assert.deepEqual(state.cookies.map((c: any) => c.name).sort(), ['far', 'huge']);
+    for (const c of state.cookies) assert.ok(c.expires > limit - 120 && c.expires <= limit, `${c.name} expires ${c.expires}`);
+
+    // one saved before expiries were capped (the engine reports Max-Age=99999999999999 like this)
+    const now = new Date().toISOString();
+    writeFileSync(
+      path.join(dir, 'legacy.state'),
+      `${JSON.stringify({ version: 1, cookies: [{ name: 'legacy', value: '3', domain: host, path: '/', expires: 100001790451766, httpOnly: false, secure: false, sameSite: 'Lax' }], origins: [] })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      path.join(dir, 'legacy.json'),
+      `${JSON.stringify({ name: 'legacy', description: 'Saved before the cap', version: 1, createdAt: now, updatedAt: now, createdBy: {}, updatedBy: {}, domains: [host], cookieCount: 1, sessionCookieCount: 0, cookieDomains: [host], expiries: [100001790451766], origins: [], loads: 0, lastLoadedAt: null, encrypted: false, bytes: 1 })}\n`,
+      { mode: 0o600 },
+    );
+    const list = await srv.call('snapshot_list');
+    assert.equal(list.isError, false, list.text);
+    assert.equal(entry(list, 'forever').expired_count, 0);
+    assert.ok(Number.isFinite(Date.parse(entry(list, 'forever').next_expiry)));
+    assert.equal(entry(list, 'legacy').next_expiry, null);
+    assert.ok((await getJson(srv, '/api/snapshots')).snapshots.some((s: any) => s.name === 'legacy'));
+
+    for (const [name, total] of [['forever', 2], ['legacy', 1]] as const) {
+      await srv.call('browser_clear_cookies');
+      const loaded = await srv.call('snapshot_load', { name });
+      assert.equal(loaded.isError, false, loaded.text);
+      assert.match(loaded.text, new RegExp(`restored ${total} of ${total} cookies for ${esc(host)}\\.`), 'none refused');
+      assert.deepEqual(loaded.raw.structuredContent.refused, {});
+    }
+    await srv.call('browser_navigate', { url: `${fx.baseUrl}/echo` });
+    assert.match(String(fx.requests.filter((r) => r.url === '/echo').at(-1)!.headers.cookie), /legacy=3/);
+    await sleep(200); // the dashboard update of that load runs right after it
+    assert.equal((await getJson(srv, '/healthz')).ok, true, 'the server is still up');
   });
 });
 
@@ -395,16 +581,18 @@ describe('snapshot files and encryption at rest', { skip: OWN }, () => {
 
     srv = await startTestServer({ SNAPSHOTS_DIR: dir, SNAPSHOTS_KEY: 'integration-key-one' });
     try {
-      // encrypted in the background at startup
-      for (let i = 0; i < 50 && !readFileSync(path.join(dir, 'plain.state'), 'utf8').includes('aes-256-gcm'); i++) await sleep(100);
+      // encrypted in the background at startup: the state file first, then the metadata, so wait for the metadata
+      const encrypted = () => JSON.parse(readFileSync(path.join(dir, 'plain.json'), 'utf8')).encrypted === true;
+      for (let i = 0; i < 50 && !encrypted(); i++) await sleep(100);
+      assert.ok(encrypted(), 'the metadata says encrypted');
       const state = readFileSync(path.join(dir, 'plain.state'), 'utf8');
       assert.equal(JSON.parse(state).alg, 'aes-256-gcm');
       for (const secret of [s.token, s.profile]) assert.ok(!state.includes(secret));
-      assert.equal(JSON.parse(readFileSync(path.join(dir, 'plain.json'), 'utf8')).encrypted, true);
       const loaded = await srv.call('snapshot_load', { name: 'plain' });
       assert.equal(loaded.isError, false, loaded.text);
       assert.equal((await accountPage(srv, fx)).who, 'Signed in as frank');
-      // a new save is encrypted too
+      // a new save is encrypted too (another account: clearing the cookies unloads "plain" first)
+      await srv.call('browser_clear_cookies');
       const again = await signIn(srv, fx, 'gina');
       assert.equal((await srv.call('snapshot_save', { name: 'keyed', description: 'Fixture shop — gina' })).isError, false);
       assert.ok(!readFileSync(path.join(dir, 'keyed.state'), 'utf8').includes(again.token));
@@ -477,12 +665,12 @@ describe('snapshots and sub-agents (scripted model)', { skip: OWN }, () => {
     });
     host = new URL(fx.baseUrl).hostname;
     origin = new URL(fx.baseUrl).origin;
-    // the host signs in once and saves it; then its own browser signs out
+    // the host signs in once and saves it; then its own browser signs out (it keeps "shop" v1 loaded)
     await signIn(srv, fx, 'alice');
     const saved = await srv.call('snapshot_save', { name: 'shop', description: 'Fixture shop — alice' });
     assert.equal(saved.isError, false, saved.text);
+    assert.match(saved.text, /It is loaded in this browser\. To start a sub-agent signed in, call agent_run with \{"snapshot": "shop"\}\.$/, 'agent_run is offered here');
     await srv.call('browser_navigate', { url: `${fx.baseUrl}/logout` });
-    await srv.call('browser_clear_cookies');
   });
   after(async () => {
     await srv?.stop();
@@ -588,6 +776,17 @@ describe('snapshots and sub-agents (scripted model)', { skip: OWN }, () => {
       reason: `the agent's browser had no sign-in cookies for ${host} at the end`,
     });
 
+    // signed out, but with another cookie of the site left: the saved sign-in is still never overwritten
+    policies.set('MARKER-SKIP-LOST', (req) => {
+      if (req.step === 1) return call('browser_navigate', { url: `${fx.baseUrl}/set-cookie?name=pref&value=dark&max_age=86400` });
+      if (req.step === 2) return call('browser_navigate', { url: `${fx.baseUrl}/logout` });
+      return call('finish', { output: 'signed out' });
+    });
+    const lost = await srv.call('agent_run', { task: 'MARKER-SKIP-LOST: sign out', output: 'done', snapshot: 'shop' });
+    assert.equal(lost.raw.structuredContent.status, 'completed', lost.text);
+    assert.deepEqual(lost.raw.structuredContent.snapshot_saved, { name: 'shop', version: null, action: 'skipped', reason: "the agent's browser lost 1 saved sign-in cookie (signed out?)" });
+    assert.match(lost.text, /Saved sign-in "shop" was not refreshed: the agent's browser lost 1 saved sign-in cookie \(signed out\?\)\./);
+
     // a job that did not succeed never overwrites the sign-in
     policies.set('MARKER-SKIP-FAILED', () => call('finish', { output: 'could not do it', success: false }));
     const failed = await srv.call('agent_run', { task: 'MARKER-SKIP-FAILED: try', output: 'done', snapshot: 'shop' });
@@ -653,8 +852,10 @@ describe('snapshots and sub-agents (scripted model)', { skip: OWN }, () => {
     const done = await srv.call('agent_wait', { run_id: runId, wait_seconds: 60 });
     assert.equal(done.raw.structuredContent.status, 'completed', done.text);
     assert.equal(results[3], 'Error: The user deleted snapshot "fixture-dave"; do not save it again.');
-    assert.deepEqual(done.raw.structuredContent.snapshot_saved, { name: 'fixture-dave', version: 2, action: 'created' });
-    assert.match(done.text, /The agent saved its sign-in as snapshot "fixture-dave" \(v2\): pass \{"snapshot": "fixture-dave"\} to agent_run/);
+    // the host is never told to use a snapshot its user deleted
+    assert.deepEqual(done.raw.structuredContent.snapshot_saved, { name: 'fixture-dave', version: null, action: 'skipped', reason: 'the user deleted it during the run' });
+    assert.match(done.text, /Saved sign-in "fixture-dave" was not refreshed: the user deleted it during the run\./);
+    assert.doesNotMatch(done.text, /pass \{"snapshot": "fixture-dave"\} to agent_run/);
     assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('fixture-dave') || f.startsWith('another-one')), [], 'nothing was re-created');
     assert.equal(entry(await srv.call('snapshot_list'), 'fixture-dave'), undefined);
   });
@@ -746,6 +947,35 @@ describe('snapshots and sub-agents (scripted model)', { skip: OWN }, () => {
     assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('temp-shop')), [], 'never re-created');
   });
 
+  test('a sign-in the job refreshed and the user then deleted is reported as not saved', async () => {
+    await srv.call('browser_clear_cookies');
+    await signIn(srv, fx, 'wendy');
+    assert.equal((await srv.call('snapshot_save', { name: 'zshop', description: 'Fixture shop — wendy' })).isError, false);
+    const saved = gate();
+    const deleted = gate();
+    let result = '';
+    policies.set('MARKER-REFRESH-DELETED', async (req) => {
+      if (req.step === 1) return call('browser_navigate', { url: `${fx.baseUrl}/account` });
+      if (req.step === 2) return call('save_sign_in', {});
+      result = String(req.lastToolResult);
+      saved.open();
+      await deleted.promise;
+      return call('finish', { output: 'done' });
+    });
+    const started = await srv.call('agent_run', { task: 'MARKER-REFRESH-DELETED: keep the sign-in', output: 'x', snapshot: 'zshop', wait_seconds: 0 });
+    const runId = started.raw.structuredContent.run_id;
+    await saved.promise;
+    assert.match(result, /^Saved: refreshed snapshot "zshop" \(v2\)/);
+    assert.equal((await srv.call('snapshot_delete', { name: 'zshop' })).isError, false);
+    deleted.open();
+    const done = await srv.call('agent_wait', { run_id: runId, wait_seconds: 60 });
+    assert.equal(done.raw.structuredContent.status, 'completed', done.text);
+    assert.deepEqual(done.raw.structuredContent.snapshot_saved, { name: 'zshop', version: null, action: 'skipped', reason: 'the user deleted it during the run' });
+    assert.match(done.text, /Saved sign-in "zshop" was not refreshed: the user deleted it during the run\./);
+    assert.doesNotMatch(done.text, /was refreshed from the agent's browser/);
+    assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('zshop')), []);
+  });
+
   test('an agent browser whose engine restarts gets its saved sign-in back and is told so', async () => {
     let notice = '';
     let page = '';
@@ -768,6 +998,48 @@ describe('snapshots and sub-agents (scripted model)', { skip: OWN }, () => {
     assert.doesNotMatch(notice, /snapshot_load/, 'sub-agents have no snapshot tools');
     assert.match(page, /Signed in as alice/);
     assert.match(page, /profile: restored/);
+  });
+
+  test('after its snapshot is deleted, an engine restart never signs the running agent in to a new snapshot of that name', async () => {
+    await srv.call('browser_clear_cookies');
+    await signIn(srv, fx, 'uma');
+    assert.equal((await srv.call('snapshot_save', { name: 'swap', description: 'Fixture shop — uma' })).isError, false);
+    const reached = gate();
+    const release = gate();
+    let notice = '';
+    let page = '';
+    policies.set('MARKER-SNAP-SWAP', async (req) => {
+      if (req.step === 1) return call('browser_navigate', { url: `${fx.baseUrl}/index.html` });
+      if (req.step === 2) {
+        reached.open();
+        await release.promise;
+        await killEngine(srv, 'obscuraIsolated');
+        return call('browser_navigate', { url: `${fx.baseUrl}/account` });
+      }
+      if (req.step === 3) {
+        notice = String(req.lastToolResult);
+        return call('browser_get_text', { selector: 'body' });
+      }
+      page = String(req.lastToolResult);
+      return call('finish', { output: 'ok' });
+    });
+    const started = await srv.call('agent_run', { task: 'MARKER-SNAP-SWAP: open the account', output: 'ok', snapshot: 'swap', wait_seconds: 0 });
+    const runId = started.raw.structuredContent.run_id;
+    await reached.promise;
+    // the user deletes it, and another account is saved under the same name
+    assert.equal((await dashboardDelete(srv, 'swap')).status, 200);
+    await srv.call('browser_clear_cookies');
+    await signIn(srv, fx, 'victor');
+    assert.equal((await srv.call('snapshot_save', { name: 'swap', description: 'Fixture shop — victor' })).isError, false);
+    release.open();
+    const done = await srv.call('agent_wait', { run_id: runId, wait_seconds: 90 });
+    assert.equal(done.raw.structuredContent.status, 'completed', done.text);
+    assert.match(notice, /The browser connection was lost \(.*\) and has been re-established;/);
+    assert.doesNotMatch(notice, /re-applied/);
+    assert.doesNotMatch(page, /Signed in as victor/);
+    assert.match(page, /Signed out/);
+    assert.deepEqual(done.raw.structuredContent.snapshot_saved, { name: 'swap', version: null, action: 'skipped', reason: 'the user deleted it during the run' });
+    assert.equal(entry(await srv.call('snapshot_list'), 'swap').description, 'Fixture shop — victor', 'the new one is untouched');
   });
 
   test('no cookie or storage value reaches the logs, /api/state, /api/snapshots, /api/agents/:id or the transcripts', async () => {

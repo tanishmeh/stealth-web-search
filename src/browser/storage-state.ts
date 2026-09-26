@@ -141,6 +141,23 @@ export function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/**
+ * Longest cookie lifetime kept (400 days, the cap browsers apply). Obscura keeps whatever a site asks
+ * for, e.g. "Expires=31 Dec 9999" or a Max-Age past the range of a JavaScript date.
+ */
+export const MAX_COOKIE_AGE_SECONDS = 400 * 86_400;
+
+/** An expiry (unix seconds) no later than MAX_COOKIE_AGE_SECONDS from now. */
+export function clampExpiry(seconds: number, now = nowSeconds()): number {
+  return Math.min(seconds, now + MAX_COOKIE_AGE_SECONDS);
+}
+
+/** ISO time of a unix time in seconds, or null when a date cannot hold it (toISOString would throw). */
+export function isoTime(seconds: number): string | null {
+  const d = new Date(seconds * 1000);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+}
+
 /** The active tab's http(s) origin, or null when it has none (blank tab, data: URL, no tab). */
 export async function activeOrigin(tab: Tab | null): Promise<{ tab: Tab; origin: string } | null> {
   if (!tab || tab.closed) return null;
@@ -162,8 +179,11 @@ export async function activeOrigin(tab: Tab | null): Promise<{ tab: Tab; origin:
 /**
  * Validate one exported cookie (ours, Playwright's, or Obscura's legacy http_only/same_site keys).
  * The reason for a refusal names the cookie: snapshot code reports refusals by domain and count only.
+ * `seconds`: expires is known to be in seconds (a saved snapshot); otherwise a value above 1e12 is
+ * read as milliseconds (every millisecond time after 2001; seconds stay below it until year 33658).
+ * Expiries are kept at most MAX_COOKIE_AGE_SECONDS ahead.
  */
-export function cookieParam(entry: unknown, config: Config): CookieParam | string {
+export function cookieParam(entry: unknown, config: Config, opts: { seconds?: boolean } = {}): CookieParam | string {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'not an object';
   const c = entry as Record<string, unknown>;
   if (typeof c.name !== 'string' || c.name === '') return 'missing name';
@@ -196,10 +216,11 @@ export function cookieParam(entry: unknown, config: Config): CookieParam | strin
   if (expiresInput !== undefined && expiresInput !== null) {
     const raw = typeof expiresInput === 'string' && expiresInput.trim() !== '' ? Number(expiresInput) : expiresInput;
     if (typeof raw !== 'number' || !Number.isFinite(raw)) return `${label}: invalid expires ${JSON.stringify(expiresInput)}`;
-    const seconds = Math.floor(raw > 1e11 ? raw / 1000 : raw);
+    const seconds = Math.floor(!opts.seconds && raw > 1e12 ? raw / 1000 : raw);
     if (seconds > 0) {
-      if (seconds <= nowSeconds()) return `${label}: expired at ${new Date(seconds * 1000).toISOString()}`;
-      out.expires = seconds;
+      const now = nowSeconds();
+      if (seconds <= now) return `${label}: expired at ${new Date(seconds * 1000).toISOString()}`;
+      out.expires = clampExpiry(seconds, now);
     }
   }
   return out;

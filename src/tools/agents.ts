@@ -27,7 +27,10 @@ const outputFormat = z.enum(['text', 'json']).optional().describe('"json" if the
 const allowQuestions = z
   .boolean()
   .optional()
-  .describe('Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you');
+  .describe(
+    'Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). ' +
+      'false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK)',
+  );
 
 function manager(ctx: ToolContext): AgentManager {
   if (!ctx.agents) throw new ToolError('Sub-agents are not configured on this server: set AGENT_LLM_URL (see docs/AGENTS.md).');
@@ -47,9 +50,14 @@ function clip(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-/** Other runs paused on a question, so no question goes unseen while the host looks at one run. */
+/**
+ * Other runs of this client paused on a question, so no question goes unseen while the host looks at
+ * one run. Runs other clients started are theirs to answer.
+ */
 function alsoWaiting(ctx: ToolContext, except: AgentRun | null): { lines: string[]; structured: Array<Record<string, unknown>> } {
-  const others = manager(ctx).waitingRuns().filter((r) => r !== except && r.question);
+  const others = manager(ctx)
+    .waitingRuns()
+    .filter((r) => r !== except && r.question && r.client === ctx.session.client);
   return {
     lines: others.map((r) => `Also waiting for your answer: run ${r.id} (question ${r.question!.id}: ${clip(r.question!.text, 80)})`),
     structured: others.map((r) => ({ run_id: r.id, question_id: r.question!.id, question: clip(r.question!.text, 200) })),
@@ -121,7 +129,7 @@ export const agentRun = defineTool({
     'completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. ' +
     'Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. ' +
     'The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. ' +
-    'If your user already approved an order, say so in the TASK (e.g. "approved up to $30; do not ask"). ' +
+    'The agent always asks before placing an order or paying, and the server enforces it. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK. ' +
     'For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.',
   inputSchema: z.object({
     task: z.string().min(1).describe('TASK: what the agent must do, with all details it needs (sites, values, criteria)'),
@@ -131,6 +139,13 @@ export const agentRun = defineTool({
     context,
     max_steps: maxSteps,
     allow_questions: allowQuestions,
+    confirm_purchases: z
+      .boolean()
+      .optional()
+      .describe(
+        'true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question. ' +
+          'Set false only when your user already approved the purchase; then put the limits (item, quantity, maximum total) in the TASK.',
+      ),
     snapshot: z
       .string()
       .min(1)
@@ -163,6 +178,7 @@ export const agentRun = defineTool({
         context: args.context,
         maxSteps: args.max_steps,
         allowQuestions: args.allow_questions ?? true,
+        confirmPurchases: args.confirm_purchases ?? true,
         ...(snapshot ? { snapshot, updateSnapshot: args.update_snapshot ?? true, allowEvaluate: args.allow_evaluate ?? false } : {}),
       }),
     );
@@ -299,13 +315,17 @@ export const agentStatus = defineTool({
     // waiting runs are always listed: they need an answer
     const runs = [...all.slice(0, 20), ...all.slice(20).filter((r) => r.isWaiting)];
     if (!runs.length) return { content: [{ type: 'text', text: 'No agent runs yet.' }] };
+    const mine = (r: AgentRun) => r.client === ctx.session.client;
     const lines = runs.map((r) => {
       const state = r.done ? (r.outcome?.success ? 'success' : 'no result') : `step ${r.stepsUsed}/${r.input.maxSteps}`;
-      const asks = r.isWaiting && r.question ? `  asks ${r.question.id}: ${clip(r.question.text, 80)}` : '';
+      const owner = mine(r) ? '' : ` (started by ${r.client ?? 'another client'}: theirs to answer)`;
+      const asks = r.isWaiting && r.question ? `  asks ${r.question.id}: ${clip(r.question.text, 80)}${owner}` : '';
       return `${r.id}  ${r.kind.padEnd(10)} ${r.status.padEnd(9)} ${state}  ${seconds(r.durationMs)}  ${r.input.task.replace(/\s+/g, ' ').slice(0, 80)}${asks}`;
     });
     const waiting = agents.waitingCount;
-    const hint = waiting ? '\nAnswer a waiting run with agent_reply (agent_status {"run_id": "…"} shows its question and the reply arguments).' : '';
+    const hint = runs.some((r) => r.isWaiting && mine(r))
+      ? '\nAnswer a waiting run you started with agent_reply (agent_status {"run_id": "…"} shows its question and the reply arguments).'
+      : '';
     return {
       content: [
         {
@@ -356,8 +376,12 @@ export const agentReply = defineTool({
   inputSchema: z.object({
     run_id: z.string().min(1).describe('The run id, e.g. "r1a2b3c4"'),
     question_id: z.string().min(1).describe('The id of the question you answer, e.g. "q1a2b3" (from the waiting result)'),
-    answer: z.string().min(1).max(4_000).describe('Your answer, e.g. "Yes, place the order." To refuse, say so plainly: "No, do not place the order."'),
-    secret: z.boolean().optional().describe('true if the answer is a code or other secret (a question marked secret is treated so anyway)'),
+    answer: z
+      .string()
+      .min(1)
+      .max(4_000)
+      .describe('Your answer, e.g. "Yes, place the order." To refuse, say so plainly: "No, do not place the order." For a code or other secret, send only the value itself, e.g. "482913"'),
+    secret: z.boolean().optional().describe('true if the answer is a code or other secret: send only the value, with secret: true (a question marked secret is treated so anyway)'),
     wait_seconds: waitSeconds,
   }),
   annotations: { ...AGENT, title: 'Answer a sub-agent' },

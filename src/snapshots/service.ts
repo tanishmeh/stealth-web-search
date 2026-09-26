@@ -7,8 +7,10 @@ import {
   allCookies,
   applyStorage,
   canonicalDomain,
+  clampExpiry,
   cookieParam,
   domainFromInput,
+  isoTime,
   normalizeOrigin,
   nowSeconds,
   readActiveStorage,
@@ -88,8 +90,10 @@ export interface SaveOutcome {
   action: SaveAction;
   /** Cookies captured, by domain. */
   cookieDomains: string[];
-  /** The site whose storage was captured (the active tab's), or null. */
+  /** The site whose storage was captured (the active tab's, when it had any), or null. */
   storageOrigin: string | null;
+  /** Other snapshots no longer loaded in this browser: their sites overlap, so its cookies there are this one's now. */
+  unloaded: string[];
 }
 
 export interface ApplyOutcome {
@@ -103,6 +107,8 @@ export interface ApplyOutcome {
   storageOrigins: string[];
   /** The active tab was on one of them and got its storage right away. */
   appliedNow: boolean;
+  /** Other snapshots no longer loaded in this browser: their sites overlap, so this load replaced their cookies. */
+  unloaded: string[];
 }
 
 /** A capture into a snapshot that changed after this browser loaded it. */
@@ -116,6 +122,24 @@ export class SnapshotConflictError extends SnapshotError {
 
 /** A capture with no unexpired cookie for the snapshot's sites (signed out, or another site). */
 export class SnapshotEmptyError extends SnapshotError {}
+
+/** A refresh whose capture lacks sign-in cookies the snapshot holds (HttpOnly or session cookies): signed out. */
+export class SnapshotSignedOutError extends SnapshotError {
+  readonly lost: number;
+  constructor(message: string, lost: number) {
+    super(message);
+    this.lost = lost;
+  }
+}
+
+/** A capture of page storage that another loaded snapshot writes on every page load (its values would be saved). */
+export class SnapshotSeedConflictError extends SnapshotError {
+  readonly other: string;
+  constructor(message: string, other: string) {
+    super(message);
+    this.other = other;
+  }
+}
 
 /** The site of a URL's host without a leading "www." (the default domain filter). */
 export function siteOfHost(hostname: string): string {
@@ -137,6 +161,37 @@ function originInScope(origin: string, filter: string[]): boolean {
   } catch {
     return false;
   }
+}
+
+/** The parent domains of a host that a cookie may be set on ("a.b.example.com": b.example.com, example.com); none for an IP. */
+function parentDomains(domain: string): string[] {
+  if (/^[\d.]+$/.test(domain) || domain.includes(':')) return [];
+  const out: string[] = [];
+  for (let d = domain.slice(domain.indexOf('.') + 1); domain.includes('.') && d.includes('.'); d = d.slice(d.indexOf('.') + 1)) out.push(d);
+  return out;
+}
+
+/**
+ * Whether two domain filters share a cookie domain, so loading or saving one replaces cookies of the
+ * other: one site holds the other (or is its parent), or both get the cookies of a common parent
+ * (shop.example.com and blog.example.com share example.com cookies). "*" overlaps everything.
+ */
+export function filtersOverlap(a: string[], b: string[]): boolean {
+  if (a.includes('*') || b.includes('*')) return true;
+  return a.some((x) => b.some((y) => inScope(x, [y]) || inScope(y, [x]) || parentDomains(x).some((p) => inScope(p, [y]))));
+}
+
+const hasItems = (o: OriginState): boolean => o.localStorage.length > 0 || o.sessionStorage.length > 0;
+
+/** How many sign-in cookies of a saved state (unexpired HttpOnly or session cookies) a capture no longer has. */
+function lostSignInCookies(saved: CookieOut[], captured: CookieOut[], now: number): number {
+  const key = (c: CookieOut) => `${String(c?.name)}\u0000${canonicalDomain(String(c?.domain ?? ''))}\u0000${String(c?.path)}`;
+  const have = new Set(captured.map(key));
+  return saved.filter((c) => {
+    const persistent = typeof c?.expires === 'number' && c.expires > 0;
+    if (persistent && c.expires <= now) return false;
+    return (c?.httpOnly === true || !persistent) && !have.has(key(c));
+  }).length;
 }
 
 /** Domain filter entries: sites such as "example.com" (URLs and "www." hosts accepted); ["*"] is every cookie. */
@@ -211,6 +266,8 @@ export class SnapshotService extends EventEmitter {
   /** Deletions so far, and the count at each name's latest deletion: a load or save that overlapped one marks nothing. */
   private deletions = 0;
   private readonly deletedAt = new Map<string, number>();
+  /** The snapshot each agent browser's reconnect hook re-applies (dropped when that snapshot is deleted). */
+  private readonly reconnects = new WeakMap<Browser, string>();
 
   constructor(deps: { config: Config; log: Logger; hub: Hub }, registry: BrowserRegistry) {
     super();
@@ -233,7 +290,7 @@ export class SnapshotService extends EventEmitter {
         { dir, uid: process.getuid?.(), err: (err as Error).message },
         `SNAPSHOTS_DIR ${dir} is not writable: snapshots cannot be saved or loaded. Make the folder writable by the server's user (Docker on Linux: sudo chown -R 1000:1000 on the host folder)`,
       );
-      this.hub.publish('snapshots', this.payload());
+      this.publish();
       return;
     }
     const removed = await this.store.sweepTmp().catch(() => 0);
@@ -263,14 +320,23 @@ export class SnapshotService extends EventEmitter {
     this.publishQueued = true;
     setImmediate(() => {
       this.publishQueued = false;
-      this.hub.publish('snapshots', this.payload());
+      this.publish();
     });
+  }
+
+  /** Publish the list to the dashboard; never throws (it also runs from setImmediate, where a throw would end the process). */
+  private publish(): void {
+    try {
+      this.hub.publish('snapshots', this.payload());
+    } catch (err) {
+      this.log.warn({ err: (err as Error).message }, 'could not publish the snapshot list');
+    }
   }
 
   /** Re-read the metadata list from disk (after a store change) and publish it. */
   async refresh(): Promise<SnapshotListing> {
     this.listing = await this.store.list();
-    this.hub.publish('snapshots', this.payload());
+    this.publish();
     return this.listing;
   }
 
@@ -307,7 +373,8 @@ export class SnapshotService extends EventEmitter {
         session_cookie_count: m.sessionCookieCount,
         cookie_domains: m.cookieDomains,
         expired_count: m.expiries.filter((e) => e <= now).length,
-        next_expiry: next ? new Date(next * 1000).toISOString() : null,
+        // saved before expiries were capped, one can be past the range of a date
+        next_expiry: next !== undefined ? isoTime(next) : null,
         origins: m.origins.map((o) => ({ origin: o.origin, local_storage: o.localStorage, session_storage: o.sessionStorage })),
         loads: m.loads,
         last_loaded_at: m.lastLoadedAt,
@@ -350,17 +417,24 @@ export class SnapshotService extends EventEmitter {
     return current ? siteOfHost(new URL(current.origin).hostname) : null;
   }
 
-  /** This browser's cookies for the filter and the active tab's storage (when its site is in the filter). */
+  /**
+   * This browser's cookies for the filter and the active tab's storage (when its site is in the filter).
+   * Expiries are capped (clampExpiry): Obscura keeps "forever" cookies past the range of a date.
+   */
   private async capture(browser: Browser, filter: string[]): Promise<{ cookies: CookieOut[]; origin: OriginState | null }> {
     const now = nowSeconds();
     const jar = (await allCookies(browser, { quiet: true })).filter((c) => inScope(c.domain, filter) && !(c.expires > 0 && c.expires <= now));
-    const cookies = sortCookies(jar).map(toCookieOut);
+    const cookies = sortCookies(jar).map((c) => {
+      const out = toCookieOut(c);
+      if (out.expires > 0) out.expires = clampExpiry(out.expires, now);
+      return out;
+    });
     const st = await readActiveStorage(browser.activeTab, { quiet: true });
     return { cookies, origin: st && originInScope(st.origin, filter) ? st : null };
   }
 
   /** Refuse captures that would save the wrong thing (see snapshot_save). */
-  private guardCapture(browser: Browser, name: string, filter: string[], cookies: CookieOut[], what: string): void {
+  private guardCapture(browser: Browser, name: string, filter: string[], captured: { cookies: CookieOut[]; origin: OriginState | null }, what: string): void {
     if (filter.includes('*')) {
       const other = [...browser.loadedSnapshots.keys()].find((n) => n !== name);
       if (other) {
@@ -370,7 +444,16 @@ export class SnapshotService extends EventEmitter {
         );
       }
     }
-    if (!cookies.length) throw new SnapshotEmptyError(`This browser has no sign-in cookies for ${domainsText(filter)}; ${what}.`);
+    if (!captured.cookies.length) throw new SnapshotEmptyError(`This browser has no sign-in cookies for ${domainsText(filter)}; ${what}.`);
+    // the page's storage is what another snapshot's seed wrote into it on this page load: never save it as this one's
+    const seeded = captured.origin ? browser.storageSeed.get(captured.origin.origin)?.snapshot : undefined;
+    if (captured.origin && seeded && seeded !== name) {
+      throw new SnapshotSeedConflictError(
+        `Snapshot ${JSON.stringify(seeded)} is loaded in this browser and writes its saved site storage into ${captured.origin.origin} on every page load, ` +
+          `so that storage would be saved into ${JSON.stringify(name)}; ${what}.`,
+        seeded,
+      );
+    }
   }
 
   /** Whether `name` was deleted after the deletion count `since` was read. */
@@ -378,20 +461,64 @@ export class SnapshotService extends EventEmitter {
     return (this.deletedAt.get(name) ?? 0) > since;
   }
 
-  /** After a capture: this browser has that version loaded and active, and its storage seed has the captured values. */
-  private async afterCapture(browser: Browser, meta: SnapshotMeta, origin: OriginState | null, generation: number, since: number): Promise<void> {
-    this.track(browser);
-    if (browser.connectionGeneration !== generation) return; // the connection was lost meanwhile: nothing of it is loaded
-    if (this.deletedSince(meta.name, since)) return; // deleted right after it was saved: never marked loaded
-    if (origin) {
-      if (origin.localStorage.length || origin.sessionStorage.length) {
-        browser.storageSeed.set(origin.origin, { snapshot: meta.name, localStorage: origin.localStorage, sessionStorage: origin.sessionStorage });
-      } else if (browser.storageSeed.get(origin.origin)?.snapshot === meta.name) {
-        browser.storageSeed.delete(origin.origin);
-      }
-      await this.registerSeed(browser, await browser.connection(), generation);
+  /**
+   * Unload the other snapshots loaded in this browser whose sites overlap `domains`: its cookies there
+   * are no longer theirs, so a later save must not refresh them with these. Their storage seed goes too.
+   */
+  private unloadOverlapping(browser: Browser, name: string, domains: string[]): { unloaded: string[]; seedChanged: boolean } {
+    const unloaded: string[] = [];
+    let seedChanged = false;
+    for (const [other, loaded] of [...browser.loadedSnapshots]) {
+      if (other === name || !filtersOverlap(loaded.domains, domains)) continue;
+      if (browser.forgetSnapshot(other)) seedChanged = true;
+      unloaded.push(other);
     }
-    browser.markSnapshot(meta.name, meta.version, generation);
+    if (unloaded.length) this.log.info({ snapshot: name, browserId: browser.id, unloaded }, `snapshot ${name} took the place of overlapping snapshots`);
+    return { unloaded, seedChanged };
+  }
+
+  /**
+   * After a capture: this browser has that version loaded and active, overlapping snapshots are no
+   * longer loaded here, and its storage seed has the captured values. Returns the snapshots it unloaded.
+   * A deletion or a lost connection, checked again after the await, marks nothing (and never reconnects).
+   */
+  private async afterCapture(browser: Browser, meta: SnapshotMeta, origin: OriginState | null, generation: number, since: number): Promise<string[]> {
+    this.track(browser);
+    // a lost connection keeps its generation until the next connect: check both
+    const lost = () => !browser.connected || browser.connectionGeneration !== generation;
+    if (lost() || this.deletedSince(meta.name, since)) return [];
+    const { unloaded, seedChanged } = this.unloadOverlapping(browser, meta.name, meta.domains);
+    let register = seedChanged;
+    for (const [o, entry] of browser.storageSeed) {
+      if (entry.snapshot !== meta.name && originInScope(o, meta.domains)) {
+        browser.storageSeed.delete(o);
+        register = true;
+      }
+    }
+    if (origin && hasItems(origin)) {
+      browser.storageSeed.set(origin.origin, { snapshot: meta.name, localStorage: origin.localStorage, sessionStorage: origin.sessionStorage });
+      register = true;
+    } else if (origin && browser.storageSeed.get(origin.origin)?.snapshot === meta.name) {
+      browser.storageSeed.delete(origin.origin);
+      register = true;
+    }
+    if (register) {
+      try {
+        // still connected (checked above, nothing awaited since): this never reconnects
+        await this.registerSeed(browser, await browser.connection(), generation);
+      } catch (err) {
+        if (lost()) return unloaded; // the snapshot is saved; nothing of it is loaded
+        throw err;
+      }
+      if (lost()) return unloaded;
+    }
+    if (this.deletedSince(meta.name, since)) {
+      // deleted while the seed was registered: take its storage back out, never mark it
+      if (browser.forgetSnapshot(meta.name)) await this.registerSeed(browser, await browser.connection(), generation).catch(() => undefined);
+      return unloaded;
+    }
+    browser.markSnapshot(meta.name, meta.version, generation, meta.domains);
+    return unloaded;
   }
 
   /** Register the storage seed of this browser (add the new script, then remove the old one of the same connection). */
@@ -421,37 +548,42 @@ export class SnapshotService extends EventEmitter {
     const generation = browser.connectionGeneration;
     const since = this.deletions;
     const captured = await this.capture(browser, input.domains);
-    this.guardCapture(browser, name, input.domains, captured.cookies, 'no snapshot was saved');
+    this.guardCapture(browser, name, input.domains, captured, 'no snapshot was saved');
+    // a page without storage is not saved as site storage (nothing would be restored for it)
+    const stored = captured.origin && hasItems(captured.origin) ? captured.origin : null;
     const meta = await this.store.create({
       name,
       description: input.description,
       domains: input.domains,
       cookies: captured.cookies,
-      origins: captured.origin ? [captured.origin] : [],
+      origins: stored ? [stored] : [],
       by: input.by,
     });
     this.log.info({ snapshot: name, version: meta.version, cookies: meta.cookieCount, origins: meta.origins.length, by: input.by }, `snapshot ${name} created`);
-    await this.afterCapture(browser, meta, captured.origin, generation, since);
+    const unloaded = await this.afterCapture(browser, meta, captured.origin, generation, since);
     await this.refresh().catch(() => undefined);
-    return { meta, action: 'created', cookieDomains: meta.cookieDomains, storageOrigin: captured.origin?.origin ?? null };
+    return { meta, action: 'created', cookieDomains: meta.cookieDomains, storageOrigin: stored?.origin ?? null, unloaded };
   }
 
   /**
    * Save this browser's sign-in into an existing snapshot. refresh: keep its domain filter and merge
    * the stored site storage (only the open page's can be read); refused when the stored version is not
-   * `expectVersion`. replace: overwrite it (a new domain filter when given). Never creates.
+   * `expectVersion`, or when the browser lost sign-in cookies the snapshot holds (signed out: a page
+   * can sign a browser out, and a refresh must not overwrite a working sign-in with that). replace:
+   * overwrite it (a new domain filter when given). Never creates.
    */
   async update(
     browser: Browser,
     name: string,
     input: { mode: 'refresh' | 'replace'; by: SnapshotActor; expectVersion?: number; domains?: string[]; description?: string },
   ): Promise<SaveOutcome> {
-    const stored = await this.store.get(name);
-    const filter = input.mode === 'replace' && input.domains?.length ? input.domains : stored.domains;
+    const existing = await this.store.get(name);
+    const filter = input.mode === 'replace' && input.domains?.length ? input.domains : existing.domains;
     const generation = browser.connectionGeneration;
     const since = this.deletions;
     const captured = await this.capture(browser, filter);
-    this.guardCapture(browser, name, filter, captured.cookies, 'snapshot not changed');
+    this.guardCapture(browser, name, filter, captured, 'snapshot not changed');
+    const stored = captured.origin && hasItems(captured.origin) ? captured.origin : null;
     const meta = await this.store.update(name, input.by, async (current) => {
       if (input.expectVersion !== undefined && current.version !== input.expectVersion) {
         throw new SnapshotConflictError(
@@ -459,10 +591,18 @@ export class SnapshotService extends EventEmitter {
           current,
         );
       }
-      let origins: OriginState[] = captured.origin ? [captured.origin] : [];
+      let origins: OriginState[] = stored ? [stored] : [];
       if (input.mode === 'refresh') {
-        // storage of other sites cannot be read now (it exists only while their page is open): keep it
         const old = await this.store.readState(name);
+        const lost = lostSignInCookies(old.cookies, captured.cookies, nowSeconds());
+        if (lost) {
+          throw new SnapshotSignedOutError(
+            `This browser lost ${lost} of the sign-in cookies saved in snapshot ${JSON.stringify(name)} (signed out?); snapshot not changed.`,
+            lost,
+          );
+        }
+        // storage of other sites cannot be read now (it exists only while their page is open): keep it;
+        // the open page's replaces its stored entry, and an emptied one removes it
         const kept = old.origins.filter((o) => o.origin !== captured.origin?.origin && originInScope(o.origin, filter));
         origins = [...kept, ...origins];
       }
@@ -470,9 +610,9 @@ export class SnapshotService extends EventEmitter {
     });
     const action: SaveAction = input.mode === 'replace' ? 'replaced' : 'refreshed';
     this.log.info({ snapshot: name, version: meta.version, cookies: meta.cookieCount, origins: meta.origins.length, by: input.by }, `snapshot ${name} ${action}`);
-    await this.afterCapture(browser, meta, captured.origin, generation, since);
+    const unloaded = await this.afterCapture(browser, meta, captured.origin, generation, since);
     await this.refresh().catch(() => undefined);
-    return { meta, action, cookieDomains: meta.cookieDomains, storageOrigin: captured.origin?.origin ?? null };
+    return { meta, action, cookieDomains: meta.cookieDomains, storageOrigin: stored?.origin ?? null, unloaded };
   }
 
   /** Change only the description. */
@@ -485,8 +625,9 @@ export class SnapshotService extends EventEmitter {
 
   /**
    * Load a snapshot into this browser: its cookies for the snapshot's sites replace the browser's own
-   * (other sites' cookies stay), and its site storage is written on every page load of its origins.
-   * With `conn` (a reconnect), everything goes over that new connection.
+   * (other sites' cookies stay; every cookie for "*"), and its site storage is written on every page
+   * load of its origins. Other snapshots loaded here whose sites overlap are unloaded (their cookies
+   * were just replaced). With `conn` (a reconnect), everything goes over that new connection.
    */
   async apply(browser: Browser, name: string, opts: { conn?: CdpConnection; generation?: number; countLoad?: boolean } = {}): Promise<ApplyOutcome> {
     const since = this.deletions;
@@ -510,6 +651,8 @@ export class SnapshotService extends EventEmitter {
         await quietSend(conn, 'Network.deleteCookies', { name: c.name, domain: c.domain, path: c.path });
       }
     }
+    // from here on the overlapping snapshots' cookies are gone: a later save must never refresh them with these
+    const unloaded = browser.connectionGeneration === generation ? this.unloadOverlapping(browser, name, filter).unloaded : [];
     const stateOrigins = new Set(state.origins.map((o) => normalizeOrigin(String(o?.origin ?? ''))).filter(Boolean));
     for (const [origin, entry] of browser.storageSeed) {
       if (entry.snapshot === name || stateOrigins.has(origin) || originInScope(origin, filter)) browser.storageSeed.delete(origin);
@@ -526,7 +669,8 @@ export class SnapshotService extends EventEmitter {
         bump(expired, domain);
         continue;
       }
-      const param = cookieParam(c, this.config);
+      // saved expiries are seconds (a far-future one is capped, never read as milliseconds and dropped)
+      const param = cookieParam(c, this.config, { seconds: true });
       if (typeof param === 'string') bump(refused, domain);
       else valid.push(param);
     }
@@ -569,8 +713,9 @@ export class SnapshotService extends EventEmitter {
       if (browser.forgetSnapshot(name) && browser.connectionGeneration === generation) await this.registerSeed(browser, conn, generation).catch(() => undefined);
       throw new SnapshotNotFoundError(`Snapshot ${JSON.stringify(name)} was deleted while it was being loaded`);
     }
-    // only when the connection it all went into is still the browser's
-    if (browser.connectionGeneration === generation) browser.markSnapshot(name, meta.version, generation);
+    // only when the connection it all went into is still the browser's (a lost one keeps its generation
+    // until the next connect; browser.connected is false during a reconnect hook, so ask the connection)
+    if (conn.isOpen && browser.connectionGeneration === generation) browser.markSnapshot(name, meta.version, generation, filter);
     this.log.info(
       { snapshot: name, version: meta.version, browserId: browser.id, restored, cookies: state.cookies.length, expired: sum(expired), refused: sum(refused), origins: storageOrigins.length },
       `snapshot ${name} loaded into ${browser.id === MAIN_BROWSER ? 'the main browser' : browser.id}`,
@@ -581,7 +726,23 @@ export class SnapshotService extends EventEmitter {
         .then(() => this.refresh())
         .catch((err) => this.log.warn({ snapshot: name, err: (err as Error).message }, 'could not count a snapshot load'));
     }
-    return { meta, restored, total: state.cookies.length, expired, refused, storageOrigins, appliedNow };
+    return { meta, restored, total: state.cookies.length, expired, refused, storageOrigins, appliedNow, unloaded };
+  }
+
+  /**
+   * Unload every snapshot of this browser (browser_clear_cookies: the cookies they put there are gone):
+   * their markers and the storage seed, so no saved storage is written into later pages. Returns their names.
+   */
+  async unloadAll(browser: Browser): Promise<string[]> {
+    const names = [...browser.loadedSnapshots.keys()];
+    for (const n of names) browser.forgetSnapshot(n);
+    const hadSeed = browser.storageSeed.size > 0;
+    browser.storageSeed.clear();
+    if ((hadSeed || browser.seedScript) && browser.connected) {
+      await this.registerSeed(browser, await browser.connection(), browser.connectionGeneration);
+    }
+    if (names.length) this.log.info({ browserId: browser.id, snapshots: names }, 'snapshots unloaded (cookies cleared)');
+    return names;
   }
 
   /**
@@ -594,6 +755,11 @@ export class SnapshotService extends EventEmitter {
     const loadedIn: string[] = [];
     for (const browser of this.browsers()) {
       if (browser.loadedSnapshots.has(name)) loadedIn.push(browser.id);
+      // an engine restart must not sign a running agent in to a snapshot saved later under this name
+      if (this.reconnects.get(browser) === name) {
+        browser.reconnectHook = null;
+        this.reconnects.delete(browser);
+      }
       // a disconnected browser has no seed left to change (it is cleared with the connection)
       if (browser.forgetSnapshot(name) && browser.connected) {
         // under the browser's queue, so it never interleaves with a load or save there
@@ -610,9 +776,11 @@ export class SnapshotService extends EventEmitter {
 
   /**
    * An agent browser whose run started with a snapshot gets it back after the engine restarted (called
-   * by the browser before the new connection is used). Resolves to the notice for the agent.
+   * by the browser before the new connection is used). Resolves to the notice for the agent. Deleting
+   * the snapshot removes the hook.
    */
   installReconnect(browser: Browser, name: string): void {
+    this.reconnects.set(browser, name);
     browser.reconnectHook = async (conn, generation) => {
       const quoted = JSON.stringify(name);
       try {

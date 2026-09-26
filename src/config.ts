@@ -210,6 +210,9 @@ export class ConfigError extends Error {}
 /** Where the server looks for the models file when AGENT_MODELS_FILE is not set. */
 export const DEFAULT_MODELS_FILE = path.join(PROJECT_ROOT, 'config', 'models.json');
 
+/** Host names always allowed (loopback and Docker's name for the host), before ALLOWED_HOSTS. */
+export const DEFAULT_ALLOWED_HOSTS: readonly string[] = ['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal'];
+
 /**
  * `defaultModelsFile`: the models file to use when it exists and AGENT_MODELS_FILE is not set. The
  * server passes DEFAULT_MODELS_FILE; without it only AGENT_MODELS_FILE is read (as in tests).
@@ -227,9 +230,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, { defaultModels
     throw new ConfigError(`Invalid configuration:\n  - LOG_FORMAT: expected "json" or "pretty", got "${logFormat}"`);
   }
 
-  const allowedHosts = Array.from(
-    new Set(['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal', ...e.ALLOWED_HOSTS]),
-  );
+  const allowedHosts = Array.from(new Set([...DEFAULT_ALLOWED_HOSTS, ...e.ALLOWED_HOSTS]));
 
   // Whether the user pinned the CDP port explicitly (vs. falling back to the schema default). In
   // managed mode an unpinned port is replaced by a random free port at startup so the CDP endpoint

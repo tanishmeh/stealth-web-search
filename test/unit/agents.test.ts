@@ -5,17 +5,17 @@ import { after, before, describe, test } from 'node:test';
 import pino from 'pino';
 import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars } from '../../src/agents/conversation.ts';
 import { runResult } from '../../src/agents/format.ts';
-import { isSearchResultsPage, quoteFound, quoteMatch, siteOf } from '../../src/agents/kinds.ts';
-import { redactParams } from '../../src/mcp/server.ts';
+import { KINDS, isSearchResultsPage, quoteFound, quoteMatch, siteOf } from '../../src/agents/kinds.ts';
+import { redactParams, serverInstructions } from '../../src/mcp/server.ts';
 import { evaluationSource, isExpression } from '../../src/scripts/api.ts';
 import { ChatClient, LlmError, splitThinking, type ChatMessage } from '../../src/agents/llm.ts';
-import { AgentRun, questionRefusal, questionsAllowed, type AgentInput, type AgentKind } from '../../src/agents/run.ts';
+import { AgentRun, looksLikeFinalPurchase, purchaseGuardFor, questionRefusal, questionsAllowed, type AgentInput, type AgentKind } from '../../src/agents/run.ts';
 import { decodeResultUrl } from '../../src/agents/search.ts';
 import { chatCompletionsUrl, loadConfig } from '../../src/config.ts';
 import { Hub, type HubEvent } from '../../src/dashboard/hub.ts';
 import { LogTap } from '../../src/logger.ts';
 import { MAX_WAITING } from '../../src/util/limits.ts';
-import { REDACTED, scrubDeep, scrubText } from '../../src/util/scrub.ts';
+import { REDACTED, scrubDeep, scrubText, secretParts } from '../../src/util/scrub.ts';
 import { startFakeLlm, type FakeLlm } from '../helpers/fake-llm.ts';
 
 const silent = pino({ level: 'silent' });
@@ -93,18 +93,37 @@ describe('sub-agent questions to the host', () => {
     const run = newRun();
     run.deadline = Date.now() + 10 * 60_000;
     run.step = 1;
-    assert.equal(questionRefusal(run, env()), null);
-    run.questionTurns = 5;
-    assert.match(questionRefusal(run, env())!, /^you already asked 5 questions, the limit for one job\. Decide on your own/);
-    run.questionTurns = 0;
-    assert.match(questionRefusal(run, env(MAX_WAITING))!, /^too many jobs are waiting for the host right now \(10\)/);
-    assert.equal(questionRefusal(run, env(MAX_WAITING - 1)), null);
+    assert.equal(questionRefusal(run, env(), 'choose'), null);
+    // the cap counts questions asked (answered, expired or cancelled), not turns
+    for (let i = 0; i < 5; i++) run.questions.push({ status: 'answered' } as any);
+    assert.match(questionRefusal(run, env(), 'choose')!, /^you already asked 5 questions, the limit for one job\. Decide on your own/);
+    run.questions.length = 0;
+    assert.match(questionRefusal(run, env(MAX_WAITING), 'missing_info')!, /^too many jobs are waiting for the host right now \(10\)\. Decide on your own/);
+    assert.equal(questionRefusal(run, env(MAX_WAITING - 1), 'choose'), null);
     run.step = 18; // 2 steps left: not enough to act on an answer
-    assert.equal(questionRefusal(run, env()), 'too little budget left to act on an answer; finish with success=false and say what needs approval');
+    assert.equal(questionRefusal(run, env(), 'choose'), 'too little budget left to act on an answer; finish with success=false and say what needs approval');
     run.questionTurns = 1; // question turns are free: 3 steps left again
-    assert.equal(questionRefusal(run, env()), null);
+    assert.equal(questionRefusal(run, env(), 'choose'), null);
     run.deadline = Date.now() + 90_000;
-    assert.match(questionRefusal(run, env())!, /^too little budget left/);
+    assert.match(questionRefusal(run, env(), 'choose')!, /^too little budget left/);
+  });
+
+  test('a refused confirm or sign-in question never leaves the step to the agent: it must finish without it', () => {
+    const run = newRun();
+    run.deadline = Date.now() + 10 * 60_000;
+    for (let i = 0; i < 5; i++) run.questions.push({ status: 'answered' } as any);
+    const confirm = questionRefusal(run, env(), 'confirm')!;
+    assert.equal(
+      confirm,
+      "you already asked 5 questions, the limit for one job. Do not take the step you wanted to confirm (do not place the order or pay): call finish with success=false and say what needs the host's approval.",
+    );
+    assert.doesNotMatch(confirm, /on your own/);
+    assert.equal(
+      questionRefusal(run, env(), 'sign_in'),
+      'you already asked 5 questions, the limit for one job. Call finish with success=false and say which site needs a sign-in and what it asks for.',
+    );
+    run.questions.length = 0;
+    assert.match(questionRefusal(run, env(MAX_WAITING), 'confirm')!, /^too many jobs are waiting for the host right now \(10\)\. Do not take the step you wanted to confirm/);
   });
 
   test('a waiting run reports its question, the reason hint and the exact agent_reply call', async () => {
@@ -128,12 +147,14 @@ describe('sub-agent questions to the host', () => {
           '',
           'Options: Yes | No',
           '',
-          'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this.',
+          'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this. ' +
+            'The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.',
           '',
           `The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r1a2b3c4", "question_id": "${q.id}", "answer": "..."}`,
-          'Unanswered after 30 min it continues without an answer; agent_cancel stops it. Do not end your turn while it waits.',
+          'Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase or send a code on your own.',
         ].join('\n'),
       );
+      assert.doesNotMatch(r.text, /Do not end your turn/, 'a chat host asks its user by ending its turn');
       assert.equal(r.structured.status, 'waiting');
       assert.equal(r.structured.steps, 1);
       assert.deepEqual(r.structured.question, {
@@ -197,6 +218,7 @@ describe('sub-agent questions to the host', () => {
     assert.equal(run.questions[0]!.answer, null);
     assert.equal(run.questions[0]!.answeredAt, null);
 
+    run.step = 1;
     const cancelled = run.ask({ text: 'Again?', options: [], reason: 'missing_info', secret: false, pageUrl: null }, 60_000);
     run.abort.abort();
     assert.deepEqual(await cancelled, { status: 'cancelled', answer: null, secret: false });
@@ -204,11 +226,24 @@ describe('sub-agent questions to the host', () => {
     assert.equal(run.questionTurns, 2);
   });
 
+  test('a model turn is free once, however many questions it paused on: the steps used never go below the turns that asked nothing', async () => {
+    const run = newRun();
+    run.step = 3;
+    for (const text of ['First?', 'Second?']) {
+      const closed = run.ask({ text, options: [], reason: 'choose', secret: false, pageUrl: null }, 60_000);
+      run.closeQuestion('answered', { answer: 'a', by: null });
+      await closed;
+    }
+    assert.equal(run.questionTurns, 1);
+    assert.equal(run.stepsUsed, 2);
+  });
+
   test('a secret answer reaches the model only: it is never stored, and masked in everything the run reports', async () => {
     const run = newRun();
     const closed = run.ask({ text: 'What is the sign-in code?', options: [], reason: 'sign_in', secret: true, pageUrl: 'https://login.shop.example/otp' }, 1_800_000);
     const waiting = runResult(run);
     assert.match(waiting.text, /Tell your user which site asks \(see "asked on"\); never send a password; do not relay a code for a site the task did not name\./);
+    assert.match(waiting.text, /Send only the code or secret itself as the answer, e\.g\. "482913", not a sentence\./);
     assert.match(waiting.text, /"answer": "\.\.\.", "secret": true\}/);
     assert.equal((waiting.structured.reply_with as any).arguments.secret, true);
     run.closeQuestion('answered', { answer: ' 482913 ', by: 'host-client' });
@@ -247,6 +282,41 @@ describe('sub-agent questions to the host', () => {
     assert.equal(run.questions[1]!.answer, null, 'but it is still not stored');
   });
 
+  test('a code sent inside a sentence is masked as the code the agent types, not only as the whole sentence', async () => {
+    const run = newRun();
+    const closed = run.ask({ text: 'What is the sign-in code?', options: [], reason: 'sign_in', secret: true, pageUrl: null }, 60_000);
+    run.closeQuestion('answered', { answer: 'The code is 482 913, backup K7Q2-Z9X4.', by: null });
+    await closed;
+    for (const typed of ['482913', '482 913', 'K7Q2-Z9X4', 'K7Q2Z9X4']) assert.equal(run.scrub(`typed ${typed}`), `typed ${REDACTED}`, typed);
+    assert.equal(run.scrub('The code is sent by text'), 'The code is sent by text', 'plain words are not masked');
+    assert.deepEqual(secretParts('yes'), []);
+    assert.deepEqual(secretParts('The code is 482913.'), ['The code is 482913.', '482913']);
+    assert.deepEqual(secretParts(' hunter-two '), ['hunter-two'], 'an answer without digits is masked whole');
+  });
+
+  test('a later question that quotes a secret answer is shown masked: the waiting result, the run summary and the final result', async () => {
+    const run = newRun();
+    const first = run.ask({ text: 'What is the sign-in code?', options: [], reason: 'sign_in', secret: true, pageUrl: null }, 60_000);
+    run.closeQuestion('answered', { answer: 'K7Q2Z9X4', by: null });
+    await first;
+    run.step = 2;
+    const second = run.ask(
+      { text: 'The site rejected the code K7Q2Z9X4 (expired). Send the new code?', options: ['K7Q2Z9X4 again', 'a new code'], reason: 'sign_in', secret: true, pageUrl: 'https://login.shop.example/otp?code=K7Q2Z9X4' },
+      60_000,
+    );
+    const waiting = runResult(run);
+    assert.match(waiting.text, /The site rejected the code \[REDACTED\] \(expired\)/);
+    for (const shown of [waiting.text, JSON.stringify(waiting.structured), JSON.stringify(run.summary()), JSON.stringify(run.questionLog())]) {
+      assert.ok(!shown.includes('K7Q2Z9X4'), shown);
+    }
+    run.closeQuestion('answered', { answer: 'M3N4P5Q6', by: null });
+    await second;
+    run.outcome = { success: true, output: 'signed in' };
+    run.finish('completed');
+    const done = runResult(run);
+    assert.ok(!done.text.includes('K7Q2Z9X4') && !JSON.stringify(done.structured).includes('K7Q2Z9X4'));
+  });
+
   test('masking helpers replace every occurrence, longest secret first, and keep unchanged values as they are', () => {
     const secrets = new Set(['1234', '123456']);
     assert.equal(scrubText('a 123456 b 1234 c', secrets), `a ${REDACTED} b ${REDACTED} c`);
@@ -260,6 +330,175 @@ describe('sub-agent questions to the host', () => {
     assert.equal(value.a[0], 'x 1234', 'the input is not modified');
     const date = new Date(0);
     assert.equal(scrubDeep(date, scrub), date, 'class instances are left alone');
+  });
+});
+
+describe('sub-agent purchases need the host', () => {
+  const config = loadConfig({ AGENT_LLM_URL: 'http://127.0.0.1:1/v1' });
+  const newRun = (kind: AgentKind = 'task', extra: Partial<AgentInput> = {}) => {
+    const run = new AgentRun('r5e6f7a8', kind, { task: 'Order one Blue Mug', output: 'the order number', outputFormat: 'text', maxSteps: 20, ...extra }, 'host-client');
+    run.status = 'running';
+    run.deadline = Date.now() + 10 * 60_000;
+    return run;
+  };
+
+  test('final order and payment buttons are recognised by their label; the checkout steps before them are not', () => {
+    const final = [
+      'Place your order',
+      'place order',
+      'Place Order and Pay',
+      '  Place \n the   order ',
+      '🔒 Place your order',
+      'Place your order Order total: $17.49',
+      'Buy now',
+      'Buy it now',
+      'Order now',
+      'Complete purchase',
+      'Complete your order',
+      'Complete checkout',
+      'Confirm and pay',
+      'Confirm order',
+      'Confirm your payment',
+      'Submit order',
+      'Submit my order',
+      'Pay now',
+      'Pay $17.49',
+      'Pay 17.49',
+      'Pay US$ 17',
+      'Pay EUR 17',
+      'Pay',
+      'Purchase',
+      'Purchase now',
+      'Finish checkout',
+      'Donate',
+      'Donate now',
+      'Donate $25',
+      'Send money',
+      'Transfer money',
+      'Send $50',
+    ];
+    for (const label of final) assert.equal(looksLikeFinalPurchase(label), true, label);
+    const before = [
+      'Proceed to checkout',
+      'Checkout',
+      'Add to cart',
+      'Continue to payment',
+      'Payment method',
+      'PayPal',
+      'Pay with card',
+      'Pay in 3 installments',
+      'Sign in',
+      'Apply coupon',
+      'Purchase history',
+      'Order history',
+      'Your orders',
+      'Confirm address',
+      'Donate monthly',
+      'Place a bid',
+      '',
+    ];
+    for (const label of before) assert.equal(looksLikeFinalPurchase(label), false, label);
+  });
+
+  test('the purchase guard blocks the final step until the host answered a confirm question; confirm_purchases false turns it off', async () => {
+    const warned: unknown[] = [];
+    const env = { config, log: { warn: (obj: unknown) => warned.push(obj) }, waitingCount: () => 0 } as any;
+    const run = newRun();
+    assert.equal(KINDS.task.purchaseGuard, purchaseGuardFor);
+    assert.equal(KINDS.automation.purchaseGuard, undefined, 'task runs only');
+    assert.equal(KINDS.finder.purchaseGuard, undefined);
+    const guard = purchaseGuardFor(run, env)!;
+    assert.equal(guard('Proceed to checkout'), null);
+    const blocked =
+      'Blocked: "Place your order" looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", ' +
+      'giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.';
+    assert.equal(guard('Place your order'), blocked);
+    assert.equal(warned.length, 1, 'a blocked step is logged');
+
+    // a choose answer or an expired confirm question does not lift it
+    for (const [reason, status] of [['choose', 'answered'], ['confirm', 'expired']] as const) {
+      const closed = run.ask({ text: 'Which one?', options: [], reason, secret: false, pageUrl: null }, 60_000);
+      run.closeQuestion(status, status === 'answered' ? { answer: 'the blue one', by: null } : undefined);
+      await closed;
+      assert.equal(guard('Place your order'), blocked, `${reason} ${status}`);
+    }
+    // an answered confirm question lifts it for the rest of the run, whatever the answer (the agent respects a "No")
+    const confirm = run.ask({ text: 'Place the order for the Blue Mug, $17.49?', options: [], reason: 'confirm', secret: false, pageUrl: null }, 60_000);
+    run.closeQuestion('answered', { answer: 'Yes, place the order.', by: null });
+    await confirm;
+    assert.equal(guard('Place your order'), null);
+
+    assert.equal(purchaseGuardFor(newRun('task', { confirmPurchases: false }), env), null, 'the host approved purchases');
+    const quiet = purchaseGuardFor(newRun('task', { allowQuestions: false }), env)!;
+    assert.equal(
+      quiet('Pay $17.49'),
+      'Blocked: "Pay $17.49" looks like the final step of an order or payment, and this job needs the host\'s approval for it but questions are off. ' +
+        'Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).',
+    );
+  });
+
+  test('the prompt: a TASK that orders something still needs the confirmation; confirm_purchases false and questions off change rule (1)', () => {
+    const task = (extra: Partial<AgentInput> = {}) => KINDS.task.systemPrompt(newRun('task', extra), config);
+    const asks = task();
+    assert.match(
+      asks,
+      /\(1\) Before placing an order or paying, always ask first \(reason confirm\) with the item, the total price, the delivery address and the payment method\. A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy\. The server blocks the final order or payment button until the host has answered your confirm question\. If what you are about to do differs from what the host approved, ask again\./,
+    );
+    assert.doesNotMatch(asks, /maximum total and the checkout|explicitly says not to ask/, 'a price limit in the TASK is not an approval');
+    assert.match(
+      task({ confirmPurchases: false }),
+      /\(1\) The host already approved purchases for this job: you do not need to ask before ordering, but stay within the TASK's limits \(item, quantity, maximum total\); if the checkout differs or exceeds them, ask \(reason confirm\)\./,
+    );
+    assert.match(
+      task({ allowQuestions: false }),
+      /nobody can answer questions while you work\.\nNever place an order or pay unless the host approved purchases for this job: it has not, and the server blocks the final order or payment button\. When the order is ready to be placed, call finish with success=false and say so/,
+    );
+    assert.match(task({ allowQuestions: false, confirmPurchases: false }), /The host already approved purchases for this job: stay within the TASK's limits/);
+    const automation = KINDS.automation.systemPrompt(newRun('automation'), config);
+    assert.match(automation, /unless the TASK explicitly approves the purchase and says not to ask \(a price limit for choosing the item, such as "under \$15", is not an approval\)/);
+    assert.doesNotMatch(automation, /server blocks/, 'automation runs have no purchase guard');
+    assert.match(KINDS.automation.systemPrompt(newRun('automation', { allowQuestions: false }), config), /Never place an order, pay or send money unless the TASK explicitly approves the purchase/);
+    assert.doesNotMatch(KINDS.finder.systemPrompt(newRun('finder'), config), /place an order/i);
+  });
+
+  test('a sign-in question is secret by default only when it asks for a code; "which account" is not', async () => {
+    const run = newRun();
+    const env = { config, deps: { snapshots: null }, browser: { activeTab: null }, log: silent, forced: false, pause() {}, resume: async () => true, waitingCount: () => 0 } as any;
+    const askHost = KINDS.task.tools(run, env).find((t) => t.name === 'ask_host')!;
+    const cases: Array<[string, boolean | undefined, boolean]> = [
+      ['Which account should I sign in with: personal or work?', undefined, false],
+      ['What is the 6-digit verification code sent to your phone?', undefined, true],
+      ['Which account: the one ending in 07?', true, true],
+      ['Enter the one-time passcode from the app?', undefined, true],
+    ];
+    for (const [question, secret, expected] of cases) {
+      run.step++;
+      const pending = askHost.handler({ question, reason: 'sign_in', secret }, { markSensitive() {} } as any);
+      assert.equal(run.question?.secret, expected, question);
+      run.closeQuestion('answered', { answer: `answer-${run.step}`, by: null });
+      await pending;
+    }
+    assert.equal(run.questions[0]!.answer, 'answer-1', 'the account choice is kept and shown');
+    assert.equal(run.scrub('the personal account'), 'the personal account');
+  });
+
+  test('server instructions: purchases are confirmed and enforced; without sub-agents the snapshot notes never point to agent_run', () => {
+    const withAgents = serverInstructions(config);
+    assert.match(withAgents, /The agent always asks before placing an order or paying, and the server enforces it\. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK\./);
+    assert.match(
+      withAgents,
+      /answer it now, or ask your user and answer when they reply \(the run waits up to 30 min\); never approve a purchase or send a code on your own \(reply "No" when nobody approved it\)\./,
+    );
+    assert.doesNotMatch(withAgents, /Do not end your turn|approved up to \$30/);
+    assert.match(withAgents, /pass its name to agent_run/);
+    for (const env of [{}, { AGENT_LLM_URL: 'http://127.0.0.1:1/v1', TOOLSETS: 'core,snapshots' }]) {
+      const text = serverInstructions(loadConfig(env));
+      assert.match(text, /Snapshots are saved sign-ins/);
+      assert.match(text, /load it into your browser with snapshot_load \{"name": "…"\}/);
+      assert.doesNotMatch(text, /agent_run|sub-agent/i, JSON.stringify(env));
+    }
+    const quiet = serverInstructions(loadConfig({ AGENT_LLM_URL: 'http://127.0.0.1:1/v1', AGENT_MAX_QUESTIONS: '0' }));
+    assert.match(quiet, /Sub-agents never place an order or pay unless you pass confirm_purchases: false to agent_run \(the server enforces it\)/);
   });
 });
 

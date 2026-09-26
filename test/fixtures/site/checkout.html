@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Checkout Fixture</title></head>
+<body>
+  <h1>Checkout</h1>
+  <p id="summary">Blue Mug × 1 — total $17.49. Delivery to 1 Example Street. Paid with the card ending 4242.</p>
+  <form id="checkout" action="/echo" method="post">
+    <label for="note">Delivery note</label>
+    <input id="note" name="note" placeholder="Note">
+    <input type="hidden" name="item" value="blue-mug">
+    <button id="coupon" type="button">Apply coupon</button>
+    <button id="place" type="submit">Place your order</button>
+    <div id="order-box" style="width:300px"><span style="font-size:1px">Order total $17.49</span><button id="place-boxed" type="submit" style="display:block;width:300px;height:80px">Place your order</button></div>
+  </form>
+  <a id="buy" href="/echo?buy=blue-mug" aria-label="Buy now"><span id="buy-icon">+</span></a>
+</body>
+</html>

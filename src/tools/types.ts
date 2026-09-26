@@ -43,6 +43,11 @@ export interface ToolContext {
    * tools treat the field as sensitive and keep the value out of every log, whatever LOG_REDACT_SECRETS says.
    */
   secretInput?: boolean;
+  /**
+   * Sub-agent task runs: checks the label of a control before a click, Enter or Space activates it, and
+   * returns why that is refused (the final step of an order or payment the host has not approved) or null.
+   */
+  purchaseGuard?: (label: string) => string | null;
   /** Sub-agent runs; null when no agent model is configured. */
   agents: AgentManager | null;
   /** Stored automation scripts. */

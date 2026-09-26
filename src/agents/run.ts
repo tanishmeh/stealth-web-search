@@ -8,7 +8,7 @@ import { EXTRACT_TEXT } from '../browser/scripts.ts';
 import { redactArgs, runTool, type McpDeps } from '../mcp/server.ts';
 import type { CallToolResult, ToolDefinition } from '../tools/types.ts';
 import { MAX_WAITING } from '../util/limits.ts';
-import { REDACTED, scrubDeep, scrubText } from '../util/scrub.ts';
+import { REDACTED, scrubDeep, scrubText, secretParts } from '../util/scrub.ts';
 import { summarize } from '../util/summarize.ts';
 import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars, truncateText } from './conversation.ts';
 import { LlmAbortedError, LlmError, type ChatClient, type ChatMessage, type FunctionTool } from './llm.ts';
@@ -36,6 +36,11 @@ export interface AgentInput {
   overwrite?: boolean;
   /** Task and automation: the agent may pause and ask the host a question (default true; see questionsAllowed). */
   allowQuestions?: boolean;
+  /**
+   * Task: the agent asks before it places an order or pays, and the final order or payment button is
+   * blocked until the host answered such a question (default true; false: the host approved purchases).
+   */
+  confirmPurchases?: boolean;
   /** Task: name of the snapshot (saved sign-in) the agent's browser starts with. Names only, never cookie data. */
   snapshot?: string;
   /** Refresh that snapshot from the agent's browser when the run completes successfully (default true). */
@@ -184,6 +189,8 @@ export class AgentRun {
   readonly questions: AgentQuestion[] = [];
   /** Model turns that asked a question and paused: they do not count against max_steps. */
   questionTurns = 0;
+  /** The step of the last question (a turn counts as a question turn once). */
+  private lastAskStep = -1;
   /** Time paused on questions (asked → slot taken again); it moves the deadline. */
   pausedMs = 0;
   /** When the current pause began (ms), or null. */
@@ -249,10 +256,14 @@ export class AgentRun {
     } catch {
       origin = null;
     }
+    // stored as shown to the host and the dashboard: an earlier secret answer the agent quotes is masked
     this.question = {
       id: `q${randomUUID().replace(/-/g, '').slice(0, 6)}`,
       ...q,
-      origin,
+      text: this.scrub(q.text),
+      options: q.options.map(this.scrub),
+      pageUrl: q.pageUrl && this.scrub(q.pageUrl),
+      origin: origin && this.scrub(origin),
       step: this.step,
       askedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + timeoutMs).toISOString(),
@@ -264,7 +275,11 @@ export class AgentRun {
     this.status = 'waiting';
     this.activity = "waiting for the host's answer";
     this.thinking = '';
-    this.questionTurns++;
+    // a model turn is free once, however many questions it paused on
+    if (this.lastAskStep !== this.step) {
+      this.questionTurns++;
+      this.lastAskStep = this.step;
+    }
     this.pausedSince = now;
     const closed = new Promise<QuestionOutcome>((settle) => {
       const onAbort = () => this.closeQuestion('cancelled');
@@ -292,8 +307,8 @@ export class AgentRun {
     waiter.offAbort();
     const answer = status === 'answered' && reply ? reply.answer : null;
     const secret = q.secret || Boolean(reply?.secret);
-    // short answers (yes, no) are not masked by value: they would hide every such word in the logs
-    if (answer !== null && secret && answer.trim().length >= 4) this.secretValues.add(answer.trim());
+    // the answer and its code-like parts (the agent may type just the code of "The code is 482913.")
+    if (answer !== null && secret) for (const part of secretParts(answer)) this.secretValues.add(part);
     const record: AgentQuestion = {
       ...q,
       secret,
@@ -433,6 +448,8 @@ export interface KindSpec {
   finishTool: string;
   /** Work after the loop (e.g. verify the script); may set run.extra. */
   finalize?(run: AgentRun, env: RunEnv): Promise<void>;
+  /** A check the browser tools run on the label of a control before they activate it (see ToolContext.purchaseGuard). */
+  purchaseGuard?(run: AgentRun, env: RunEnv): ((label: string) => string | null) | null;
 }
 
 export interface RunEnv {
@@ -456,16 +473,76 @@ export function questionsAllowed(run: AgentRun, config: Config): boolean {
   return run.kind !== 'finder' && config.agent.maxQuestions > 0 && run.input.allowQuestions !== false;
 }
 
-/** Why ask_host cannot pause the run now (the call then counts as a normal step), or null. */
-export function questionRefusal(run: AgentRun, env: RunEnv): string | null {
+/**
+ * Why ask_host cannot pause the run now (the call then counts as a normal step), or null. A step that
+ * needed the host's approval or a sign-in code is never left to the agent's own decision.
+ */
+export function questionRefusal(run: AgentRun, env: RunEnv, reason: QuestionReason | undefined): string | null {
   const max = env.config.agent.maxQuestions;
-  const decide = "Decide on your own from what the TASK says, or call finish with success=false and say what needs the host's decision.";
-  if (run.questionTurns >= max) return `you already asked ${max} question${max === 1 ? '' : 's'}, the limit for one job. ${decide}`;
-  if (env.waitingCount() >= MAX_WAITING) return `too many jobs are waiting for the host right now (${MAX_WAITING}). ${decide}`;
+  const next =
+    reason === 'confirm'
+      ? "Do not take the step you wanted to confirm (do not place the order or pay): call finish with success=false and say what needs the host's approval."
+      : reason === 'sign_in'
+        ? 'Call finish with success=false and say which site needs a sign-in and what it asks for.'
+        : "Decide on your own from what the TASK says, or call finish with success=false and say what needs the host's decision.";
+  const asked = run.questions.length + (run.question ? 1 : 0);
+  if (asked >= max) return `you already asked ${max} question${max === 1 ? '' : 's'}, the limit for one job. ${next}`;
+  if (env.waitingCount() >= MAX_WAITING) return `too many jobs are waiting for the host right now (${MAX_WAITING}). ${next}`;
   if (run.input.maxSteps - run.stepsUsed < 3 || run.softDeadline() - Date.now() < 120_000) {
     return 'too little budget left to act on an answer; finish with success=false and say what needs approval';
   }
   return null;
+}
+
+/** An amount of money: "$17.49", "US$ 17", "EUR 17", "17,49". */
+const MONEY = String.raw`(?:(?:[a-z]{1,3} ?)?[$€£¥₹] ?\d|(?:usd|eur|gbp|cad|aud|chf|jpy|inr) ?\d|\d[\d,.]*[.,]\d{2}\b)`;
+/** A one-word label stands alone or goes on with "now" or an amount ("Purchase", "Donate $25"; not "Purchase history"). */
+const ALONE = String.raw`(?: now)?(?=[ !.:·–—-]*(?:$|(?:for )?${MONEY}))`;
+const FINAL_PURCHASE = new RegExp(
+  `^(?:${[
+    String.raw`place (?:(?:your|my|the) )?order\b`,
+    String.raw`buy (?:it )?now\b`,
+    String.raw`order now\b`,
+    String.raw`complete (?:(?:your|my) )?(?:purchase|order|payment|checkout)\b`,
+    String.raw`confirm (?:and pay|(?:(?:your|my) )?(?:order|purchase|payment))\b`,
+    String.raw`submit (?:(?:your|my) )?order\b`,
+    String.raw`finish (?:order|purchase|checkout)\b`,
+    String.raw`pay(?: now\b| ${MONEY}|(?=[ !.]*$))`,
+    `purchase${ALONE}`,
+    `donate${ALONE}`,
+    String.raw`(?:send|transfer) money\b`,
+    `send ${MONEY}`,
+  ].join('|')})`,
+  'i',
+);
+
+/**
+ * Whether a control's label looks like the final step of an order or payment ("Place your order",
+ * "Pay $17.49", "Buy now"), matched at the start of the label. "Proceed to checkout", "Add to cart",
+ * "Continue to payment" or "PayPal" do not.
+ */
+export function looksLikeFinalPurchase(label: string): boolean {
+  const text = label.replace(/\s+/g, ' ').trim().replace(/^[^\p{L}\p{N}]+/u, '').slice(0, 200);
+  return FINAL_PURCHASE.test(text);
+}
+
+/**
+ * The purchase guard of a task run, defense in depth behind the prompt's rule to ask first: a click on
+ * (or Enter/Space onto) a control that looks like the final step of an order or payment is refused until
+ * the host answered a confirm question. An answer lifts it for the rest of the run: the agent is trusted
+ * to respect a "No". Page scripts (browser_evaluate, offered with a snapshot only when allow_evaluate) are not checked.
+ */
+export function purchaseGuardFor(run: AgentRun, env: RunEnv): ((label: string) => string | null) | null {
+  if (run.input.confirmPurchases === false) return null;
+  return (label) => {
+    if (!looksLikeFinalPurchase(label)) return null;
+    if (run.questions.some((q) => q.reason === 'confirm' && q.status === 'answered')) return null;
+    const shown = JSON.stringify(run.scrub(clip(label.replace(/\s+/g, ' ').trim(), 80)));
+    env.log.warn({ label: shown }, 'blocked the final step of an order or payment: the host has not approved it');
+    return questionsAllowed(run, env.config)
+      ? `Blocked: ${shown} looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.`
+      : `Blocked: ${shown} looks like the final step of an order or payment, and this job needs the host's approval for it but questions are off. Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).`;
+  };
 }
 
 const READING_TOOLS = new Set(['browser_markdown', 'browser_snapshot', 'browser_get_text', 'browser_search', 'browser_extract', 'browser_navigate']);
@@ -530,6 +607,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
   let fnTools = tools.map(toFunctionTool);
   const fnToolsChars = JSON.stringify(fnTools).length;
   const canAsk = toolMap.has('ask_host');
+  const purchaseGuard = spec.purchaseGuard?.(run, env) ?? undefined;
 
   run.messages.push({ role: 'system', content: spec.systemPrompt(run, config) }, { role: 'user', content: spec.userPrompt(run) });
 
@@ -553,12 +631,14 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     return [...notes, ...(answers.length ? ["The host's answers to your questions:", ...answers] : [])].join('\n');
   };
 
-  /** The first ask_host call of a turn will really ask (and pause): valid, not refused, in normal work time. */
+  /** An ask_host call will really ask (and pause): valid, not refused, in normal work time. */
   const willAsk = (call: { arguments: string }): boolean => {
     const def = toolMap.get('ask_host');
     if (!def || env.forced || run.outcome || Date.now() > softDeadline()) return false;
     const parsed = parseToolArguments(call.arguments);
-    return parsed.ok && def.inputSchema.safeParse(parsed.value).success && questionRefusal(run, env) === null;
+    const checked = parsed.ok ? def.inputSchema.safeParse(parsed.value) : null;
+    if (!checked?.success) return false;
+    return questionRefusal(run, env, (checked.data as { reason: QuestionReason }).reason) === null;
   };
 
   /** Remember what the agent read on this page (the page's own text, not tool output), to check cited quotes. */
@@ -596,7 +676,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     run.activity = `${call.name} ${describeArgs(shown)}`.trim();
     run.update();
     const closedBefore = run.questions.length;
-    const result = await runTool(def, checked.data, null, env.deps, { browser, client, agentRunId: run.id, signal: run.abort.signal, scrub: run.scrub });
+    const result = await runTool(def, checked.data, null, env.deps, { browser, client, agentRunId: run.id, signal: run.abort.signal, scrub: run.scrub, purchaseGuard });
     let text = truncateText(resultText(result), cfg.maxResultChars);
     // a secret answer reaches the model only: the step preview and the transcript show it masked
     const closed = run.questions.length > closedBefore ? run.questions.at(-1) : undefined;
@@ -803,10 +883,10 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
         return { id: c.id, type: 'function' as const, function: { name: c.name, arguments: p.ok ? JSON.stringify(p.value) : '{}' } };
       }),
     });
-    // A question pauses the turn: when the first ask_host call will really ask, only it runs (a click
-    // listed next to it could place the order before the host answered). Otherwise the turn runs as usual.
-    const firstAsk = completion.toolCalls.find((c) => c.name === 'ask_host');
-    const asking = firstAsk && willAsk(firstAsk) ? firstAsk : null;
+    // A question pauses the turn: when an ask_host call will really ask, only the first such call runs (a
+    // click listed next to it could place the order before the host answered, and a turn pauses at most
+    // once). Otherwise the turn runs as usual.
+    const asking = completion.toolCalls.find((c) => c.name === 'ask_host' && willAsk(c)) ?? null;
     for (const call of completion.toolCalls) {
       let text: string;
       if (run.outcome) text = 'Skipped: the job was already finished.';

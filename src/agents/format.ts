@@ -24,6 +24,10 @@ const REASON_HINT: Partial<Record<QuestionReason, string>> = {
   sign_in: 'Tell your user which site asks (see "asked on"); never send a password; do not relay a code for a site the task did not name.',
 };
 
+/** After a task agent's confirm question: how a purchase the user approves in advance skips it (agent_run's confirm_purchases). */
+const PURCHASE_HINT =
+  'The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.';
+
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
@@ -43,13 +47,21 @@ export function replyArguments(run: AgentRun, q: AgentQuestion, answer: string):
 function waitingResult(run: AgentRun, q: AgentQuestion, base: Record<string, unknown>): { text: string; structured: Record<string, unknown>; isError: boolean } {
   const lines = [`Run ${run.id} is waiting for your answer (question ${q.id}, asked on ${q.origin ?? 'no web page'}):`, '', q.text];
   if (q.options.length) lines.push('', `Options: ${q.options.join(' | ')}`);
-  const hint = REASON_HINT[q.reason];
+  const hint = [
+    REASON_HINT[q.reason],
+    q.reason === 'confirm' && run.kind === 'task' ? PURCHASE_HINT : '',
+    q.secret ? 'Send only the code or secret itself as the answer, e.g. "482913", not a sentence.' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   if (hint) lines.push('', hint);
   const left = Math.max(0, Date.parse(q.expiresAt) - Date.now());
+  // a chat host asks its user by ending its turn: that is allowed, answering for the user is not
   lines.push(
     '',
     `The run is paused and keeps its browser. Answer with agent_reply ${inlineJson(replyArguments(run, q, '...'))}`,
-    `Unanswered after ${durationText(left)} it continues without an answer; agent_cancel stops it. Do not end your turn while it waits.`,
+    `Answer it now, or ask your user and answer when they reply (the run waits up to ${durationText(left)}, then continues without an answer; agent_cancel stops it). ` +
+      'Never approve a purchase or send a code on your own.',
   );
   return {
     text: lines.join('\n'),

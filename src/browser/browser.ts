@@ -17,11 +17,13 @@ export interface TabSummary {
   createdAt: string;
 }
 
-/** A snapshot (saved sign-in) loaded into a browser: the version loaded, and the connection it went into. */
+/** A snapshot (saved sign-in) loaded into a browser: the version loaded, its sites, and the connection it went into. */
 export interface LoadedSnapshot {
   version: number;
   loadedAt: string;
   generation: number;
+  /** Its domain filter: loading or saving an overlapping snapshot here replaces its cookies. */
+  domains: string[];
 }
 
 /** Site storage a loaded snapshot restores on every page load of one origin. */
@@ -164,13 +166,16 @@ export class Browser extends EventEmitter {
   }
 
   /** Record that a snapshot is loaded here (load, create, refresh) and make it the active one. */
-  markSnapshot(name: string, version: number, generation: number): void {
-    this.loadedSnapshots.set(name, { version, loadedAt: new Date().toISOString(), generation });
+  markSnapshot(name: string, version: number, generation: number, domains: string[]): void {
+    this.loadedSnapshots.set(name, { version, loadedAt: new Date().toISOString(), generation, domains });
     this.activeSnapshot = name;
     this.emit('snapshots');
   }
 
-  /** Forget a snapshot (it was deleted): its markers and its storage-seed entries. True when the seed changed. */
+  /**
+   * Forget a snapshot (deleted, unloaded, or replaced by an overlapping one): its markers and its
+   * storage-seed entries. Cookies it put into the jar stay. True when the seed changed.
+   */
   forgetSnapshot(name: string): boolean {
     let changed = this.loadedSnapshots.delete(name);
     if (this.activeSnapshot === name) {

@@ -3,6 +3,8 @@ import { ToolError } from '../browser/errors.ts';
 import { MAIN_BROWSER } from '../dashboard/hub.ts';
 import {
   SnapshotConflictError,
+  SnapshotSeedConflictError,
+  SnapshotSignedOutError,
   actorText,
   countsText,
   domainsText,
@@ -40,6 +42,19 @@ function snapshotName(input: string): string {
   } catch (err) {
     throw new ToolError((err as Error).message);
   }
+}
+
+/** Whether this server offers agent_run (as enabledTools decides: a model is configured and TOOLSETS includes it). */
+function agentRunOffered(ctx: ToolContext): boolean {
+  const wanted = ctx.config.browser.toolsets;
+  return ctx.config.agent.enabled && ['all', 'agents', 'agent_run'].some((w) => wanted.includes(w));
+}
+
+/** "Snapshot "a" is no longer loaded in this browser: <why, singular>." or the plural form for several. */
+function unloadedText(names: string[], one: string, many: string): string {
+  if (!names.length) return '';
+  const quoted = names.map((n) => JSON.stringify(n)).join(', ');
+  return names.length === 1 ? `Snapshot ${quoted} is no longer loaded in this browser: ${one}.` : `Snapshots ${quoted} are no longer loaded in this browser: ${many}.`;
 }
 
 const nameArg = z.string().min(1).max(200).describe('Snapshot name, e.g. "amazon" (see snapshot_list)');
@@ -118,24 +133,36 @@ export const snapshotList = defineTool({
           structuredContent: structured,
         };
       }
-      const first = payload.snapshots.find((v) => !v.incomplete)?.name ?? payload.snapshots[0]!.name;
+      // a real name only when there is one to use: small models copy the example, whatever its account
+      const usable = payload.snapshots.filter((v) => !v.incomplete);
+      const example = usable.length === 1 ? usable[0]!.name : '<name>';
+      const hint = agentRunOffered(ctx)
+        ? `snapshot_load {"name": "${example}"} signs your browser in; agent_run {"snapshot": "${example}", …} starts a sub-agent signed in.`
+        : `snapshot_load {"name": "${example}"} signs your browser in.`;
       const text = [
         `${payload.snapshots.length} snapshot(s) (saved sign-ins):`,
         ...payload.snapshots.map((v) => listLine(v, ctx)),
         '',
-        `Use one: snapshot_load {"name": "${first}"} signs your browser in; agent_run {"snapshot": "${first}", …} starts a sub-agent signed in.`,
+        usable.length === 1 ? `Use it: ${hint}` : `Pick one by its description: ${hint}`,
       ].join('\n');
       return { content: [{ type: 'text', text }], structuredContent: structured };
     }),
 });
 
-function savedText(out: SaveOutcome): string {
+function savedText(out: SaveOutcome, ctx: ToolContext): string {
   const m = out.meta;
   const verb = out.action === 'created' ? 'Created' : out.action === 'refreshed' ? 'Refreshed' : 'Replaced';
   const storage = out.storageOrigin ? `, and the site storage of ${out.storageOrigin}` : '';
+  const unloaded = unloadedText(
+    out.unloaded,
+    `this browser's cookies for its sites are now saved as "${m.name}"`,
+    `this browser's cookies for their sites are now saved as "${m.name}"`,
+  );
   return (
     `${verb} snapshot "${m.name}" (v${m.version}, ${JSON.stringify(m.description)}): ${m.cookieCount} cookie${m.cookieCount === 1 ? '' : 's'} for ${domainsText(out.cookieDomains, 5)}${storage}. ` +
-    `It is loaded in this browser. To start a sub-agent signed in, call agent_run with {"snapshot": "${m.name}"}.`
+    'It is loaded in this browser.' +
+    (unloaded ? ` ${unloaded}` : '') +
+    (agentRunOffered(ctx) ? ` To start a sub-agent signed in, call agent_run with {"snapshot": "${m.name}"}.` : '')
   );
 }
 
@@ -175,6 +202,9 @@ export const snapshotSave = defineTool({
         if (err instanceof SnapshotNotFoundError) return null;
         throw err;
       });
+      // the seed of a loaded snapshot writes its storage into every page of its site: only an empty browser is safe
+      const seedAdvice = (err: SnapshotSeedConflictError) =>
+        new ToolError(`${err.message} To save another account's sign-in, clear the cookies first (browser_clear_cookies, which also unloads "${err.other}"), sign in again, then save.`);
       let out: SaveOutcome;
       if (!existing) {
         if (!desc) {
@@ -187,7 +217,12 @@ export const snapshotSave = defineTool({
           if (!site) throw new ToolError('Open the site you signed in to first (the active tab is not on a web page), or pass domains, e.g. ["example.com"].');
           filter = [site];
         }
-        out = await svc.create(ctx.browser, { name: n, description: desc, domains: filter, by });
+        try {
+          out = await svc.create(ctx.browser, { name: n, description: desc, domains: filter, by });
+        } catch (err) {
+          if (err instanceof SnapshotSeedConflictError) throw seedAdvice(err);
+          throw err;
+        }
       } else {
         const advice = 'If you signed in by hand to the account this snapshot is for, call again with replace: true to overwrite it; otherwise load it first with snapshot_load, or save under a new name.';
         const loaded = ctx.browser.loadedSnapshots.get(n);
@@ -204,11 +239,15 @@ export const snapshotSave = defineTool({
         } catch (err) {
           if (err instanceof SnapshotConflictError) throw new ToolError(`Snapshot "${n}" changed after this browser loaded it: ${err.message}. ${advice}`);
           if (err instanceof SnapshotNotFoundError) throw new ToolError(`Snapshot "${n}" was deleted meanwhile; nothing was saved.`);
+          if (err instanceof SnapshotSignedOutError) {
+            throw new ToolError(`${err.message} If this browser is signed in to the account this snapshot is for, call again with replace: true to overwrite it; otherwise load it again with snapshot_load.`);
+          }
+          if (err instanceof SnapshotSeedConflictError) throw seedAdvice(err);
           throw err;
         }
       }
       return {
-        content: [{ type: 'text', text: savedText(out) }],
+        content: [{ type: 'text', text: savedText(out, ctx) }],
         structuredContent: {
           action: out.action,
           snapshot: {
@@ -220,6 +259,7 @@ export const snapshotSave = defineTool({
             cookie_domains: out.meta.cookieDomains,
             origins: out.meta.origins.map((o) => o.origin),
           },
+          ...(out.unloaded.length ? { unloaded: out.unloaded } : {}),
         },
       };
     }),
@@ -252,7 +292,8 @@ export const snapshotLoad = defineTool({
   title: 'Load a snapshot',
   group: 'snapshots',
   description:
-    "Load (activate) a snapshot in this browser: replaces this browser's cookies for the snapshot's sites with the saved ones (other sites' sign-ins stay) " +
+    "Load (activate) a snapshot in this browser: replaces this browser's cookies for the snapshot's sites with the saved ones " +
+    '(other sites\' sign-ins stay, except for a snapshot saved with domains ["*"], which replaces every cookie) ' +
     'and restores its site storage on every page load of those sites. Only affects your own browser: to start a sub-agent signed in, pass the name to agent_run as snapshot.',
   inputSchema: z.object({ name: nameArg }),
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false, title: 'Load a snapshot' },
@@ -273,11 +314,15 @@ export const snapshotLoad = defineTool({
       if (res.storageOrigins.length) {
         lines.push(`Site storage of ${res.storageOrigins.join(', ')} is restored on every page load${res.appliedNow ? ' (the open page has it now)' : ''}.`);
       }
+      const every = m.domains.includes('*');
       if (res.total > 0 && res.restored === 0) {
         lines.push(`No saved cookie could be restored: sign in again, then save it with snapshot_save {"name": "${m.name}", "replace": true}.`);
       } else {
-        lines.push("Open the site (browser_navigate): this browser should be signed in. Other sites' sign-ins in this browser were not changed.");
+        lines.push(`Open the site (browser_navigate): this browser should be signed in.${every ? '' : " Other sites' sign-ins in this browser were not changed."}`);
       }
+      if (every) lines.push(`This snapshot covers every site (domains ["*"]): all of this browser's cookies were replaced by the saved ones, so other sign-ins in this browser are gone.`);
+      const unloaded = unloadedText(res.unloaded, 'this load replaced its cookies', 'this load replaced their cookies');
+      if (unloaded) lines.push(unloaded);
       if (ctx.browser.id === MAIN_BROWSER && ctx.config.obscura.storageDir) {
         lines.push('Note: OBSCURA_STORAGE_DIR is set, so the engine also keeps these cookies in its own cookie store.');
       }
@@ -291,6 +336,7 @@ export const snapshotLoad = defineTool({
           expired: Object.fromEntries(res.expired),
           refused: Object.fromEntries(res.refused),
           storage_origins: res.storageOrigins,
+          ...(res.unloaded.length ? { unloaded: res.unloaded } : {}),
         },
       };
     }),

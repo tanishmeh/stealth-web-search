@@ -25,7 +25,8 @@ export interface FixtureServer {
  *   /slow?ms=N      responds after N ms
  *   /redirect?to=U  302 to U
  *   /status/N       responds with HTTP status N
- *   /set-cookie?name=&value=   sets a cookie and shows document.cookie (&httponly=1 adds HttpOnly, &reverse=1 stores the reversed value)
+ *   /set-cookie?name=&value=   sets a cookie and shows document.cookie (&httponly=1 adds HttpOnly, &reverse=1 stores the reversed value,
+ *                   &max_age=N and &expires=<HTTP date> make it persistent)
  *   /login          GET: a sign-in form (#user, #password, #signin). POST: signs in with a server-issued
  *                   session cookie (HttpOnly) and puts a random "profile" into localStorage (no secret in a URL)
  *   /account        #who says "Signed in as <user>" for a valid session cookie, else "Signed out"; #profile says
@@ -84,8 +85,13 @@ export async function startFixtureServer(): Promise<FixtureServer> {
           // reverse=1 stores the reversed value, so a test can keep the real cookie value out of URLs
           const raw = url.searchParams.get('value') ?? '1';
           const value = url.searchParams.get('reverse') === '1' ? Array.from(raw).reverse().join('') : raw;
+          const attrs = [
+            url.searchParams.get('httponly') === '1' ? 'HttpOnly' : '',
+            url.searchParams.has('max_age') ? `Max-Age=${url.searchParams.get('max_age')}` : '',
+            url.searchParams.has('expires') ? `Expires=${url.searchParams.get('expires')}` : '',
+          ].filter(Boolean);
           return html(200, `<!doctype html><title>Cookie</title><p id="c"></p><script>document.getElementById('c').textContent=document.cookie</script>`, {
-            'Set-Cookie': `${name}=${value}; Path=/${url.searchParams.get('httponly') === '1' ? '; HttpOnly' : ''}`,
+            'Set-Cookie': [`${name}=${value}`, 'Path=/', ...attrs].join('; '),
           });
         }
         if (url.pathname === '/login' && req.method === 'POST') {

@@ -363,7 +363,7 @@ describe('dashboard snapshot routes', () => {
   });
 
   test('DELETE works from this server\'s own pages, ALLOWED_HOSTS and PUBLIC_URL; names are checked and normalized', async () => {
-    const r = await startSnapshotRoutes({ ALLOWED_HOSTS: 'dash.internal', PUBLIC_URL: 'https://mcp.example.com/base' });
+    const r = await startSnapshotRoutes({ ALLOWED_HOSTS: 'dash.internal,pinned.internal:8443', PUBLIC_URL: 'https://mcp.example.com/base' });
     try {
       const ok = await r.del('shop', { 'X-SBM-Request': '1', Origin: r.own, 'Sec-Fetch-Site': 'same-origin' });
       assert.equal(ok.status, 200);
@@ -372,7 +372,17 @@ describe('dashboard snapshot routes', () => {
       // behind a TLS proxy the Origin is the public host, not the Host header this server sees
       assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://mcp.example.com' })).status, 200);
       assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://dash.internal' })).status, 200);
-      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://dash.internal:9443' })).status, 403, 'an allowed host on another port is another origin');
+      // a proxy on a non-default port: the Origin carries the port, ALLOWED_HOSTS names the host only
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://dash.internal:9443', 'Sec-Fetch-Site': 'same-origin' })).status, 200, 'an ALLOWED_HOSTS name matches on any port');
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://pinned.internal:8443' })).status, 200, 'an entry with a port matches that port');
+      const refused: Array<[string, Record<string, string>]> = [
+        ['an entry with a port matches no other port', { 'X-SBM-Request': '1', Origin: 'https://pinned.internal:9443' }],
+        ['PUBLIC_URL keeps its port', { 'X-SBM-Request': '1', Origin: 'https://mcp.example.com:8443' }],
+        ['a subdomain of an allowed name is another site', { 'X-SBM-Request': '1', Origin: 'https://evil.dash.internal' }],
+        ['loopback names stay exact: another port is another local server', { 'X-SBM-Request': '1', Origin: `http://localhost:${r.port + 1}` }],
+        ['any port, still not from another site', { 'X-SBM-Request': '1', Origin: 'https://dash.internal:9443', 'Sec-Fetch-Site': 'same-site' }],
+      ];
+      for (const [label, headers] of refused) assert.equal((await r.del('shop', headers)).status, 403, label);
       const own = { 'X-SBM-Request': '1', Origin: r.own };
       assert.equal((await r.del('My%20Shop', own)).status, 200);
       for (const bad of ['%2e%2e', '%2f', 'a%2fb', '%00', '-x', 'x'.repeat(65)]) {
@@ -383,7 +393,7 @@ describe('dashboard snapshot routes', () => {
       assert.equal((await r.del('missing', own)).status, 404);
       assert.deepEqual(
         r.deleted.map(([name]) => name),
-        ['shop', 'shop', 'shop', 'shop', 'my-shop'],
+        ['shop', 'shop', 'shop', 'shop', 'shop', 'shop', 'my-shop'],
       );
       assert.ok(r.deleted.every(([, client]) => client === 'dashboard'), 'logged as the dashboard');
     } finally {

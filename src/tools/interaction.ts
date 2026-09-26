@@ -82,6 +82,8 @@ export async function clickElement(
 ): Promise<{ box: ElementBox; method: string; outcome: NavigationOutcome<void> }> {
   const box = await measure(tab, handle);
   if (box.disabled) throw new ToolError(`Element ${describeBox(box, handle)} is disabled`);
+  // a real mouse click lands on whatever is drawn at the centre, which can be a button inside the element
+  await guardPurchase(ctx, tab, handle.objectId, null, [box.label], box.visible && box.hitsSelf ? { x: box.x, y: box.y } : null);
 
   let method = 'mouse';
   const outcome = await tab.trackNavigation(async () => {
@@ -103,6 +105,30 @@ export async function clickElement(
     }
   });
   return { box, method, outcome };
+}
+
+/** A sub-agent's action refused by its run's purchase guard (ToolContext.purchaseGuard). */
+export class PurchaseBlockedError extends ToolError {}
+
+/**
+ * Sub-agent task runs: refuse, before it acts, a click (key null) or an Enter/Space that would activate
+ * the final step of an order or payment the host has not approved (ctx.purchaseGuard). Clicks by page
+ * scripts (browser_evaluate) are not covered.
+ */
+export async function guardPurchase(
+  ctx: ToolContext,
+  tab: Tab,
+  objectId: string | undefined,
+  key: 'Enter' | ' ' | null,
+  known: string[] = [],
+  point: { x: number; y: number } | null = null,
+): Promise<void> {
+  if (!ctx.purchaseGuard) return;
+  const labels = [...known, ...((await tab.callFunction<string[]>(ACTIVATION_LABELS, [key, point], { objectId })) ?? [])];
+  for (const label of labels) {
+    const block = label ? ctx.purchaseGuard(label) : null;
+    if (block) throw new PurchaseBlockedError(block);
+  }
 }
 
 export const click = defineTool({
@@ -226,6 +252,57 @@ const FOCUS_FOR_CLICK = `function focusForClick() {
   if (target.disabled || target.hasAttribute('disabled')) return false;
   if (target.tagName.toLowerCase() === 'input' && (target.getAttribute('type') || '').toLowerCase() === 'hidden') return false;
   return moveFocus(target);
+}`;
+
+/**
+ * Labels of what an action activates, for the purchase guard. `this` = the element (clicked, or typed
+ * into or focused before the key), else the focused element. key null: a click on the element (its label,
+ * that of the button or link around it, and that of the button or link at `point`, where a mouse click
+ * lands); "Enter": the link or button it activates, or the form's default button (implicit submission, as
+ * KEY_PRESS does it); " ": the button it activates.
+ */
+const ACTIVATION_LABELS = `function activationLabels(key, point) {
+  ${LABEL_OF}
+  ${FOCUS_HELPERS}
+  var el = this && this.nodeType === 1 ? this : focusedElement();
+  if (!el || !el.isConnected) return [];
+  var out = [];
+  var isButton = function (n) {
+    var nt = n.tagName.toLowerCase();
+    return nt === 'button' || nt === 'summary' || (nt === 'input' && ['button', 'submit', 'reset', 'image'].indexOf((n.getAttribute('type') || '').toLowerCase()) >= 0);
+  };
+  // the accessible label, and the visible text (a button's value) when an aria-label says something else
+  var add = function (n) {
+    var t = labelOf(n);
+    if (t) out.push(t);
+    var nt = n.tagName.toLowerCase();
+    var shown = nt === 'input' ? (isButton(n) ? n.getAttribute('value') : '') : nt === 'select' || nt === 'textarea' ? '' : n.innerText || n.textContent;
+    shown = String(shown || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+    if (shown && shown !== t) out.push(shown);
+  };
+  var tag = el.tagName.toLowerCase(), type = (el.getAttribute('type') || '').toLowerCase();
+  var button = isButton(el);
+  if (key === null) {
+    add(el);
+    var CONTROLS = 'button, a[href], input[type=submit], input[type=button], input[type=image], [role=button], [role=link]';
+    var around = el.closest ? el.closest(CONTROLS) : null;
+    if (around && !sameNode(around, el)) add(around);
+    var hit = null;
+    if (point) { try { hit = document.elementFromPoint(point.x, point.y); } catch (_e) {} }
+    var hitControl = hit && hit.closest ? hit.closest(CONTROLS) : null;
+    if (hitControl && !sameNode(hitControl, el) && !(around && sameNode(hitControl, around))) add(hitControl);
+  } else if (key === 'Enter') {
+    if (button || ((tag === 'a' || tag === 'area') && el.hasAttribute('href'))) add(el);
+    else if (tag === 'select' || (tag === 'input' && type !== 'file')) {
+      var form = el.form || (el.closest ? el.closest('form') : null);
+      var controls = form ? form.querySelectorAll('button, input') : [];
+      for (var i = 0; i < controls.length; i++) {
+        var ct = controls[i].tagName.toLowerCase(), ty = (controls[i].getAttribute('type') || '').toLowerCase();
+        if ((ct === 'button' && (ty === '' || ty === 'submit')) || (ct === 'input' && (ty === 'submit' || ty === 'image'))) { add(controls[i]); break; }
+      }
+    }
+  } else if (key === ' ' && button) add(el);
+  return out;
 }`;
 
 /** `this` = element. Describes what kind of control it is and its state (never its value). */
@@ -1177,6 +1254,8 @@ export const typeText = defineTool({
   handler: async ({ ref, selector, text, submit }, ctx) => {
     const tab = await ctx.tab();
     const handle = await tab.resolveElement({ ref, selector });
+    // checked before typing: a refused call types nothing, so repeating it later does not type twice
+    if (submit) await guardPurchase(ctx, tab, handle.objectId, 'Enter');
     const typed = await tab.trackNavigation(() => typeIntoElement(ctx, tab, handle, text));
     const { summary } = typed.result;
     if (typed.navigated) return textResult(`${summary}${submit ? '; Enter was not pressed because typing navigated the page' : ''}${navigationNote(typed)}`);
@@ -1210,14 +1289,17 @@ export const pressKey = defineTool({
     // a printable character typed into a password-like field must not be echoed in results, logs or markers
     const labelFor = (field: FieldInfo | null) =>
       field && isSensitiveField(field) && Array.from(parsed.def.key).length === 1 ? 'a character (hidden)' : parsed.label;
+    const activates = parsed.def.key === 'Enter' || parsed.def.key === ' ' ? parsed.def.key : null;
     if (ref || selector) {
       const handle = await tab.resolveElement({ ref, selector });
+      if (activates) await guardPurchase(ctx, tab, handle.objectId, activates);
       const prepared = await inspectElement(tab, handle);
       info = prepared.info;
       target = ` on ${describeField(info, handle)}`;
       if (prepared.box.visible) ctx.pointer(tab, prepared.box.x, prepared.box.y, 'key', labelFor(info));
       await focusElement(tab, handle);
     } else {
+      if (activates) await guardPurchase(ctx, tab, undefined, activates);
       info = await tab.callFunction<FieldInfo | null>(ACTIVE_FIELD_INFO);
       target = info ? ` on the focused ${describeActive(tab, info)}` : ' (no element has focus)';
     }

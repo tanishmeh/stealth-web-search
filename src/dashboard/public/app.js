@@ -268,7 +268,7 @@ const ui = {
   // Snapshots tab: kept here (not in the rows) so live updates that rebuild a row keep the confirmation
   confirmDelete: null, // name whose inline delete confirmation is open
   deleting: null, // name whose DELETE request is in flight
-  deleteError: null, // { name, text } of the last failed delete
+  deleteError: null, // { name, text, announced } of the last failed delete
 };
 
 // ------------------------------------------------------------------ render scheduling
@@ -1970,8 +1970,18 @@ const agentsUi = {
 function upsertAgent(summary) {
   if (!summary || typeof summary !== 'object' || typeof summary.id !== 'string') return;
   const previous = model.agents.get(summary.id);
+  // the hub's rule: most recently updated last; over the cap, the oldest finished runs go first, and a
+  // queued, running or waiting run (it may need an answer) is never dropped
+  model.agents.delete(summary.id);
   model.agents.set(summary.id, summary);
-  while (model.agents.size > 100) model.agents.delete(model.agents.keys().next().value);
+  for (const [id, a] of model.agents) {
+    if (model.agents.size <= 100) break;
+    if (['completed', 'failed', 'cancelled'].includes(a.status)) {
+      model.agents.delete(id);
+      agentsUi.open.delete(id);
+      agentsUi.details.delete(id);
+    }
+  }
   const changed =
     !previous ||
     previous.step !== summary.step ||
@@ -2548,9 +2558,10 @@ function buildSnapshotRow(s) {
   const loaded = snapshotLoadedText(s);
   const error = ui.deleteError?.name === name ? ui.deleteError.text : '';
   const usedBy = confirming ? snapshotUsedByText(s) : '';
+  // tabindex -1: after a delete the focus rests on the neighbouring row itself, where Enter does nothing
   return h(
     'div',
-    { class: `snapshot-row${confirming ? ' confirming' : ''}`, dataset: { name } },
+    { class: `snapshot-row${confirming ? ' confirming' : ''}`, dataset: { name }, role: 'group', 'aria-label': `Snapshot ${name}`, tabindex: '-1' },
     h(
       'div',
       { class: 'snapshot-head' },
@@ -2597,17 +2608,25 @@ function buildSnapshotRow(s) {
           { class: 'snapshot-confirm', role: 'group', 'aria-label': `Confirm deleting snapshot ${name}` },
           h(
             'p',
-            { class: 'snapshot-confirm-text' },
+            { class: 'snapshot-confirm-text', id: `snapshot-confirm-text-${name}` },
             h('span', { text: `Delete snapshot "${name}" for good? Cookies it already put into a browser stay until cleared.` }),
             usedBy ? h('span', { class: 'snapshot-confirm-use', text: usedBy }) : null,
           ),
           h(
             'span',
             { class: 'snapshot-confirm-actions' },
-            // aria-disabled, not disabled: a disabled button would drop the keyboard focus while the request runs
+            // aria-disabled, not disabled: a disabled button would drop the keyboard focus while the request runs.
+            // The focus lands here, so the button carries the warning (and who uses the snapshot) as its description.
             h(
               'button',
-              { class: 'chip danger', type: 'button', dataset: { action: 'confirm-delete', name }, 'aria-disabled': deleting ? 'true' : undefined, 'aria-label': `Delete snapshot ${name} for good` },
+              {
+                class: 'chip danger',
+                type: 'button',
+                dataset: { action: 'confirm-delete', name },
+                'aria-disabled': deleting ? 'true' : undefined,
+                'aria-label': deleting ? `Deleting snapshot ${name}…` : `Delete snapshot ${name} for good`,
+                'aria-describedby': `snapshot-confirm-text-${name}`,
+              },
               icon('trash'),
               deleting ? 'Deleting…' : 'Delete',
             ),
@@ -2615,7 +2634,8 @@ function buildSnapshotRow(s) {
           ),
         )
       : null,
-    error ? h('div', { class: 'snapshot-error', role: 'alert', text: error }) : null,
+    // an alert only when it first appears: a live update that rebuilds the row must not announce it again
+    error ? h('div', { class: 'snapshot-error', role: ui.deleteError.announced ? undefined : 'alert', text: error }) : null,
   );
 }
 
@@ -2637,13 +2657,14 @@ function renderSnapshots() {
   const box = $('snapshots-rows');
   const before = [...box.children];
   const existing = new Map(before.map((el) => [el.dataset.name, el]));
-  // focus inside a row that goes away moves to the nearest remaining row (or the tab)
+  // focus inside a row that goes away (deleted here or elsewhere) moves to the nearest remaining row itself,
+  // not to its Delete button: another Enter there would ask to delete that one too (or the tab, when none is left)
   if (!snapshotFocus) {
     const gone = before.find((el) => !names.has(el.dataset.name) && el.contains(document.activeElement));
     if (gone) {
       const i = before.indexOf(gone);
       const next = [...before.slice(i + 1), ...before.slice(0, i).reverse()].find((el) => names.has(el.dataset.name));
-      snapshotFocus = next ? { name: next.dataset.name, action: 'delete' } : { tab: true };
+      snapshotFocus = next ? { name: next.dataset.name } : { tab: true };
     }
   }
   const rows = list.map((s) => {
@@ -2665,11 +2686,14 @@ function renderSnapshots() {
   });
 
   if (snapshotFocus) {
-    const target = snapshotFocus.tab ? $('itab-snapshots') : box.querySelector(`[data-name="${CSS.escape(snapshotFocus.name)}"] [data-action="${CSS.escape(snapshotFocus.action)}"]`);
+    const focusRow = snapshotFocus.tab ? null : rows.find((row) => row.dataset.name === snapshotFocus.name);
+    const target = snapshotFocus.tab ? $('itab-snapshots') : snapshotFocus.action ? focusRow?.querySelector(`[data-action="${CSS.escape(snapshotFocus.action)}"]`) : focusRow;
     snapshotFocus = null;
     // only while the tab is shown: a hidden view must not pull the focus
     if (target && ui.view === 'snapshots') target.focus();
   }
+  // the error row was drawn with its alert: later rebuilds show the text without announcing it again
+  if (ui.deleteError) ui.deleteError.announced = true;
 
   const empty = $('snapshots-empty');
   empty.hidden = list.length > 0;
@@ -2701,11 +2725,29 @@ function renderSnapshots() {
   }
 }
 
-/** Refresh the "updated 3m ago" of every row without rebuilding it. */
+/** The next expiries that have passed, and when the page last asked for a fresh list because of them. */
+const snapshotExpiries = { passed: '', askedAt: 0 };
+
+/** Refresh the "updated 3m ago" of every row without rebuilding it, and the expired counts once a cookie expires. */
 function tickSnapshots() {
   for (const el of $('snapshots-rows').querySelectorAll('.snapshot-when[data-name]')) {
     const s = model.snapshots?.snapshots?.find((x) => x?.name === el.dataset.name);
     if (s) setText(el, snapshotWhenText(s));
+  }
+  // the server counts expired cookies when it publishes the list, and nothing is published when a saved
+  // cookie expires: once a row's next expiry has passed, ask for a fresh list (again after 30 s if unchanged)
+  const now = serverNow();
+  const passed = (Array.isArray(model.snapshots?.snapshots) ? model.snapshots.snapshots : [])
+    .filter((s) => {
+      const next = parseTime(s?.next_expiry);
+      return next !== null && next + 1000 <= now;
+    })
+    .map((s) => `${str(s.name)}@${str(s.next_expiry)}`)
+    .join(' ');
+  if (passed && (passed !== snapshotExpiries.passed || Date.now() - snapshotExpiries.askedAt > 30_000)) {
+    snapshotExpiries.passed = passed;
+    snapshotExpiries.askedAt = Date.now();
+    void loadSnapshots();
   }
 }
 
@@ -2766,16 +2808,15 @@ async function deleteSnapshot(name) {
   ui.deleting = null;
   ui.confirmDelete = null;
   if (error) {
-    ui.deleteError = { name, text: error };
-    snapshotFocus = { name, action: 'delete' };
+    ui.deleteError = { name, text: error, announced: false };
+    // back to Delete, unless the user moved on while the request ran (the confirm button had the focus)
+    const row = [...$('snapshots-rows').children].find((el) => el.dataset.name === name);
+    const here = document.activeElement;
+    if (!here || here === document.body || row?.contains(here)) snapshotFocus = { name, action: 'delete' };
   } else if (model.snapshots) {
-    // gone at once; the hub's new list follows
-    const list = model.snapshots.snapshots.filter((s) => s?.name !== name);
-    const order = [...$('snapshots-rows').children].map((el) => el.dataset.name);
-    const i = order.indexOf(name);
-    const next = [...order.slice(i + 1), ...order.slice(0, Math.max(0, i)).reverse()].find((n) => n !== name && list.some((s) => s?.name === n));
-    snapshotFocus = next ? { name: next, action: 'delete' } : { tab: true };
-    model.snapshots = { ...model.snapshots, snapshots: list };
+    // gone at once; the hub's new list follows (it may have come first). Either way the render moves
+    // the focus from the removed row to its neighbour.
+    model.snapshots = { ...model.snapshots, snapshots: model.snapshots.snapshots.filter((s) => s?.name !== name) };
   }
   mark('snapshots');
 }
@@ -2931,6 +2972,15 @@ function init() {
   $('browser-select').addEventListener('change', (ev) => switchBrowser(ev.target.value));
   $('agents-rows').addEventListener('click', onAgentsClick);
   $('snapshots-rows').addEventListener('click', onSnapshotsClick);
+  // a held Enter repeats, and a button clicks on every repeat: Delete would open the confirmation and the
+  // next repeat confirm it. Only a new press counts (cancelling the keydown cancels its click).
+  $('snapshots-rows').addEventListener(
+    'keydown',
+    (ev) => {
+      if (ev.repeat && (ev.key === 'Enter' || ev.key === ' ')) ev.preventDefault();
+    },
+    true,
+  );
 
   // activity filters
   $('activity-tool').addEventListener('change', (ev) => {

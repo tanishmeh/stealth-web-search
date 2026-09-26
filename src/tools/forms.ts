@@ -5,6 +5,7 @@ import type { ElementHandle, RemoteObject, Tab } from '../browser/tab.ts';
 import { pretty } from './format.ts';
 import {
   LABEL_OF,
+  PurchaseBlockedError,
   SENSITIVE_FIELD,
   clickElement,
   describeBox,
@@ -312,6 +313,7 @@ export const fillForm = defineTool({
 
     const wantsSubmit = Boolean(submit_ref || submit_selector);
     let note = '';
+    let blocked = false;
     if (navigatedAt >= 0) {
       const field = fields[navigatedAt]!;
       const target = field.ref ? `ref ${field.ref}` : `selector ${JSON.stringify(field.selector)}`;
@@ -333,7 +335,9 @@ export const fillForm = defineTool({
           if (!outcome.urlChanged) lines.push('The page did not navigate (the form may have been sent in the background or shown validation errors); call browser_snapshot to check.');
         } catch (err) {
           if (!(err instanceof ToolError)) throw err;
-          lines.push(`Could not submit: ${err.message}`);
+          // the final step of an order the host has not approved: the fields are filled, the form is not sent
+          blocked = err instanceof PurchaseBlockedError;
+          lines.push(blocked ? `The form was not submitted. ${err.message}` : `Could not submit: ${err.message}`);
         }
       }
     } else if (filling.urlChanged && !filling.navigated) {
@@ -341,7 +345,7 @@ export const fillForm = defineTool({
     }
 
     const text = `${lines.join('\n')}${note}`;
-    if (filled === 0) return { content: [{ type: 'text', text: `Error: ${text}` }], isError: true };
+    if (filled === 0 || blocked) return { content: [{ type: 'text', text: `Error: ${text}` }], isError: true };
     return textResult(text);
   },
 });

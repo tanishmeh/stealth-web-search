@@ -3,12 +3,15 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
+import { EventEmitter } from 'node:events';
+import { Writable } from 'node:stream';
 import pino from 'pino';
-import type { CookieOut } from '../../src/browser/storage-state.ts';
+import { Browser, Mutex, type LoadedSnapshot, type SeedEntry } from '../../src/browser/browser.ts';
+import { MAX_COOKIE_AGE_SECONDS, cookieParam, isoTime, type CookieOut, type CookieParam } from '../../src/browser/storage-state.ts';
 import { loadConfig } from '../../src/config.ts';
 import { Hub } from '../../src/dashboard/hub.ts';
 import { LogTap } from '../../src/logger.ts';
-import { SnapshotService, domainsText, inScope, normalizeFilter, siteOfHost } from '../../src/snapshots/service.ts';
+import { SnapshotService, domainsText, filtersOverlap, inScope, normalizeFilter, siteOfHost } from '../../src/snapshots/service.ts';
 import {
   MAX_SNAPSHOTS,
   SnapshotDecryptError,
@@ -339,6 +342,28 @@ describe('snapshot domain filter', () => {
     assert.equal(inScope('127.0.0.1', ['127.0.0.1']), true);
   });
 
+  test('filters overlap when they share a cookie domain, so loading one replaces cookies of the other', () => {
+    const overlapping: Array<[string[], string[]]> = [
+      [['shop.example'], ['shop.example']],
+      [['example.com'], ['www.example.com']],
+      [['www.example.com'], ['example.com']],
+      [['shop.example.com'], ['blog.example.com']], // both get the example.com cookies
+      [['a.example', 'b.example'], ['b.example']],
+      [['*'], ['anything.example']],
+      [['anything.example'], ['*']],
+      [['127.0.0.1'], ['127.0.0.1']],
+    ];
+    for (const [a, b] of overlapping) assert.equal(filtersOverlap(a, b), true, `${a} / ${b}`);
+    const apart: Array<[string[], string[]]> = [
+      [['example.com'], ['example.org']],
+      [['www.example.test'], ['127.0.0.1']],
+      [['127.0.0.1'], ['10.0.0.1']], // IP addresses have no parent domains
+      [['shop.example'], ['evil-shop.example']],
+      [['localhost'], ['example.com']],
+    ];
+    for (const [a, b] of apart) assert.equal(filtersOverlap(a, b), false, `${a} / ${b}`);
+  });
+
   test('filter entries are normalized sites; "*" alone means every cookie', () => {
     assert.deepEqual(normalizeFilter(['https://WWW.Example.com/path', '.shop.example', 'example.com']), ['example.com', 'shop.example', 'www.example.com']);
     assert.deepEqual(normalizeFilter(['a.example', '*']), ['*']);
@@ -348,6 +373,44 @@ describe('snapshot domain filter', () => {
     assert.equal(siteOfHost('127.0.0.1'), '127.0.0.1');
     assert.equal(domainsText(['*']), 'every site');
     assert.equal(domainsText(['a.x', 'b.x', 'c.x', 'd.x']), 'a.x, b.x, c.x and 1 more');
+  });
+});
+
+describe('cookie expiries', () => {
+  const config = loadConfig({});
+  const param = (expires: unknown, opts?: { seconds?: boolean }) => cookieParam({ name: 'far', value: '1', domain: 'shop.example', expires }, config, opts);
+  const now = () => Math.floor(Date.now() / 1000);
+
+  test('a far-future expiry is capped at 400 days, never read as milliseconds and refused', () => {
+    // "Expires=Fri, 31 Dec 9999 23:59:59 GMT" as the engine reports it (seconds)
+    for (const [expires, opts] of [
+      [253402300799, undefined],
+      [253402300799, { seconds: true }],
+      [100001790451766, { seconds: true }], // Max-Age=99999999999999: past the range of a date
+      [1.5e12, { seconds: true }], // a saved snapshot is in seconds, however large
+    ] as Array<[number, { seconds?: boolean } | undefined]>) {
+      const res = param(expires, opts);
+      assert.notEqual(typeof res, 'string', `${expires}: ${String(res)}`);
+      const e = (res as CookieParam).expires!;
+      assert.ok(e > now() + MAX_COOKIE_AGE_SECONDS - 5 && e <= now() + MAX_COOKIE_AGE_SECONDS, `${expires} -> ${e}`);
+    }
+  });
+
+  test('milliseconds are still accepted from other exports, and past expiries refused', () => {
+    const soon = now() + 3_600;
+    assert.equal((param(soon * 1000) as CookieParam).expires, soon, 'milliseconds');
+    assert.equal((param(soon) as CookieParam).expires, soon, 'seconds');
+    assert.equal((param(soon + 0.75) as CookieParam).expires, soon, 'fractional seconds (chrome.cookies)');
+    assert.match(String(param(1.5e12)), /^"far": expired at 2017-/, 'a millisecond time in 2017');
+    assert.match(String(param(now() - 60)), /^"far": expired at /);
+    assert.equal((param(-1) as CookieParam).expires, undefined, 'a session cookie');
+  });
+
+  test('isoTime formats any expiry without throwing', () => {
+    assert.equal(isoTime(0), '1970-01-01T00:00:00.000Z');
+    assert.equal(isoTime(253402300799), '9999-12-31T23:59:59.000Z');
+    assert.equal(isoTime(100001790451766), null);
+    assert.equal(isoTime(Number.NaN), null);
   });
 });
 
@@ -383,6 +446,151 @@ describe('snapshot service list', () => {
     const text = JSON.stringify(payload);
     assert.ok(!text.includes('svc-secret') && !text.includes('svc-storage-secret') && !text.includes('"session"'), text);
     assert.deepEqual(hub.history().snapshots, payload, 'viewers that connect later get the list');
+  });
+
+  test('a snapshot saved with an expiry past the range of a date is listed (no next expiry), never an error', async () => {
+    const d = dir();
+    const hub = new Hub(new LogTap());
+    const svc = new SnapshotService({ config: loadConfig({ SNAPSHOTS_DIR: d }), log: silent, hub }, { browser: () => null, list: () => [] } as any);
+    // saved before expiries were capped: Obscura reported Max-Age=99999999999999 as this many seconds
+    await svc.store.create({ name: 'huge', description: 'Huge', domains: ['shop.example'], cookies: [cookie('huge', 'h', { expires: 100001790451766 })], origins: [], by: {} });
+    const payload = await svc.list();
+    const huge = payload.snapshots.find((s) => s.name === 'huge')!;
+    assert.equal(huge.expired_count, 0);
+    assert.equal(huge.next_expiry, null);
+    assert.equal((hub.history().snapshots as any).snapshots[0].name, 'huge', 'published to the dashboard');
+  });
+
+  test('a failing dashboard publish after a browser change is logged, never thrown out of setImmediate', async () => {
+    const lines: string[] = [];
+    const log = pino({ level: 'warn' }, new Writable({ write: (chunk, _enc, done) => (lines.push(String(chunk)), done()) }));
+    const hub = { publish: () => { throw new RangeError('Invalid time value'); } } as any;
+    const svc = new SnapshotService({ config: loadConfig({ SNAPSHOTS_DIR: dir() }), log, hub }, { browser: () => null, list: () => [] } as any);
+    const browser = new EventEmitter();
+    svc.track(browser as any);
+    browser.emit('snapshots'); // a load, save or reset in that browser
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.ok(lines.some((l) => l.includes('could not publish the snapshot list') && l.includes('Invalid time value')), lines.join(''));
+  });
+});
+
+/**
+ * Enough of a Browser for SnapshotService (its marker methods are the real ones): one signed-in page on
+ * shop.example with site storage, and a seed registration the test can hold to let a delete or a lost
+ * connection land while it is in flight.
+ */
+class FakeBrowser extends EventEmitter {
+  readonly id = 'main';
+  readonly mutex = new Mutex();
+  readonly loadedSnapshots = new Map<string, LoadedSnapshot>();
+  readonly storageSeed = new Map<string, SeedEntry>();
+  activeSnapshot: string | null = null;
+  seedScript: { id: string; generation: number } | null = null;
+  reconnectHook = null;
+  connected = true;
+  readonly connectionGeneration = 1;
+  readonly sent: string[] = [];
+  private held: { promise: Promise<void>; release: () => void } | null = null;
+  private ids = 0;
+  readonly conn = {
+    isOpen: true,
+    send: async (method: string): Promise<any> => {
+      this.sent.push(method);
+      if (method === 'Network.getAllCookies') {
+        return { cookies: [{ name: 'session', value: 's', domain: 'shop.example', path: '/', expires: -1, httpOnly: true, secure: false, session: true }] };
+      }
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') {
+        await this.held?.promise;
+        return { identifier: String(++this.ids) };
+      }
+      return {};
+    },
+  };
+  readonly activeTab = {
+    closed: false,
+    url: 'https://shop.example/account',
+    pageInfo: async () => ({ url: 'https://shop.example/account' }),
+    callFunction: async () => ({ origin: 'https://shop.example', localStorage: [{ name: 'profile', value: 'p' }], sessionStorage: [] }),
+  };
+  async connection() {
+    return this.conn;
+  }
+  markSnapshot(...args: Parameters<Browser['markSnapshot']>) {
+    return Browser.prototype.markSnapshot.apply(this as any, args);
+  }
+  forgetSnapshot(name: string) {
+    return Browser.prototype.forgetSnapshot.call(this as any, name);
+  }
+  /** Hold the next seed registrations until the returned function is called. */
+  holdSeed(): () => void {
+    let release!: () => void;
+    const promise = new Promise<void>((r) => (release = r));
+    this.held = { promise, release };
+    return () => {
+      this.held = null;
+      release();
+    };
+  }
+  async seedSent(): Promise<void> {
+    for (let i = 0; i < 200 && !this.sent.includes('Page.addScriptToEvaluateOnNewDocument'); i++) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(this.sent.includes('Page.addScriptToEvaluateOnNewDocument'), 'the seed is being registered');
+  }
+}
+
+describe('snapshot service saves that race a delete or a lost connection', () => {
+  function service(browser: FakeBrowser) {
+    const registry = { browser: (id: string) => (id === browser.id ? browser : null), list: () => [{ id: browser.id, status: 'open' }] } as any;
+    return new SnapshotService({ config: loadConfig({ SNAPSHOTS_DIR: dir() }), log: silent, hub: new Hub(new LogTap()) }, registry);
+  }
+  const input = (name: string) => ({ name, description: 'Shop — test account', domains: ['shop.example'], by: {} });
+
+  test('a snapshot deleted while its storage seed is registered is never marked loaded, and its seed is removed', async () => {
+    const browser = new FakeBrowser();
+    const svc = service(browser);
+    const release = browser.holdSeed();
+    // as a tool call: under the browser's queue, so the delete's own seed update runs after it
+    const saving = browser.mutex.run(() => svc.create(browser as any, input('racey')));
+    await browser.seedSent();
+    await svc.delete('racey', 'dashboard');
+    release();
+    await saving;
+    await browser.mutex.run(async () => undefined);
+    assert.deepEqual([...browser.loadedSnapshots.keys()], [], 'no marker for a deleted snapshot');
+    assert.equal(browser.activeSnapshot, null);
+    assert.equal(browser.storageSeed.size, 0);
+    assert.equal(browser.seedScript, null, 'the script with its storage was removed');
+  });
+
+  test('a save whose connection is lost meanwhile marks nothing loaded', async () => {
+    const browser = new FakeBrowser();
+    const svc = service(browser);
+    const release = browser.holdSeed();
+    const saving = browser.mutex.run(() => svc.create(browser as any, input('lost')));
+    await browser.seedSent();
+    browser.connected = false; // the engine went away; the generation changes only on the next connect
+    release();
+    const out = await saving;
+    assert.equal(out.meta.name, 'lost', 'the snapshot itself is saved');
+    assert.deepEqual([...browser.loadedSnapshots.keys()], []);
+    assert.equal(browser.activeSnapshot, null);
+  });
+
+  test('a save unloads the overlapping snapshots loaded here, and keeps the others', async () => {
+    const browser = new FakeBrowser();
+    const svc = service(browser);
+    browser.markSnapshot('same-site', 1, 1, ['shop.example']);
+    browser.markSnapshot('www', 1, 1, ['www.shop.example']);
+    browser.markSnapshot('elsewhere', 1, 1, ['other.example']);
+    browser.storageSeed.set('https://www.shop.example', { snapshot: 'www', localStorage: [{ name: 'k', value: 'w' }], sessionStorage: [] });
+    browser.storageSeed.set('https://other.example', { snapshot: 'elsewhere', localStorage: [{ name: 'k', value: 'v' }], sessionStorage: [] });
+    const out = await browser.mutex.run(() => svc.create(browser as any, input('mine')));
+    assert.deepEqual(out.unloaded.sort(), ['same-site', 'www']);
+    assert.deepEqual([...browser.loadedSnapshots.keys()].sort(), ['elsewhere', 'mine']);
+    assert.equal(browser.storageSeed.has('https://www.shop.example'), false, 'an unloaded snapshot writes no storage');
+    assert.equal(browser.activeSnapshot, 'mine');
+    assert.equal(browser.storageSeed.get('https://other.example')?.snapshot, 'elsewhere', "another site's storage stays");
+    assert.equal(browser.storageSeed.get('https://shop.example')?.snapshot, 'mine');
   });
 });
 

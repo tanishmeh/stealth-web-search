@@ -309,6 +309,9 @@ describe('dashboard', () => {
       assert.doesNotMatch((await srv.call('snapshot_list')).text, new RegExp(`^- ${name} — `, 'm'));
     } finally {
       await stream.close();
+      // a failed assertion must not leave the sign-in behind: under test:docker it would stay in the real volume
+      // (after the delete above this is an error result, and harmless)
+      await srv.call('snapshot_delete', { name }).catch(() => undefined);
       await srv.call('browser_clear_cookies');
     }
   });

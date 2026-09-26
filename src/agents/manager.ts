@@ -7,7 +7,7 @@ import type { BrowserRegistry } from '../browser/registry.ts';
 import type { Logger } from '../logger.ts';
 import type { McpDeps } from '../mcp/server.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
-import { SnapshotConflictError, SnapshotEmptyError, domainsText } from '../snapshots/service.ts';
+import { SnapshotConflictError, SnapshotEmptyError, SnapshotSignedOutError, domainsText } from '../snapshots/service.ts';
 import { SnapshotError, SnapshotNotFoundError } from '../snapshots/store.ts';
 import { MAX_WAITING } from '../util/limits.ts';
 import { summarize } from '../util/summarize.ts';
@@ -21,6 +21,7 @@ export { MAX_WAITING };
 const MAX_QUEUED = 20;
 const KEEP_RUNS = 100;
 const KEEP_TRANSCRIPTS = 300;
+const DELETED_DURING_RUN = 'the user deleted it during the run';
 
 export class AgentBusyError extends Error {}
 
@@ -53,10 +54,12 @@ export class AgentManager {
     this.log = deps.log.child({ component: 'agent' });
     this.llm = new ChatClient(deps.config.agent, deps.log);
     this.transcriptDir = path.join(deps.config.log.dir, 'agent-runs');
-    // a snapshot the user deleted is never saved again by a run that uses it
+    // a snapshot the user deleted is never saved again by a run that uses it, and never reported as saved
     deps.snapshots?.on('deleted', (name: string) => {
       for (const run of this.runs.values()) {
-        if (!run.done && (run.snapshot?.name === name || run.snapshotSaved?.name === name)) run.deletedSnapshots.add(name);
+        if (run.done || (run.snapshot?.name !== name && run.snapshotSaved?.name !== name)) continue;
+        run.deletedSnapshots.add(name);
+        if (this.reportDeleted(run)) run.update();
       }
     });
   }
@@ -89,6 +92,17 @@ export class AgentManager {
 
   get(id: string): AgentRun | undefined {
     return this.runs.get(id.trim());
+  }
+
+  /**
+   * A sign-in the run saved (or refreshed) that the user deleted during the run is reported as not
+   * saved: the host must not be told to use it. True when the report changed.
+   */
+  private reportDeleted(run: AgentRun): boolean {
+    const saved = run.snapshotSaved;
+    if (!saved || saved.action === 'skipped' || !run.deletedSnapshots.has(saved.name)) return false;
+    run.snapshotSaved = { name: saved.name, version: null, action: 'skipped', reason: DELETED_DURING_RUN };
+    return true;
   }
 
   /** Most recent first. */
@@ -320,6 +334,7 @@ export class AgentManager {
       if (run.snapshot && (run.status as RunStatus) === 'completed' && run.outcome?.success && !run.abort.signal.aborted) {
         await this.refreshSnapshot(run, browser, log).catch((err) => log.warn({ err: run.scrub((err as Error).message) }, 'could not refresh the snapshot'));
       }
+      await this.checkSavedSnapshot(run);
       // a cancelled run may still have a browser call running: closing the browser ends it
       await browser.dispose().catch(() => undefined);
       this.registry.close(browser.id);
@@ -372,7 +387,8 @@ export class AgentManager {
   /**
    * Save the sign-in of a run that completed successfully back into the snapshot it started with (the
    * site may have renewed it), unless the host turned that off, the user deleted the snapshot, another
-   * browser saved a newer version, the browser was reset, or it holds no sign-in cookies any more.
+   * browser saved a newer version, the browser was reset and the snapshot could not be re-applied (after
+   * a reset that re-applied it, the refresh runs as usual), or it lost or holds no sign-in cookies.
    */
   private async refreshSnapshot(run: AgentRun, browser: Browser, log: Logger): Promise<void> {
     const svc = this.deps.snapshots;
@@ -383,18 +399,34 @@ export class AgentManager {
       // a sign-in the run saved itself stays reported
       if (!run.snapshotSaved || run.snapshotSaved.action === 'skipped') run.snapshotSaved = { name: snap.name, version: null, action: 'skipped', reason };
     };
-    if (run.deletedSnapshots.has(snap.name)) return skip('the user deleted it during the run');
+    if (run.deletedSnapshots.has(snap.name)) return skip(DELETED_DURING_RUN);
     const loaded = browser.loadedSnapshots.get(snap.name);
     if (!loaded || !browser.connected) return skip('the browser was reset during the run');
     try {
       const out = await browser.mutex.run(() => svc.update(browser, snap.name, { mode: 'refresh', by: { runId: run.id }, expectVersion: loaded.version }));
+      // deleted while it was saved: the files are gone, and so is the report
+      if (run.deletedSnapshots.has(snap.name)) return skip(DELETED_DURING_RUN);
       run.snapshotSaved = { name: snap.name, version: out.meta.version, action: 'refreshed' };
     } catch (err) {
       if (err instanceof SnapshotConflictError) return skip(`v${err.current.version} was saved meanwhile`);
-      if (err instanceof SnapshotNotFoundError) return skip('the user deleted it during the run');
+      if (err instanceof SnapshotNotFoundError) return skip(DELETED_DURING_RUN);
       if (err instanceof SnapshotEmptyError) return skip(`the agent's browser had no sign-in cookies for ${domainsText(snap.cookieDomains)} at the end`);
+      // a page may have signed the browser out: never overwrite a working sign-in with that
+      if (err instanceof SnapshotSignedOutError) return skip(`the agent's browser lost ${err.lost} saved sign-in cookie${err.lost === 1 ? '' : 's'} (signed out?)`);
       return skip(run.scrub((err as Error).message));
     }
+  }
+
+  /**
+   * A snapshot the run reports as saved must still exist when it ends: a delete can land while
+   * save_sign_in writes it (before the run knows the name), so look at the store once more.
+   */
+  private async checkSavedSnapshot(run: AgentRun): Promise<void> {
+    const saved = run.snapshotSaved;
+    const svc = this.deps.snapshots;
+    if (!svc || !saved || saved.action === 'skipped') return;
+    if (!run.deletedSnapshots.has(saved.name) && !(await svc.store.exists(saved.name).catch(() => true))) run.deletedSnapshots.add(saved.name);
+    if (this.reportDeleted(run)) run.update();
   }
 
   private async writeTranscript(run: AgentRun): Promise<void> {

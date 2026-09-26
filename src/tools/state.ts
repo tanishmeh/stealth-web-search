@@ -9,6 +9,7 @@ import {
   cookieParam,
   domainFromInput,
   httpUrl,
+  isoTime,
   normalizeOrigin,
   nowSeconds,
   readActiveStorage,
@@ -105,7 +106,8 @@ export const setCookie = defineTool({
     let expired = false;
     if (expires !== undefined) {
       if (!Number.isFinite(expires)) throw new ToolError('expires must be a unix timestamp in seconds');
-      const seconds = Math.floor(expires > 1e11 ? expires / 1000 : expires);
+      // milliseconds are above 1e12 (every time after 2001); seconds stay below it until year 33658
+      const seconds = Math.floor(expires > 1e12 ? expires / 1000 : expires);
       if (seconds > 0) {
         params.expires = seconds;
         expired = seconds <= nowSeconds();
@@ -123,7 +125,9 @@ export const setCookie = defineTool({
     }
     if (!stored) throw new ToolError(`Cookie ${name} for ${host}${cookiePath} could not be verified after setting it`);
     const flags = [stored.httpOnly ? 'HttpOnly' : '', stored.secure ? 'Secure' : '', `SameSite=${stored.sameSite || 'Lax'}`];
-    flags.push(typeof stored.expires === 'number' && stored.expires > 0 ? `expires ${new Date(stored.expires * 1000).toISOString()}` : 'session');
+    // the engine keeps any expiry, even one past the range of a date
+    const until = typeof stored.expires === 'number' && stored.expires > 0 ? (isoTime(stored.expires) ?? `at unix time ${stored.expires}`) : null;
+    flags.push(until ? `expires ${until}` : 'session');
     return textResult(`Set cookie ${name} for ${host}${cookiePath} (${flags.filter(Boolean).join(', ')})`);
   },
 });
@@ -132,7 +136,9 @@ export const clearCookies = defineTool({
   name: 'browser_clear_cookies',
   title: 'Clear cookies',
   group: 'state',
-  description: 'Delete every cookie from the browser cookie jar (all domains, all tabs). Page localStorage is not affected.',
+  description:
+    'Delete every cookie from the browser cookie jar (all domains, all tabs), and unload the snapshots (saved sign-ins) loaded in this browser, ' +
+    'so their site storage is no longer restored on page loads. The open page\'s localStorage is not changed.',
   inputSchema: z.object({}),
   annotations: { ...DESTRUCTIVE_LOCAL, title: 'Clear cookies' },
   handler: async (_args, ctx) => {
@@ -149,7 +155,16 @@ export const clearCookies = defineTool({
       remaining = (await allCookies(ctx)).length;
       if (remaining > 0) throw new ToolError(`Could not clear cookies: ${remaining} cookie(s) remain`);
     }
-    return textResult(`Cleared all cookies (${before} removed).`);
+    // the cookies loaded snapshots put here are gone: their markers and storage seed go too, so a
+    // later sign-in to another account is neither mixed with their storage nor saved into them
+    const unloaded = (await ctx.snapshots?.unloadAll(ctx.browser)) ?? [];
+    const quoted = unloaded.map((n) => JSON.stringify(n)).join(', ');
+    const note = !unloaded.length
+      ? ''
+      : unloaded.length === 1
+        ? ` Snapshot ${quoted} is no longer loaded in this browser.`
+        : ` Snapshots ${quoted} are no longer loaded in this browser.`;
+    return textResult(`Cleared all cookies (${before} removed).${note}`);
   },
 });
 
