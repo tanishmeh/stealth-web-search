@@ -213,6 +213,7 @@ describe('dashboard', () => {
   test('the live view follows the active tab when a tab is opened and closed', async () => {
     const nav = await srv.call('browser_navigate', { url: `${fx.baseUrl}/index.html` });
     assert.equal(nav.isError, false, nav.text);
+    const before = await getState(srv.baseUrl);
     const stream = openEventStream(`${srv.baseUrl}/api/events?live=1`);
     try {
       const hello = await stream.waitFor('hello', (e) => e.type === 'hello');
@@ -247,6 +248,8 @@ describe('dashboard', () => {
     } finally {
       await late.close();
     }
+    // the next test counts viewers, so wait until the server has let both streams go
+    await eventually('viewers released', async () => (await getState(srv.baseUrl)).liveView.viewers === before.liveView.viewers);
   });
 
   test('a paused (non-live) stream receives events but no frames and is not a viewer', async () => {
