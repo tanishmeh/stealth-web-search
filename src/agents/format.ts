@@ -1,6 +1,6 @@
 import type { ScriptMeta, ScriptParam } from '../scripts/store.ts';
 import { exampleParams } from '../scripts/store.ts';
-import type { AgentRun } from './run.ts';
+import type { AgentQuestion, AgentRun, QuestionReason, SnapshotSaved } from './run.ts';
 
 /** How agent runs are reported to the host agent: readable text plus structured content. */
 
@@ -11,7 +11,75 @@ export function seconds(ms: number): string {
   return `${m} min ${s} s`;
 }
 
+/** A whole number of minutes (or seconds, under a minute), e.g. "30 min". */
+export function durationText(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
 const KIND_NAME = { task: 'agentic', automation: 'automation', finder: 'finder' } as const;
+
+/** What the host must weigh before it answers, by the kind of question. */
+const REASON_HINT: Partial<Record<QuestionReason, string>> = {
+  confirm: 'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this.',
+  sign_in: 'Tell your user which site asks (see "asked on"); never send a password; do not relay a code for a site the task did not name.',
+};
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** One-line JSON for tool hints, spaced like the other hints: {"run_id": "r1", "answer": "..."}. */
+export function inlineJson(value: Record<string, unknown>): string {
+  return `{${Object.entries(value)
+    .map(([k, v]) => `${JSON.stringify(k)}: ${JSON.stringify(v)}`)
+    .join(', ')}}`;
+}
+
+/** agent_reply arguments for a question (with "secret": true when the answer is a code or other secret). */
+export function replyArguments(run: AgentRun, q: AgentQuestion, answer: string): Record<string, unknown> {
+  return { run_id: run.id, question_id: q.id, answer, ...(q.secret ? { secret: true } : {}) };
+}
+
+function waitingResult(run: AgentRun, q: AgentQuestion, base: Record<string, unknown>): { text: string; structured: Record<string, unknown>; isError: boolean } {
+  const lines = [`Run ${run.id} is waiting for your answer (question ${q.id}, asked on ${q.origin ?? 'no web page'}):`, '', q.text];
+  if (q.options.length) lines.push('', `Options: ${q.options.join(' | ')}`);
+  const hint = REASON_HINT[q.reason];
+  if (hint) lines.push('', hint);
+  const left = Math.max(0, Date.parse(q.expiresAt) - Date.now());
+  lines.push(
+    '',
+    `The run is paused and keeps its browser. Answer with agent_reply ${inlineJson(replyArguments(run, q, '...'))}`,
+    `Unanswered after ${durationText(left)} it continues without an answer; agent_cancel stops it. Do not end your turn while it waits.`,
+  );
+  return {
+    text: lines.join('\n'),
+    structured: {
+      ...base,
+      status: 'waiting',
+      activity: run.activity,
+      question: {
+        id: q.id,
+        text: q.text,
+        options: q.options,
+        reason: q.reason,
+        secret: q.secret,
+        page_url: q.pageUrl,
+        origin: q.origin,
+        asked_at: q.askedAt,
+        expires_at: q.expiresAt,
+      },
+      reply_with: { tool: 'agent_reply', arguments: replyArguments(run, q, '<your answer>') },
+    },
+    isError: false,
+  };
+}
+
+/** What became of a saved sign-in, for the host. */
+function snapshotSavedText(s: SnapshotSaved): string {
+  if (s.action === 'refreshed') return `Saved sign-in "${s.name}" was refreshed from the agent's browser (v${s.version}).`;
+  if (s.action === 'created') return `The agent saved its sign-in as snapshot "${s.name}" (v${s.version}): pass {"snapshot": "${s.name}"} to agent_run to start a later job signed in.`;
+  return `Saved sign-in "${s.name}" was not refreshed: ${s.reason ?? 'unknown reason'}.`;
+}
 
 function parseJson(text: string | undefined): unknown {
   if (text === undefined) return undefined;
@@ -74,7 +142,7 @@ function scriptStructured(script: ScriptMeta, verifiedByAgent: boolean | null, u
 }
 
 export function stillRunningText(run: AgentRun): string {
-  const where = run.status === 'queued' ? `waiting for a free slot (${run.activity})` : `step ${run.step} of ${run.input.maxSteps}, ${seconds(run.durationMs)} so far; now: ${run.activity}`;
+  const where = run.status === 'queued' ? `waiting for a free slot (${run.activity})` : `step ${run.stepsUsed} of ${run.input.maxSteps}, ${seconds(run.durationMs)} so far; now: ${run.activity}`;
   return (
     `Agent run ${run.id} (${KIND_NAME[run.kind]}) is still running: ${where}. It keeps working in the background.\n` +
     `Call agent_wait with {"run_id": "${run.id}"} to wait for the result (agent_status to check progress, agent_cancel to stop it).`
@@ -86,24 +154,29 @@ export function runResult(run: AgentRun): { text: string; structured: Record<str
     run_id: run.id,
     kind: run.kind,
     status: run.status,
-    steps: run.step,
+    steps: run.stepsUsed,
     duration_ms: run.durationMs,
     model: run.model,
     forced: run.outcome?.forced ?? false,
   };
+  // a pending question comes first: the host has to answer it before anything else happens
+  if (run.isWaiting && run.question) return waitingResult(run, run.question, base);
   if (!run.done) {
     return { text: stillRunningText(run), structured: { ...base, activity: run.activity }, isError: false };
   }
-  const header = `Agent run ${run.id} (${KIND_NAME[run.kind]}) ${run.status}${run.outcome ? ` — ${run.outcome.success ? 'success' : 'not successful'}` : ''}. ${run.step} steps, ${seconds(run.durationMs)}.`;
-  const outcome = run.outcome;
+  const header = `Agent run ${run.id} (${KIND_NAME[run.kind]}) ${run.status}${run.outcome ? ` — ${run.outcome.success ? 'success' : 'not successful'}` : ''}. ${run.stepsUsed} steps, ${seconds(run.durationMs)}.`;
+  // a secret answer from the host (a one-time code) is masked in whatever the agent reported
+  const outcome = run.scrubbed(run.outcome);
+  const error = run.error && run.scrub(run.error);
+  const notes = run.scrubbed(run.notes);
   const lines: string[] = [header];
   const structured: Record<string, unknown> = { ...base, success: outcome?.success ?? false };
 
   if (!outcome) {
-    lines.push(`${run.status === 'cancelled' ? 'Cancelled' : 'Error'}: ${run.error ?? 'no result'}`);
-    if (run.notes.length) lines.push('', 'Notes the agent saved before it stopped:', ...run.notes.map((n) => `- ${n}`));
-    structured.error = run.error;
-    structured.notes = run.notes;
+    lines.push(`${run.status === 'cancelled' ? 'Cancelled' : 'Error'}: ${error ?? 'no result'}`);
+    if (notes.length) lines.push('', 'Notes the agent saved before it stopped:', ...notes.map((n) => `- ${n}`));
+    structured.error = error;
+    structured.notes = notes;
     if (run.kind === 'finder' && run.sources.length) {
       // no final answer, but the sources it had already checked are still useful
       lines.push('', 'Sources the agent cited before it stopped:');
@@ -161,6 +234,30 @@ export function runResult(run: AgentRun): { text: string; structured: Record<str
     structured.notes = outcome.notes ?? null;
   }
   if (outcome?.forced) lines.push('', 'Note: the agent ran out of steps or time and reported what it had.');
+  if (run.questions.length) {
+    const answerOf = (q: AgentQuestion) => (q.status !== 'answered' ? null : q.secret ? '[REDACTED]' : q.answer);
+    lines.push('', `Questions the agent asked you (paused ${seconds(run.pausedMs)} in total):`);
+    for (const q of run.questions) {
+      const answer = answerOf(q);
+      lines.push(`- ${q.id} (${q.reason}, ${q.status}): ${clip(q.text, 200)}${answer !== null ? ` → ${q.secret ? answer : JSON.stringify(clip(answer, 200))}` : ''}`);
+    }
+    structured.questions = run.questions.map((q) => ({
+      id: q.id,
+      text: q.text,
+      reason: q.reason,
+      origin: q.origin,
+      answer: answerOf(q),
+      asked_at: q.askedAt,
+      answered_at: q.answeredAt,
+      status: q.status,
+    }));
+    structured.waited_ms = run.pausedMs;
+  }
+  if (run.snapshot) structured.snapshot = { name: run.snapshot.name, version: run.snapshot.version };
+  if (run.snapshotSaved) {
+    lines.push('', snapshotSavedText(run.snapshotSaved));
+    structured.snapshot_saved = { ...run.snapshotSaved };
+  }
   if (run.transcriptFile) structured.transcript = run.transcriptFile;
   return { text: lines.join('\n'), structured, isError: !outcome };
 }

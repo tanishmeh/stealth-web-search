@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as z from 'zod';
 import type { Browser } from '../browser/browser.ts';
 import type { Config } from '../config.ts';
@@ -6,13 +7,18 @@ import type { Logger } from '../logger.ts';
 import { EXTRACT_TEXT } from '../browser/scripts.ts';
 import { redactArgs, runTool, type McpDeps } from '../mcp/server.ts';
 import type { CallToolResult, ToolDefinition } from '../tools/types.ts';
+import { MAX_WAITING } from '../util/limits.ts';
+import { REDACTED, scrubDeep, scrubText } from '../util/scrub.ts';
 import { summarize } from '../util/summarize.ts';
 import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars, truncateText } from './conversation.ts';
 import { LlmAbortedError, LlmError, type ChatClient, type ChatMessage, type FunctionTool } from './llm.ts';
 
 export type AgentKind = 'task' | 'automation' | 'finder';
-/** completed: the agent delivered a result (see outcome.success); failed: it could not deliver one. */
-export type RunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+/**
+ * completed: the agent delivered a result (see outcome.success); failed: it could not deliver one;
+ * waiting: paused on a question to the host (ask_host) until agent_reply, the reply timeout or a cancel.
+ */
+export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 
 export interface AgentInput {
   /** TASK (agentic, automation) or OBJECTIVE (finder). */
@@ -28,6 +34,55 @@ export interface AgentInput {
   /** Automation: requested script name, and whether an existing script of that name may be replaced. */
   scriptName?: string;
   overwrite?: boolean;
+  /** Task and automation: the agent may pause and ask the host a question (default true; see questionsAllowed). */
+  allowQuestions?: boolean;
+  /** Task: name of the snapshot (saved sign-in) the agent's browser starts with. Names only, never cookie data. */
+  snapshot?: string;
+  /** Refresh that snapshot from the agent's browser when the run completes successfully (default true). */
+  updateSnapshot?: boolean;
+  /** Offer browser_evaluate although the run started with a snapshot (default false). */
+  allowEvaluate?: boolean;
+}
+
+/** What became of a saved sign-in in a run: saved by it (created, refreshed), or why it was not refreshed. */
+export interface SnapshotSaved {
+  name: string;
+  version: number | null;
+  action: 'created' | 'refreshed' | 'skipped';
+  reason?: string;
+}
+
+export type QuestionReason = 'confirm' | 'choose' | 'sign_in' | 'missing_info';
+
+/** A question the sub-agent asked the host with ask_host. */
+export interface AgentQuestion {
+  id: string;
+  text: string;
+  options: string[];
+  reason: QuestionReason;
+  /** The answer is a code or other secret: its text is never stored, only handed to the model. */
+  secret: boolean;
+  step: number;
+  askedAt: string;
+  expiresAt: string;
+  /** The agent browser's page when it asked, read by the server (never taken from the model). */
+  pageUrl: string | null;
+  origin: string | null;
+  status: 'pending' | 'answered' | 'expired' | 'cancelled';
+  /** The answer; null while pending, when none came, and always for a secret answer. */
+  answer: string | null;
+  /** Length of a secret answer (its text is not kept). */
+  answerChars?: number;
+  answeredAt: string | null;
+  /** Client that answered (agent_reply). */
+  answeredBy: string | null;
+}
+
+/** How a pending question was closed. `answer` is the real text (also when secret): it goes to the model only. */
+export interface QuestionOutcome {
+  status: 'answered' | 'expired' | 'cancelled';
+  answer: string | null;
+  secret: boolean;
 }
 
 export interface StepRecord {
@@ -123,6 +178,29 @@ export class AgentRun {
   readonly redactedCalls = new Map<string, string>();
   /** Extra result data a kind attaches in finalize (e.g. the saved script). */
   extra: Record<string, unknown> = {};
+  /** The question waiting for the host's answer (status 'waiting'), or null. */
+  question: AgentQuestion | null = null;
+  /** Closed questions, oldest first (a secret answer is never kept). */
+  readonly questions: AgentQuestion[] = [];
+  /** Model turns that asked a question and paused: they do not count against max_steps. */
+  questionTurns = 0;
+  /** Time paused on questions (asked → slot taken again); it moves the deadline. */
+  pausedMs = 0;
+  /** When the current pause began (ms), or null. */
+  pausedSince: number | null = null;
+  /** Text of the host's secret answers (one-time codes…): masked wherever the run is logged or shown. */
+  readonly secretValues = new Set<string>();
+  /** Tool results as shown outside the model's own transcript (a secret answer masked), by call id. */
+  readonly redactedResults = new Map<string, string>();
+  /** The snapshot (saved sign-in) the browser started with, as loaded (the prompt shows it as quoted data). */
+  snapshot: { name: string; version: number; description: string; cookieDomains: string[] } | null = null;
+  /** A sign-in the run saved (save_sign_in, or the refresh at the end), or why its snapshot was not refreshed. */
+  snapshotSaved: SnapshotSaved | null = null;
+  /** Snapshots of this run the user deleted meanwhile: the run never saves them again. */
+  readonly deletedSnapshots = new Set<string>();
+  /** `text` with the host's secret answers replaced by [REDACTED]. */
+  readonly scrub = (text: string): string => scrubText(text, this.secretValues);
+  private answerWaiter: { settle: (outcome: QuestionOutcome) => void; timer: NodeJS.Timeout; offAbort: () => void } | null = null;
   private readonly listeners = new Set<(run: AgentRun) => void>();
   private settledResolve!: () => void;
   readonly settled: Promise<void>;
@@ -137,6 +215,114 @@ export class AgentRun {
 
   get done(): boolean {
     return this.status === 'completed' || this.status === 'failed' || this.status === 'cancelled';
+  }
+
+  /** Paused on an unanswered question and not being cancelled. */
+  get isWaiting(): boolean {
+    return this.question !== null && !this.abort.signal.aborted;
+  }
+
+  /** Steps counted against max_steps: turns that paused on a question are free. */
+  get stepsUsed(): number {
+    return this.step - this.questionTurns;
+  }
+
+  /** Time paused on questions so far, including a pause in progress. */
+  get waitingMs(): number {
+    return this.pausedMs + (this.pausedSince === null ? 0 : Date.now() - this.pausedSince);
+  }
+
+  /** A copy of `value` with the host's secret answers masked in every string. */
+  scrubbed<T>(value: T): T {
+    return this.secretValues.size ? scrubDeep(value, this.scrub) : value;
+  }
+
+  /**
+   * Pause on a question to the host: the run is 'waiting' until closeQuestion() (an answer, the
+   * reply timeout or a cancel), which settles the returned promise.
+   */
+  ask(q: Pick<AgentQuestion, 'text' | 'options' | 'reason' | 'secret' | 'pageUrl'>, timeoutMs: number): Promise<QuestionOutcome> {
+    const now = Date.now();
+    let origin: string | null = null;
+    try {
+      origin = q.pageUrl ? new URL(q.pageUrl).origin : null;
+    } catch {
+      origin = null;
+    }
+    this.question = {
+      id: `q${randomUUID().replace(/-/g, '').slice(0, 6)}`,
+      ...q,
+      origin,
+      step: this.step,
+      askedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + timeoutMs).toISOString(),
+      status: 'pending',
+      answer: null,
+      answeredAt: null,
+      answeredBy: null,
+    };
+    this.status = 'waiting';
+    this.activity = "waiting for the host's answer";
+    this.thinking = '';
+    this.questionTurns++;
+    this.pausedSince = now;
+    const closed = new Promise<QuestionOutcome>((settle) => {
+      const onAbort = () => this.closeQuestion('cancelled');
+      this.abort.signal.addEventListener('abort', onAbort, { once: true });
+      const timer = setTimeout(() => this.closeQuestion('expired'), timeoutMs);
+      this.answerWaiter = { settle, timer, offAbort: () => this.abort.signal.removeEventListener('abort', onAbort) };
+    });
+    this.update();
+    if (this.abort.signal.aborted) this.closeQuestion('cancelled');
+    return closed;
+  }
+
+  /**
+   * Close the pending question, synchronously: record it (a secret answer's text is never kept), mark
+   * the run running again and publish that, and only then release the paused ask_host call, so every
+   * reader (agent_reply's own wait, agent_status, the dashboard) already sees the new state.
+   */
+  closeQuestion(status: QuestionOutcome['status'], reply?: { answer: string; secret?: boolean; by: string | null }): AgentQuestion | null {
+    const q = this.question;
+    const waiter = this.answerWaiter;
+    if (!q || !waiter) return null;
+    this.question = null;
+    this.answerWaiter = null;
+    clearTimeout(waiter.timer);
+    waiter.offAbort();
+    const answer = status === 'answered' && reply ? reply.answer : null;
+    const secret = q.secret || Boolean(reply?.secret);
+    // short answers (yes, no) are not masked by value: they would hide every such word in the logs
+    if (answer !== null && secret && answer.trim().length >= 4) this.secretValues.add(answer.trim());
+    const record: AgentQuestion = {
+      ...q,
+      secret,
+      status,
+      answer: secret ? null : answer,
+      answeredAt: answer !== null ? new Date().toISOString() : null,
+      answeredBy: reply?.by ?? null,
+    };
+    if (secret && answer !== null) record.answerChars = answer.length;
+    this.questions.push(record);
+    this.status = 'running';
+    this.activity = status === 'cancelled' ? 'stopping' : 'resuming: waiting for a free agent slot';
+    this.update();
+    waiter.settle({ status, answer, secret });
+    return record;
+  }
+
+  /** The run holds a slot again after a question: the paused time moves the deadline (the one place it does). */
+  endPause(): void {
+    if (this.pausedSince === null) return;
+    const paused = Date.now() - this.pausedSince;
+    this.pausedSince = null;
+    this.deadline += paused;
+    this.pausedMs += paused;
+  }
+
+  /** Every question of the run, the pending one last (for the dashboard and the transcript; secret answers are not in them). */
+  questionLog(): AgentQuestion[] {
+    return this.question ? [...this.questions, { ...this.question }] : [...this.questions];
   }
 
   get durationMs(): number {
@@ -162,6 +348,7 @@ export class AgentRun {
   /** Record the final status (the dashboard sees it at once); settle() then releases waiters. */
   finish(status: RunStatus, error: string | null = null): void {
     if (this.done) return;
+    this.endPause();
     this.status = status;
     this.error = error;
     this.endedAt = new Date().toISOString();
@@ -183,6 +370,7 @@ export class AgentRun {
     this.messages.length = 0;
     this.pageTexts.clear();
     this.redactedCalls.clear();
+    this.redactedResults.clear();
     for (const st of this.steps) {
       if (st.reasoning.length > 1_500) st.reasoning = `…${st.reasoning.slice(-1_500)}`;
       if (st.content.length > 1_500) st.content = `${st.content.slice(0, 1_500)}…`;
@@ -195,6 +383,7 @@ export class AgentRun {
 
   /** Dashboard/status view (no transcript). */
   summary(): AgentSummary {
+    const q = this.isWaiting ? this.question : null;
     return {
       id: this.id,
       kind: this.kind,
@@ -209,18 +398,24 @@ export class AgentRun {
       endedAt: this.endedAt,
       durationMs: this.durationMs,
       step: this.step,
+      stepsUsed: this.stepsUsed,
       maxSteps: this.input.maxSteps,
       activity: this.activity,
-      thinking: this.thinking.slice(-600),
+      thinking: this.scrub(this.thinking).slice(-600),
+      question: q ? { id: q.id, text: q.text, options: q.options, reason: q.reason, secret: q.secret, origin: q.origin, askedAt: q.askedAt, expiresAt: q.expiresAt } : null,
+      questions: this.questions.length + (this.question ? 1 : 0),
+      waitingMs: this.waitingMs,
       usage: { ...this.usage },
       notes: this.notes.length,
       sources: this.sources.length,
       script: this.scriptName ? { name: this.scriptName, version: this.scriptVersion, lastTest: this.tests.at(-1)?.ok ?? null } : null,
+      snapshot: this.snapshot ? { name: this.snapshot.name, version: this.snapshot.version } : null,
+      snapshotSaved: this.snapshotSaved,
       result: this.outcome
-        ? summarize(this.outcome.answer ?? this.outcome.output ?? '', { maxString: 400 })
+        ? summarize(this.scrub(this.outcome.answer ?? this.outcome.output ?? ''), { maxString: 400 })
         : null,
       success: this.outcome?.success ?? null,
-      error: this.error,
+      error: this.error && this.scrub(this.error),
       transcript: Boolean(this.transcriptFile),
     };
   }
@@ -248,6 +443,29 @@ export interface RunEnv {
   log: Logger;
   /** True once the step/time budget is exhausted and the agent must finish now. */
   forced: boolean;
+  /** Give the run's concurrency slot up while it waits for the host (its browser stays open). */
+  pause(): void;
+  /** Take a slot again, ahead of queued runs; false when the run was cancelled meanwhile. */
+  resume(signal: AbortSignal): Promise<boolean>;
+  /** Runs paused on a question right now (at most MAX_WAITING). */
+  waitingCount(): number;
+}
+
+/** Whether a run may ask the host questions: ask_host is offered and the prompt says so (never the finder). */
+export function questionsAllowed(run: AgentRun, config: Config): boolean {
+  return run.kind !== 'finder' && config.agent.maxQuestions > 0 && run.input.allowQuestions !== false;
+}
+
+/** Why ask_host cannot pause the run now (the call then counts as a normal step), or null. */
+export function questionRefusal(run: AgentRun, env: RunEnv): string | null {
+  const max = env.config.agent.maxQuestions;
+  const decide = "Decide on your own from what the TASK says, or call finish with success=false and say what needs the host's decision.";
+  if (run.questionTurns >= max) return `you already asked ${max} question${max === 1 ? '' : 's'}, the limit for one job. ${decide}`;
+  if (env.waitingCount() >= MAX_WAITING) return `too many jobs are waiting for the host right now (${MAX_WAITING}). ${decide}`;
+  if (run.input.maxSteps - run.stepsUsed < 3 || run.softDeadline() - Date.now() < 120_000) {
+    return 'too little budget left to act on an answer; finish with success=false and say what needs approval';
+  }
+  return null;
 }
 
 const READING_TOOLS = new Set(['browser_markdown', 'browser_snapshot', 'browser_get_text', 'browser_search', 'browser_extract', 'browser_navigate']);
@@ -296,13 +514,13 @@ export function urlKey(url: string): string {
 export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): Promise<void> {
   const { config, llm, browser, log } = env;
   const cfg = config.agent;
-  const deadline = Date.now() + cfg.maxRuntimeMs;
+  // run.deadline is the one deadline: time paused on a question moves it (AgentRun.endPause)
+  run.deadline = Date.now() + cfg.maxRuntimeMs;
   // The last part of the time budget is kept for the forced finish: at least a minute, or two of the
   // slowest model turns seen so far, but never more than a third of the budget.
   let slowestTurnMs = 0;
   const reserve = () => Math.min(Math.floor(cfg.maxRuntimeMs / 3), Math.max(Math.min(60_000, Math.floor(cfg.maxRuntimeMs / 4)), 2 * slowestTurnMs));
-  const softDeadline = () => deadline - reserve();
-  run.deadline = deadline;
+  const softDeadline = () => run.deadline - reserve();
   run.softDeadline = softDeadline;
   const meter = new TokenMeter();
   const client = `agent:${spec.kind} ${run.id}`;
@@ -311,6 +529,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
   let toolMap = new Map(tools.map((t) => [t.name, t]));
   let fnTools = tools.map(toFunctionTool);
   const fnToolsChars = JSON.stringify(fnTools).length;
+  const canAsk = toolMap.has('ask_host');
 
   run.messages.push({ role: 'system', content: spec.systemPrompt(run, config) }, { role: 'user', content: spec.userPrompt(run) });
 
@@ -324,6 +543,23 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
   let contextTokens = cfg.contextTokens;
 
   const budgetChars = () => Math.floor((contextTokens - cfg.maxOutputTokens - SAFETY_TOKENS) * meter.charsPerToken) - fnToolsChars;
+
+  /** What compaction keeps: the agent's notes, and the host's answers (a secret one only as a mention). */
+  const pinned = (numbered: boolean) => () => {
+    const notes = run.notes.map((n, i) => (numbered ? `${i + 1}. ${n}` : n));
+    const answers = run.questions
+      .filter((q) => q.status === 'answered')
+      .map((q) => `Q: ${clip(q.text, 300)} A: ${q.secret ? '[secret answer given]' : clip(q.answer ?? '', 1_000)}`);
+    return [...notes, ...(answers.length ? ["The host's answers to your questions:", ...answers] : [])].join('\n');
+  };
+
+  /** The first ask_host call of a turn will really ask (and pause): valid, not refused, in normal work time. */
+  const willAsk = (call: { arguments: string }): boolean => {
+    const def = toolMap.get('ask_host');
+    if (!def || env.forced || run.outcome || Date.now() > softDeadline()) return false;
+    const parsed = parseToolArguments(call.arguments);
+    return parsed.ok && def.inputSchema.safeParse(parsed.value).success && questionRefusal(run, env) === null;
+  };
 
   /** Remember what the agent read on this page (the page's own text, not tool output), to check cited quotes. */
   const capturePageText = async () => {
@@ -339,8 +575,9 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
   const executeCall = async (call: { id: string; name: string; arguments: string }, record: StepRecord): Promise<string> => {
     const started = Date.now();
     const def = toolMap.get(call.name);
-    const note = (text: string, ok: boolean, args: unknown = call.arguments) => {
-      record.toolCalls.push({ name: call.name, args: summarize(args, { maxString: 300 }), ok, durationMs: Date.now() - started, preview: text.slice(0, 300) });
+    // the step record is served to the dashboard and written to the transcript: secrets masked
+    const note = (text: string, ok: boolean, args: unknown = call.arguments, shownText = text) => {
+      record.toolCalls.push({ name: call.name, args: summarize(run.scrubbed(args), { maxString: 300 }), ok, durationMs: Date.now() - started, preview: run.scrub(shownText).slice(0, 300) });
       return text;
     };
     if (!def) {
@@ -354,12 +591,17 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
       return note(`Error: invalid arguments for ${call.name}: ${issues}`, false, parsed.value);
     }
     // what logs, the dashboard and the transcript get to see (passwords typed into fields are masked)
-    const shown = redactArgs(call.name, parsed.value, browser, config.log.redactSecrets).args as Record<string, unknown>;
+    const shown = run.scrubbed(redactArgs(call.name, parsed.value, browser, config.log.redactSecrets).args as Record<string, unknown>);
     if (shown !== parsed.value) run.redactedCalls.set(call.id, JSON.stringify(shown));
     run.activity = `${call.name} ${describeArgs(shown)}`.trim();
     run.update();
-    const result = await runTool(def, checked.data, null, env.deps, { browser, client, agentRunId: run.id, signal: run.abort.signal });
+    const closedBefore = run.questions.length;
+    const result = await runTool(def, checked.data, null, env.deps, { browser, client, agentRunId: run.id, signal: run.abort.signal, scrub: run.scrub });
     let text = truncateText(resultText(result), cfg.maxResultChars);
+    // a secret answer reaches the model only: the step preview and the transcript show it masked
+    const closed = run.questions.length > closedBefore ? run.questions.at(-1) : undefined;
+    const masked = closed?.secret && closed.status === 'answered' ? `The host answered: ${REDACTED}` : undefined;
+    if (masked) run.redactedResults.set(call.id, masked);
     const tab = browser.activeTab;
     if (tab && /^https?:/i.test(tab.url) && call.name !== 'web_search') {
       run.visited.set(urlKey(tab.url), { title: tab.title, at: new Date().toISOString() });
@@ -372,13 +614,13 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     if (lastCalls.length === 3 && lastCalls.every((c) => c === signature)) {
       text += '\nNote: you made this exact call three times in a row. Its result will not change; try a different approach.';
     }
-    return note(text, !result.isError, shown);
+    return note(text, !result.isError, shown, masked);
   };
 
   for (;;) {
     if (run.abort.signal.aborted) throw new LlmAbortedError();
     if (run.outcome) break;
-    const outOfSteps = run.step >= run.input.maxSteps;
+    const outOfSteps = run.stepsUsed >= run.input.maxSteps;
     const outOfTime = timeUp || Date.now() > softDeadline();
     if ((outOfSteps || outOfTime || forceFinish) && !env.forced) {
       // last chance: only the finish tool, and the model must call it
@@ -392,7 +634,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
         content: `${why} Call ${spec.finishTool} now with the best result you have from the work so far, and say clearly in notes what is missing or unverified. Report success only if the job is really complete.`,
       });
       log.info({ runId: run.id, reason: why }, 'agent must finish now');
-    } else if (env.forced && (++forcedAttempts > 3 || Date.now() > deadline)) {
+    } else if (env.forced && (++forcedAttempts > 3 || Date.now() > run.deadline)) {
       run.outcome = fallbackOutcome(run, `the model did not call ${spec.finishTool} within the budget (${run.input.maxSteps} steps, ${Math.round(cfg.maxRuntimeMs / 60_000)} min)`);
       break;
     }
@@ -400,7 +642,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     // keep the transcript inside the context window
     const budget = budgetChars();
     if (transcriptChars(run.messages) > budget) {
-      const report = compactTranscript(run.messages, Math.floor(budget * 0.85), () => run.notes.map((n, i) => `${i + 1}. ${n}`).join('\n'));
+      const report = compactTranscript(run.messages, Math.floor(budget * 0.85), pinned(true));
       run.compactions++;
       log.info({ runId: run.id, ...report, budgetChars: budget }, 'compacted agent transcript to fit the context window');
     }
@@ -427,7 +669,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     // normal steps stop at the soft deadline; the forced finish gets at least the reserve
     // the forced finish may run at most a minute past the budget
     const stepTimeout = AbortSignal.timeout(
-      env.forced ? Math.max(deadline - Date.now(), Math.min(reserve(), 60_000)) : Math.max(5_000, softDeadline() - Date.now()),
+      env.forced ? Math.max(run.deadline - Date.now(), Math.min(reserve(), 60_000)) : Math.max(5_000, softDeadline() - Date.now()),
     );
     const signal = AbortSignal.any([run.abort.signal, stepTimeout]);
     let completion;
@@ -442,9 +684,10 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
           // parse like the loop does (fences, text around the object) so what runs is also what gets masked
           const value = typeof args === 'string' ? parseToolArguments(args) : null;
           const obj = value ? (value.ok ? value.value : null) : args;
-          if (obj && typeof obj === 'object') return redactArgs(name, obj as Record<string, any>, browser, config.log.redactSecrets).args;
-          return config.log.redactSecrets && typeof args === 'string' ? '[unparsed arguments not logged]' : args;
+          if (obj && typeof obj === 'object') return run.scrubbed(redactArgs(name, obj as Record<string, any>, browser, config.log.redactSecrets).args);
+          return config.log.redactSecrets && typeof args === 'string' ? '[unparsed arguments not logged]' : run.scrubbed(args);
         },
+        scrubLog: run.scrub,
         onDelta: (kind, text) => {
           if (kind !== 'reasoning') return;
           run.thinking = (run.thinking + text).slice(-2_000);
@@ -465,7 +708,7 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
           contextTokens = reported;
           lowered = true;
         }
-        const report = compactTranscript(run.messages, Math.floor(budgetChars() * (overflowRetries === 1 ? 0.6 : 0.4)), () => run.notes.join('\n'));
+        const report = compactTranscript(run.messages, Math.floor(budgetChars() * (overflowRetries === 1 ? 0.6 : 0.4)), pinned(false));
         run.compactions++;
         if (overflowRetries <= 2 && (lowered || report.afterChars < report.beforeChars)) {
           log.warn({ runId: run.id, ...report, contextTokens, attempt: overflowRetries }, 'the model reported a context overflow; compacted harder and retrying');
@@ -497,8 +740,8 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
     run.model = completion.model;
     record.llmMs = completion.durationMs;
     record.finishReason = completion.finishReason;
-    record.reasoning = completion.reasoning;
-    record.content = completion.content;
+    record.reasoning = run.scrub(completion.reasoning);
+    record.content = run.scrub(completion.content);
     if (completion.usage) {
       record.promptTokens = completion.usage.promptTokens;
       record.completionTokens = completion.usage.completionTokens;
@@ -521,7 +764,9 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
         // endpoints that ignore tool_choice (llama.cpp, Ollama) may still answer in text
         run.messages.push({
           role: 'user',
-          content: `Only ${spec.finishTool} is accepted now; a text answer does not reach the host. Call ${spec.finishTool} with your result.`,
+          content:
+            `Only ${spec.finishTool} is accepted now; a text answer does not reach the host. Call ${spec.finishTool} with your result.` +
+            (canAsk ? ` If you needed the host's answer, call ${spec.finishTool} with success=false and say in notes what you needed.` : ''),
         });
         continue;
       }
@@ -539,7 +784,10 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
       }
       run.messages.push({
         role: 'user',
-        content: `You did not call a tool. Keep working with the tools, or if the job is done call ${spec.finishTool} with the result (the host only receives what you pass to ${spec.finishTool}).`,
+        content: canAsk
+          ? // small models often ask in plain text: point them at ask_host instead of pushing them to finish
+            `You did not call a tool. Text answers do not reach the host. If you need the host's answer, call ask_host with your question; otherwise continue with the tools or call ${spec.finishTool} (the host only receives what you pass to ${spec.finishTool}).`
+          : `You did not call a tool. Keep working with the tools, or if the job is done call ${spec.finishTool} with the result (the host only receives what you pass to ${spec.finishTool}).`,
       });
       continue;
     }
@@ -555,17 +803,22 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
         return { id: c.id, type: 'function' as const, function: { name: c.name, arguments: p.ok ? JSON.stringify(p.value) : '{}' } };
       }),
     });
+    // A question pauses the turn: when the first ask_host call will really ask, only it runs (a click
+    // listed next to it could place the order before the host answered). Otherwise the turn runs as usual.
+    const firstAsk = completion.toolCalls.find((c) => c.name === 'ask_host');
+    const asking = firstAsk && willAsk(firstAsk) ? firstAsk : null;
     for (const call of completion.toolCalls) {
       let text: string;
       if (run.outcome) text = 'Skipped: the job was already finished.';
       else if (run.abort.signal.aborted) text = 'Skipped: the run was cancelled.';
+      else if (asking && call !== asking) text = 'Skipped: you asked the host a question in this turn. Wait for the answer, then act.';
       else if (!env.forced && call.name !== spec.finishTool && Date.now() > softDeadline()) text = `Skipped: out of time. Call ${spec.finishTool} with what you have.`;
       else {
         try {
           text = await executeCall(call, record);
         } catch (err) {
           text = `Error: ${(err as Error).message}`;
-          record.toolCalls.push({ name: call.name, args: '(not shown)', ok: false, durationMs: 0, preview: text.slice(0, 300) });
+          record.toolCalls.push({ name: call.name, args: '(not shown)', ok: false, durationMs: 0, preview: run.scrub(text).slice(0, 300) });
         }
       }
       run.messages.push({ role: 'tool', tool_call_id: call.id, content: text });
@@ -582,6 +835,10 @@ function fallbackOutcome(run: AgentRun, why: string): Outcome {
   return run.kind === 'finder'
     ? { success: false, forced: true, answer: text, confidence: 'low', insufficientSources: true, notes: why }
     : { success: false, forced: true, output: text, notes: why };
+}
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function describeArgs(args: Record<string, unknown>): string {

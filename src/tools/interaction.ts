@@ -721,9 +721,10 @@ export async function fillElement(ctx: ToolContext, tab: Tab, handle: ElementHan
   if (info.select) return selectOptions(ctx, tab, handle, [value], { box, info });
   const desc = describeField(info, handle);
   assertEditable(info, desc, 'browser_fill');
-  const sensitive = isSensitiveField(info);
+  // a secret the host gave a sub-agent (e.g. a one-time code) is handled like a password, in any field
+  const sensitive = isSensitiveField(info) || Boolean(ctx.secretInput);
   if (sensitive) ctx.markSensitive();
-  const quiet = sensitive && ctx.config.log.redactSecrets;
+  const quiet = sensitive && (ctx.config.log.redactSecrets || Boolean(ctx.secretInput));
 
   // like pasting: a browser keeps at most maxlength characters
   const limited = info.maxLength >= 0 && value.length > info.maxLength;
@@ -751,9 +752,9 @@ export async function typeIntoElement(ctx: ToolContext, tab: Tab, handle: Elemen
   const desc = describeField(info, handle);
   if (info.select) throw new ToolError(`${desc} is a <select>; use browser_select_option`);
   assertEditable(info, desc, 'browser_type');
-  const sensitive = isSensitiveField(info);
+  const sensitive = isSensitiveField(info) || Boolean(ctx.secretInput);
   if (sensitive) ctx.markSensitive();
-  const quiet = sensitive && ctx.config.log.redactSecrets;
+  const quiet = sensitive && (ctx.config.log.redactSecrets || Boolean(ctx.secretInput));
 
   if (box.visible) ctx.pointer(tab, box.x, box.y, 'type', info.label);
   await focusElement(tab, handle);

@@ -248,6 +248,7 @@ const model = {
   agentsInfo: null,
   scripts: [],
   scriptsLoadedAt: 0,
+  snapshots: null, // { snapshots, dir, encrypted, unencrypted_count } from the hub, null until it arrives
 };
 
 /** The server's current time on the browser clock, for ages of server timestamps. */
@@ -264,6 +265,10 @@ const ui = {
   view: store.get('view', 'console'),
   theme: store.get('theme', 'system'),
   split: store.get('split', 60),
+  // Snapshots tab: kept here (not in the rows) so live updates that rebuild a row keep the confirmation
+  confirmDelete: null, // name whose inline delete confirmation is open
+  deleting: null, // name whose DELETE request is in flight
+  deleteError: null, // { name, text } of the last failed delete
 };
 
 // ------------------------------------------------------------------ render scheduling
@@ -461,7 +466,10 @@ const handlers = {
   browsers(list) {
     if (!Array.isArray(list)) return;
     model.browsers = list;
-    mark('browsers', 'agents', 'stage');
+    mark('browsers', 'agents', 'stage', 'snapshots');
+  },
+  snapshots(data) {
+    applySnapshots(data);
   },
   browser(ev) {
     if (!ev || typeof ev !== 'object') return;
@@ -503,6 +511,9 @@ function hydrate(state) {
   for (const a of Array.isArray(history.agents) ? history.agents : []) upsertAgent(a);
   for (const id of [...agentsUi.open]) if (!model.agents.has(id)) agentsUi.open.delete(id);
   for (const id of [...agentsUi.details.keys()]) if (!model.agents.has(id)) agentsUi.details.delete(id);
+  // null until the server listed them once: ask for the list instead
+  if (history.snapshots) applySnapshots(history.snapshots);
+  else void loadSnapshots();
   const browserEvents = Array.isArray(history.browserEvents) ? history.browserEvents : [];
   if (browserEvents.length) model.lastBrowserEvent = browserEvents[browserEvents.length - 1];
   for (const entry of Array.isArray(history.activity) ? history.activity : []) upsertActivity(entry, false);
@@ -1082,10 +1093,11 @@ function renderFrameMeta() {
 }
 
 function renderWorking() {
-  // only calls acting on the watched browser; agent/script tools (which wait on other browsers) are left out
+  // only calls acting on the watched browser; agent/script tools (which wait on other browsers) are left out,
+  // and so are a sub-agent's question (it waits for the host) and its sign-in save
   const running = [...act.running]
     .map((id) => act.map.get(id))
-    .filter((r) => r && (r.entry.browserId ?? 'main') === ui.watch && !/^(agent|script)_/.test(str(r.entry.tool)));
+    .filter((r) => r && (r.entry.browserId ?? 'main') === ui.watch && !/^(agent|script)_|^(ask_host|save_sign_in)$/.test(str(r.entry.tool)));
   const box = $('working');
   const busy = running.length > 0 && conn.state === 'open';
   box.hidden = !busy;
@@ -1960,11 +1972,18 @@ function upsertAgent(summary) {
   const previous = model.agents.get(summary.id);
   model.agents.set(summary.id, summary);
   while (model.agents.size > 100) model.agents.delete(model.agents.keys().next().value);
-  if (agentsUi.open.has(summary.id) && (!previous || previous.step !== summary.step || previous.status !== summary.status || previous.transcript !== summary.transcript)) {
-    void loadAgentDetails(summary.id);
-  }
+  const changed =
+    !previous ||
+    previous.step !== summary.step ||
+    previous.status !== summary.status ||
+    previous.transcript !== summary.transcript ||
+    previous.question?.id !== summary.question?.id ||
+    previous.questions !== summary.questions;
+  if (agentsUi.open.has(summary.id) && changed) void loadAgentDetails(summary.id);
   if (previous && previous.status !== summary.status && ['completed', 'failed', 'cancelled'].includes(summary.status)) void loadScripts();
   mark('agents', 'browsers');
+  // an open delete confirmation names the runs that use the snapshot, with their status
+  if (ui.confirmDelete) mark('snapshots');
 }
 
 async function loadAgentDetails(id) {
@@ -2026,10 +2045,108 @@ function onAgentsClick(ev) {
 
 function statusTone(a) {
   if (a.status === 'running') return 'live';
+  if (a.status === 'waiting') return 'accent';
   if (a.status === 'queued') return 'warn';
   if (a.status === 'completed') return a.success === false ? 'warn' : 'ok';
   if (a.status === 'failed') return 'err';
   return 'muted';
+}
+
+/** What a sub-agent's question asks for (ask_host reason), on the card and in the details. */
+const QUESTION_REASON = {
+  confirm: { card: 'Asks the host to approve a step', short: 'approval' },
+  choose: { card: 'Asks the host to choose', short: 'choice' },
+  sign_in: { card: 'Asks the host for a sign-in detail', short: 'sign-in' },
+  missing_info: { card: 'Asks the host for missing information', short: 'missing information' },
+};
+
+/** Time left, e.g. "45s", "27m" (rounded up, so it never reads 0m while time is left), "1h 05m". */
+function fmtIn(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.ceil(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${pad(m % 60)}m`;
+}
+
+/** "asked on <origin> · 40s ago · continues without an answer in 27m · …" (ticks while the run waits). */
+function questionMetaText(q) {
+  const now = serverNow();
+  const asked = parseTime(q.askedAt);
+  const expires = parseTime(q.expiresAt);
+  return [
+    q.origin ? `asked on ${str(q.origin)}` : 'asked with no web page open',
+    asked === null ? null : fmtAgo(now - asked),
+    expires === null ? null : expires > now ? `continues without an answer in ${fmtIn(expires - now)}` : 'continuing without an answer',
+    'the host answers with agent_reply',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** The pending question on a waiting run's card. Its text comes from the model: text nodes only. */
+function agentQuestionBlock(a) {
+  const q = a.question;
+  const options = (Array.isArray(q.options) ? q.options : []).filter((o) => typeof o === 'string' && o);
+  return h(
+    'div',
+    { class: 'agent-question', dataset: { question: str(q.id) } },
+    h(
+      'div',
+      { class: 'agent-question-head' },
+      icon('help'),
+      h('span', { class: 'agent-question-kind', text: QUESTION_REASON[q.reason]?.card ?? 'Asks the host a question' }),
+      q.secret ? h('span', { class: 'agent-question-secret', text: 'answer stays hidden', title: 'The answer is a secret such as a one-time code: the dashboard never shows it' }) : null,
+      h('span', { class: 'agent-question-id mono', text: str(q.id) }),
+    ),
+    h('div', { class: 'agent-question-text', text: truncate(str(q.text), 1000) }),
+    options.length ? h('div', { class: 'agent-question-options', role: 'list', 'aria-label': 'Options' }, ...options.map((o) => h('span', { class: 'agent-option', role: 'listitem', text: truncate(o, 200), title: o }))) : null,
+    h('div', { class: 'agent-question-meta', dataset: { run: a.id }, text: questionMetaText(q) }),
+  );
+}
+
+/** "Snapshot amazon v3 · refreshed to v4": the saved sign-in a run started with, and what it saved at the end. */
+function agentSnapshotLine(a) {
+  const start = a.snapshot && typeof a.snapshot === 'object' ? a.snapshot : null;
+  const saved = a.snapshotSaved && typeof a.snapshotSaved === 'object' ? a.snapshotSaved : null;
+  if (!start && !saved) return null;
+  const parts = [];
+  if (start) parts.push(`Snapshot ${str(start.name)} v${start.version}`);
+  if (saved?.action === 'refreshed') parts.push(start?.name === saved.name ? `refreshed to v${saved.version}` : `refreshed snapshot ${str(saved.name)} to v${saved.version}`);
+  else if (saved?.action === 'created') parts.push(`${start ? 'saved' : 'Saved'} its sign-in as snapshot ${str(saved.name)} v${saved.version}`);
+  else if (saved?.action === 'skipped') parts.push(`not refreshed: ${str(saved.reason) || 'skipped'}`);
+  const skipped = saved?.action === 'skipped';
+  return h('div', { class: `agent-snapshot${skipped ? ' warn' : ''}` }, icon('key'), h('span', { text: parts.join(' · ') }));
+}
+
+/** One question of a run in its details; secret answers never reach the page (the server masks them). */
+function agentQuestionItem(q) {
+  const reason = QUESTION_REASON[q.reason]?.short ?? str(q.reason);
+  const options = (Array.isArray(q.options) ? q.options : []).filter((o) => typeof o === 'string' && o);
+  let answer;
+  if (q.status === 'answered') {
+    const hidden = q.secret || q.answer === null || q.answer === undefined;
+    const by = [q.answeredBy ? `by ${str(q.answeredBy)}` : null, q.answeredAt ? `at ${fmtClock(q.answeredAt)}` : null].filter(Boolean).join(' ');
+    answer = [h('span', { class: hidden ? 'muted' : '', text: hidden ? '(hidden)' : `“${truncate(str(q.answer), 1000)}”` }), by ? h('span', { class: 'muted', text: ` · ${by}` }) : null];
+  } else if (q.status === 'expired') {
+    answer = [h('span', { text: `No answer by ${fmtClock(q.expiresAt)}; the run continued without it` })];
+  } else if (q.status === 'cancelled') {
+    answer = [h('span', { text: 'Not answered: the run was stopped' })];
+  } else {
+    answer = [h('span', { text: `Waiting for the host's answer (the run continues without one at ${fmtClock(q.expiresAt)})` })];
+  }
+  return h(
+    'li',
+    { dataset: { question: str(q.id), status: str(q.status) } },
+    h(
+      'div',
+      { class: 'agent-q-head' },
+      h('b', { class: 'mono', text: str(q.id) }),
+      h('span', { text: [reason, num(q.step) !== null ? `step ${q.step}` : null, fmtClock(q.askedAt), q.origin ? `on ${str(q.origin)}` : 'no web page open'].filter(Boolean).join(' · ') }),
+    ),
+    h('div', { class: 'agent-q-text', text: str(q.text) }),
+    options.length ? h('div', { class: 'agent-q-options muted', text: `Options: ${options.join(' | ')}` }) : null,
+    h('div', { class: 'agent-answer', dataset: { status: str(q.status) } }, h('span', { class: 'agent-answer-label', text: 'Answer' }), ...answer),
+  );
 }
 
 function safeLink(url, text) {
@@ -2044,6 +2161,12 @@ function agentDetailsBlock(id) {
   const parts = [];
   parts.push(h('div', { class: 'act-label', text: d.summary?.kind === 'finder' ? 'Objective' : 'Task' }), h('pre', { class: 'code', dataset: { key: 'task' }, text: str(d.input?.task) }));
   parts.push(h('div', { class: 'act-label', text: 'Requested output' }), h('pre', { class: 'code', dataset: { key: 'output' }, text: str(d.input?.output) }));
+  const questions = (Array.isArray(d.questions) ? d.questions : []).filter((q) => q && typeof q === 'object');
+  if (questions.length) {
+    const waited = num(d.waitedMs) ?? 0;
+    parts.push(h('div', { class: 'act-label', text: `Questions (${questions.length}${waited >= 1000 ? ` · waited ${fmtDuration(waited)}` : ''})` }));
+    parts.push(h('ol', { class: 'agent-questions' }, ...questions.map(agentQuestionItem)));
+  }
   const steps = Array.isArray(d.steps) ? d.steps : [];
   if (steps.length) {
     parts.push(h('div', { class: 'act-label', text: `Steps (${steps.length}${d.summary?.step > steps.length ? ` of ${d.summary.step}` : ''})` }));
@@ -2117,16 +2240,22 @@ function agentElapsed(a) {
 
 function agentMetaText(a) {
   const elapsed = agentElapsed(a);
-  return [a.status === 'queued' ? null : `step ${a.step ?? 0}/${a.maxSteps ?? '?'}`, elapsed === null ? null : fmtDuration(elapsed), a.client ? str(a.client) : null]
+  // question turns are free: the budget counts the other steps
+  const steps = num(a.stepsUsed) ?? num(a.step) ?? 0;
+  const waited = a.status !== 'waiting' && (num(a.waitingMs) ?? 0) >= 1000 ? `waited ${fmtDuration(a.waitingMs)}` : null;
+  return [a.status === 'queued' ? null : `step ${steps}/${a.maxSteps ?? '?'}`, elapsed === null ? null : fmtDuration(elapsed), waited, a.client ? str(a.client) : null]
     .filter(Boolean)
     .join(' · ');
 }
+
+const isWaiting = (a) => a.status === 'waiting' && Boolean(a.question) && typeof a.question === 'object';
 
 function buildAgentCard(a) {
   const open = agentsUi.open.has(a.id);
   const browser = (a.browserId && model.browsers.find((b) => b.id === a.browserId)) || (a.status === 'running' && a.browserId);
   const watching = Boolean(a.browserId) && ui.watch === a.browserId;
-  const statusText = a.status === 'completed' ? (a.success === false ? 'completed · no success' : 'completed') : a.status;
+  const statusText = a.status === 'completed' ? (a.success === false ? 'completed · no success' : 'completed') : a.status === 'waiting' ? 'waiting for answer' : a.status;
+  const busy = a.status === 'running' || a.status === 'queued' || (a.status === 'waiting' && !isWaiting(a));
   return h(
     'div',
     { class: `agent-card${open ? ' open' : ''}`, dataset: { id: a.id } },
@@ -2160,11 +2289,13 @@ function buildAgentCard(a) {
       ),
     ),
     h('div', { class: 'agent-task', text: truncate(str(a.task), 400), title: str(a.task) }),
-    a.status === 'running' || a.status === 'queued' ? h('div', { class: 'agent-activity' }, h('span', { class: 'spinner' }), h('span', { class: 'agent-activity-text', text: truncate(str(a.activity), 200) })) : null,
+    isWaiting(a) ? agentQuestionBlock(a) : null,
+    busy ? h('div', { class: 'agent-activity' }, h('span', { class: 'spinner' }), h('span', { class: 'agent-activity-text', text: truncate(str(a.activity), 200) })) : null,
     a.status === 'running' && a.thinking ? h('div', { class: 'agent-thinking', text: `… ${str(a.thinking).slice(-400)}` }) : null,
     a.script
       ? h('div', { class: 'agent-script' }, icon('script'), h('span', { text: `Script ${str(a.script.name)} v${a.script.version}${a.script.lastTest === true ? ' · last test passed' : a.script.lastTest === false ? ' · last test failed' : ''}` }))
       : null,
+    agentSnapshotLine(a),
     a.result ? h('div', { class: 'agent-result', text: truncate(str(a.result), 500) }) : null,
     a.error ? h('div', { class: 'agent-error', text: str(a.error) }) : null,
     open ? agentDetailsBlock(a.id) : null,
@@ -2174,8 +2305,10 @@ function buildAgentCard(a) {
 /** Everything a card shows except its elapsed time (that ticks in place, see tickAgents). */
 function agentCardSig(a) {
   const browser = a.browserId && model.browsers.find((b) => b.id === a.browserId);
+  const q = isWaiting(a) ? a.question : null;
   return JSON.stringify([
     a.status, a.success, a.step, a.maxSteps, Boolean(a.thinking), a.result, a.error, a.script, a.task, a.client, a.kind,
+    q ? [q.id, q.text, q.options, q.reason, q.secret, q.origin, q.askedAt, q.expiresAt] : null, a.snapshot ?? null, a.snapshotSaved ?? null,
     agentsUi.open.has(a.id), agentsUi.details.get(a.id)?.loadedAt ?? 0, agentsUi.details.get(a.id)?.loading ?? false, agentsUi.details.get(a.id)?.failed ?? false,
     ui.watch === a.browserId, Boolean(browser),
   ]);
@@ -2183,6 +2316,8 @@ function agentCardSig(a) {
 
 /** The fields that change while the model streams are updated in place (no rebuild). */
 function patchAgentCard(card, a) {
+  const meta = card.querySelector('.agent-meta');
+  if (meta) setText(meta, agentMetaText(a));
   const activity = card.querySelector('.agent-activity-text');
   if (activity) setText(activity, truncate(str(a.activity), 200));
   const thinking = card.querySelector('.agent-thinking');
@@ -2190,11 +2325,15 @@ function patchAgentCard(card, a) {
   return card;
 }
 
-/** Refresh the elapsed time of running cards without rebuilding them. */
+/** Refresh the elapsed time of unfinished cards, and the age of a pending question, without rebuilding them. */
 function tickAgents() {
   for (const el of $('agents-rows').querySelectorAll('.agent-meta[data-run]')) {
     const a = model.agents.get(el.dataset.run);
-    if (a && (a.status === 'running' || a.status === 'queued')) setText(el, agentMetaText(a));
+    if (a && (a.status === 'running' || a.status === 'queued' || a.status === 'waiting')) setText(el, agentMetaText(a));
+  }
+  for (const el of $('agents-rows').querySelectorAll('.agent-question-meta[data-run]')) {
+    const a = model.agents.get(el.dataset.run);
+    if (a && isWaiting(a)) setText(el, questionMetaText(a.question));
   }
 }
 
@@ -2242,10 +2381,18 @@ function renderAgents() {
       : 'No agent runs yet. The host agent starts them with agent_run, agent_automate or agent_find.',
   );
   const running = runs.filter((a) => a.status === 'running').length;
+  const waiting = runs.filter((a) => a.status === 'waiting').length;
   const queued = runs.filter((a) => a.status === 'queued').length;
   const count = $('count-agents');
-  setText(count, running || queued ? [running ? `${running} running` : null, queued ? `${queued} queued` : null].filter(Boolean).join(' · ') : String(runs.length));
+  setText(
+    count,
+    running || waiting || queued
+      ? [running ? `${running} running` : null, waiting ? `${waiting} waiting` : null, queued ? `${queued} queued` : null].filter(Boolean).join(' · ')
+      : String(runs.length),
+  );
+  // the spinner means work in progress; a run waiting for an answer is not working, it gets a still dot
   count.classList.toggle('warn', running + queued > 0);
+  count.classList.toggle('ask', waiting > 0);
 
   const scripts = model.scripts.filter((sc) => sc && typeof sc === 'object');
   const rowsEl = $('scripts-rows');
@@ -2280,6 +2427,8 @@ function renderAgents() {
   if (info && foot.dataset.sig !== footSig) {
     foot.dataset.sig = footSig;
     const item = (label, value) => h('span', null, `${label} `, h('b', { text: value, title: value }));
+    // runs paused on a question hold no slot: they are counted apart
+    const pending = [info.queued ? `+${info.queued} queued` : null, info.waiting ? `${info.waiting} waiting` : null].filter(Boolean);
     foot.replaceChildren(
       ...[
         item('Agents', info.enabled ? 'on' : 'off'),
@@ -2287,17 +2436,354 @@ function renderAgents() {
         info.enabled && info.config ? item('Config', str(info.config)) : null,
         info.enabled && info.endpoint ? item('Endpoint', str(info.endpoint)) : null,
         info.enabled ? item('Context', `${Math.round((info.contextTokens ?? 0) / 1024)}k tokens`) : null,
-        info.enabled ? item('Running', `${info.running ?? 0}/${info.maxConcurrent ?? '?'}${info.queued ? ` (+${info.queued} queued)` : ''}`) : null,
+        info.enabled ? item('Running', `${info.running ?? 0}/${info.maxConcurrent ?? '?'}${pending.length ? ` (${pending.join(', ')})` : ''}`) : null,
         info.scriptsDir ? item('Scripts', str(info.scriptsDir)) : null,
       ].filter(Boolean),
     );
   }
 }
 
+// ------------------------------------------------------------------ snapshots (saved sign-ins)
+
+/** Where focus goes after the next render: { name, action } of a row's button, or { tab: true }. */
+let snapshotFocus = null;
+
+function applySnapshots(data) {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.snapshots)) return;
+  model.snapshots = data;
+  mark('snapshots');
+}
+
+// The hub pushes every change; this read is for opening the tab (fresh from disk) and a missing hello list.
+async function loadSnapshots() {
+  try {
+    const res = await fetch('/api/snapshots', { cache: 'no-store', credentials: 'same-origin' });
+    if (res.ok) applySnapshots(await res.json());
+  } catch {
+    // the hub event keeps the list current
+  }
+}
+
+/** "main browser" or the label of a sub-agent's browser, e.g. "Agentic agent r1a2b3c". */
+function snapshotBrowserLabel(id) {
+  if (id === 'main') return 'main browser';
+  const b = model.browsers.find((x) => x.id === id);
+  return b ? str(b.label) || id : id;
+}
+
+function snapshotLoadedText(s) {
+  const loaded = (Array.isArray(s.loaded_in) ? s.loaded_in : []).map(str);
+  if (!loaded.length) return '';
+  const active = new Set((Array.isArray(s.active_in) ? s.active_in : []).map(str));
+  return `loaded in ${loaded.map((id) => `${snapshotBrowserLabel(id)}${active.has(id) ? ' (active)' : ''}`).join(', ')}`;
+}
+
+/** "In use by run r1 (running)": sub-agent runs whose browser has the snapshot loaded. */
+function snapshotUsedByText(s) {
+  const runs = (Array.isArray(s.loaded_in) ? s.loaded_in : [])
+    .map((id) => model.browsers.find((b) => b.id === id))
+    .filter((b) => b?.runId)
+    .map((b) => `${b.runId} (${model.agents.get(b.runId)?.status ?? 'running'})`);
+  return runs.length ? `In use by run${runs.length === 1 ? '' : 's'} ${runs.join(', ')}.` : '';
+}
+
+const snapshotActor = (by) => (by && typeof by === 'object' ? (by.run_id ? `sub-agent run ${str(by.run_id)}` : str(by.client)) : '');
+
+/** "v3 · updated 3m ago by <client | sub-agent run r1> · storage for 1 site" (the age ticks in place). */
+function snapshotWhenText(s) {
+  if (num(s.version) === null) return '';
+  const updated = parseTime(s.updated_at);
+  const by = snapshotActor(s.updated_by);
+  const origins = Array.isArray(s.origins) ? s.origins.length : 0;
+  return [
+    `v${s.version}`,
+    `${s.version === 1 ? 'saved' : 'updated'} ${updated === null ? '' : fmtAgo(serverNow() - updated)}${by ? ` by ${by}` : ''}`.trim(),
+    origins ? `storage for ${origins} site${origins === 1 ? '' : 's'}` : null,
+    s.stale ? 'details may be out of date' : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function snapshotCookiePill(s) {
+  if (s.incomplete) return { tone: 'warn', text: 'incomplete', title: 'A save was cut off: this snapshot cannot be loaded, only deleted' };
+  const cookies = num(s.cookie_count) ?? 0;
+  const expired = num(s.expired_count) ?? 0;
+  const session = num(s.session_cookie_count) ?? 0;
+  const next = parseTime(s.next_expiry);
+  return {
+    tone: expired > 0 ? 'warn' : cookies ? 'ok' : 'muted',
+    text: `${cookies} cookie${cookies === 1 ? '' : 's'}${expired ? ` · ${expired === cookies ? 'all' : expired} expired` : ''}`,
+    title: [
+      `${cookies} cookie${cookies === 1 ? '' : 's'}, ${session} of them for the browser session only`,
+      expired ? `${expired} expired since the save` : null,
+      next === null ? null : `Next expiry: ${new Date(next).toLocaleString()}`,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  };
+}
+
+function snapshotDomains(s) {
+  const hosts = (Array.isArray(s.cookie_domains) ? s.cookie_domains : []).map(str).filter(Boolean);
+  const filter = (Array.isArray(s.domains) ? s.domains : []).map(str);
+  const origins = (Array.isArray(s.origins) ? s.origins : []).filter((o) => o && typeof o === 'object');
+  const title = [
+    hosts.length ? `Cookies for: ${hosts.join(', ')}` : null,
+    filter.length ? `Saved for: ${filter.includes('*') ? 'all sites' : filter.join(', ')}` : null,
+    ...origins.map((o) => `Site storage: ${str(o.origin)} (${num(o.local_storage) ?? 0} local, ${num(o.session_storage) ?? 0} session)`),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return { text: hosts.length > 3 ? `${hosts.slice(0, 3).join(', ')} +${hosts.length - 3}` : hosts.join(', '), title };
+}
+
+function buildSnapshotRow(s) {
+  const name = str(s.name);
+  const confirming = ui.confirmDelete === name;
+  const deleting = ui.deleting === name;
+  const pill = snapshotCookiePill(s);
+  const domains = snapshotDomains(s);
+  const when = snapshotWhenText(s);
+  const loaded = snapshotLoadedText(s);
+  const error = ui.deleteError?.name === name ? ui.deleteError.text : '';
+  const usedBy = confirming ? snapshotUsedByText(s) : '';
+  return h(
+    'div',
+    { class: `snapshot-row${confirming ? ' confirming' : ''}`, dataset: { name } },
+    h(
+      'div',
+      { class: 'snapshot-head' },
+      h('span', { class: 'snapshot-name mono', text: name, title: name }),
+      h('span', { class: 'pill snapshot-pill', dataset: { tone: pill.tone }, title: pill.title }, h('span', { class: 'dot' }), h('span', { class: 'pill-text', text: pill.text })),
+      domains.text ? h('span', { class: 'snapshot-domains mono', text: domains.text, title: domains.title }) : null,
+      h(
+        'span',
+        { class: 'snapshot-actions' },
+        h(
+          'button',
+          {
+            class: 'chip',
+            type: 'button',
+            dataset: { action: 'delete', name },
+            'aria-label': `Delete snapshot ${name}`,
+            'aria-expanded': String(confirming),
+            title: 'Delete this snapshot for good',
+          },
+          icon('trash'),
+          'Delete',
+        ),
+      ),
+    ),
+    s.description ? h('div', { class: 'snapshot-desc', text: str(s.description) }) : null,
+    s.incomplete ? h('div', { class: 'snapshot-note', text: 'A save was cut off, so this snapshot cannot be loaded. It can only be deleted.' }) : null,
+    when || loaded
+      ? h(
+          'div',
+          { class: 'snapshot-meta' },
+          when ? h('span', { class: 'snapshot-when', dataset: { name }, text: when, title: s.updated_at ? new Date(s.updated_at).toLocaleString() : undefined }) : null,
+          loaded
+            ? h('span', {
+                class: 'snapshot-loaded',
+                text: loaded,
+                title: 'Its cookies are in these browsers now. Active: the snapshot that browser loaded or saved last (snapshot_save there refreshes it).',
+              })
+            : null,
+        )
+      : null,
+    confirming
+      ? h(
+          'div',
+          { class: 'snapshot-confirm', role: 'group', 'aria-label': `Confirm deleting snapshot ${name}` },
+          h(
+            'p',
+            { class: 'snapshot-confirm-text' },
+            h('span', { text: `Delete snapshot "${name}" for good? Cookies it already put into a browser stay until cleared.` }),
+            usedBy ? h('span', { class: 'snapshot-confirm-use', text: usedBy }) : null,
+          ),
+          h(
+            'span',
+            { class: 'snapshot-confirm-actions' },
+            // aria-disabled, not disabled: a disabled button would drop the keyboard focus while the request runs
+            h(
+              'button',
+              { class: 'chip danger', type: 'button', dataset: { action: 'confirm-delete', name }, 'aria-disabled': deleting ? 'true' : undefined, 'aria-label': `Delete snapshot ${name} for good` },
+              icon('trash'),
+              deleting ? 'Deleting…' : 'Delete',
+            ),
+            h('button', { class: 'chip', type: 'button', dataset: { action: 'cancel-delete', name } }, 'Cancel'),
+          ),
+        )
+      : null,
+    error ? h('div', { class: 'snapshot-error', role: 'alert', text: error }) : null,
+  );
+}
+
+function snapshotRowSig(s) {
+  const name = str(s.name);
+  return JSON.stringify([s, snapshotLoadedText(s), ui.confirmDelete === name, ui.deleting === name, ui.deleteError?.name === name ? ui.deleteError.text : null, ui.confirmDelete === name ? snapshotUsedByText(s) : null]);
+}
+
+function renderSnapshots() {
+  const data = model.snapshots;
+  const list = (Array.isArray(data?.snapshots) ? data.snapshots : [])
+    .filter((s) => s && typeof s === 'object' && typeof s.name === 'string')
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const names = new Set(list.map((s) => s.name));
+  // a snapshot deleted elsewhere (by an agent, another dashboard) takes its confirmation and error with it
+  if (ui.confirmDelete && !names.has(ui.confirmDelete)) ui.confirmDelete = null;
+  if (ui.deleteError && !names.has(ui.deleteError.name)) ui.deleteError = null;
+
+  const box = $('snapshots-rows');
+  const before = [...box.children];
+  const existing = new Map(before.map((el) => [el.dataset.name, el]));
+  // focus inside a row that goes away moves to the nearest remaining row (or the tab)
+  if (!snapshotFocus) {
+    const gone = before.find((el) => !names.has(el.dataset.name) && el.contains(document.activeElement));
+    if (gone) {
+      const i = before.indexOf(gone);
+      const next = [...before.slice(i + 1), ...before.slice(0, i).reverse()].find((el) => names.has(el.dataset.name));
+      snapshotFocus = next ? { name: next.dataset.name, action: 'delete' } : { tab: true };
+    }
+  }
+  const rows = list.map((s) => {
+    const sig = snapshotRowSig(s);
+    const old = existing.get(s.name);
+    if (old && old.dataset.sig === sig) return old;
+    const row = buildSnapshotRow(s);
+    row.dataset.sig = sig;
+    if (old) {
+      const focused = old.contains(document.activeElement) ? document.activeElement?.dataset?.action : null;
+      old.replaceWith(row);
+      if (focused && !snapshotFocus) row.querySelector(`[data-action="${CSS.escape(focused)}"]`)?.focus();
+    }
+    return row;
+  });
+  for (const [name, el] of existing) if (!names.has(name)) el.remove();
+  rows.forEach((row, i) => {
+    if (box.children[i] !== row) box.insertBefore(row, box.children[i] ?? null);
+  });
+
+  if (snapshotFocus) {
+    const target = snapshotFocus.tab ? $('itab-snapshots') : box.querySelector(`[data-name="${CSS.escape(snapshotFocus.name)}"] [data-action="${CSS.escape(snapshotFocus.action)}"]`);
+    snapshotFocus = null;
+    // only while the tab is shown: a hidden view must not pull the focus
+    if (target && ui.view === 'snapshots') target.focus();
+  }
+
+  const empty = $('snapshots-empty');
+  empty.hidden = list.length > 0;
+  setText(
+    empty,
+    data
+      ? 'No snapshots saved yet. To create one, the host agent signs in in its own browser (with your help) and calls snapshot_save; a sub-agent that signed in during its job saves its sign-in with save_sign_in. Agents then start signed in with agent_run {"snapshot": "<name>"}.'
+      : 'Loading saved sign-ins…',
+  );
+  const count = $('count-snapshots');
+  setText(count, String(list.length));
+  count.classList.toggle('warn', list.some((s) => s.incomplete));
+
+  const foot = $('snapshots-foot');
+  const footSig = JSON.stringify(data ? [data.dir, data.encrypted, data.unencrypted_count, list.length] : null);
+  if (foot.dataset.sig !== footSig) {
+    foot.dataset.sig = footSig;
+    const item = (label, value, cls) => h('span', { class: cls }, `${label} `, h('b', { text: value, title: value }));
+    const plain = num(data?.unencrypted_count) ?? 0;
+    foot.replaceChildren(
+      ...(data
+        ? [
+            item('Encrypted', data.encrypted ? 'yes (SNAPSHOTS_KEY)' : 'no (set SNAPSHOTS_KEY)'),
+            plain ? item('Unencrypted', `${plain} of ${list.length}`, 'warn') : null,
+            data.dir ? item('Folder', str(data.dir)) : null,
+          ].filter(Boolean)
+        : []),
+    );
+  }
+}
+
+/** Refresh the "updated 3m ago" of every row without rebuilding it. */
+function tickSnapshots() {
+  for (const el of $('snapshots-rows').querySelectorAll('.snapshot-when[data-name]')) {
+    const s = model.snapshots?.snapshots?.find((x) => x?.name === el.dataset.name);
+    if (s) setText(el, snapshotWhenText(s));
+  }
+}
+
+function onSnapshotsClick(ev) {
+  const btn = ev.target instanceof Element ? ev.target.closest('button[data-action][data-name]') : null;
+  if (!btn) return;
+  const { action, name } = btn.dataset;
+  if (action === 'delete') {
+    if (ui.deleting) return;
+    const closing = ui.confirmDelete === name;
+    ui.confirmDelete = closing ? null : name;
+    ui.deleteError = null;
+    snapshotFocus = { name, action: closing ? 'delete' : 'confirm-delete' };
+  } else if (action === 'cancel-delete') {
+    cancelSnapshotDelete();
+    return;
+  } else if (action === 'confirm-delete') {
+    void deleteSnapshot(name);
+    return;
+  }
+  mark('snapshots');
+}
+
+function cancelSnapshotDelete() {
+  if (!ui.confirmDelete || ui.deleting) return;
+  snapshotFocus = { name: ui.confirmDelete, action: 'delete' };
+  ui.confirmDelete = null;
+  mark('snapshots');
+}
+
+// The dashboard's only change to the server. The custom header and the page's own Origin are what the
+// server checks, so another site cannot make a viewer's browser send this.
+async function deleteSnapshot(name) {
+  if (ui.deleting) return;
+  ui.deleting = name;
+  mark('snapshots');
+  let error = '';
+  try {
+    const res = await fetch(`/api/snapshots/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: { 'X-SBM-Request': '1' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    // 404: already gone (deleted by an agent or another dashboard), which is what the user asked for
+    if (!res.ok && res.status !== 404) {
+      let reason = '';
+      try {
+        reason = str((await res.json())?.error);
+      } catch {
+        // not JSON (a proxy's error page)
+      }
+      error = `Could not delete snapshot "${name}": ${reason || `HTTP ${res.status}`}${res.status === 401 ? ' (sign in to the dashboard again)' : ''}.`;
+    }
+  } catch {
+    error = `Could not reach the server to delete snapshot "${name}".`;
+  }
+  ui.deleting = null;
+  ui.confirmDelete = null;
+  if (error) {
+    ui.deleteError = { name, text: error };
+    snapshotFocus = { name, action: 'delete' };
+  } else if (model.snapshots) {
+    // gone at once; the hub's new list follows
+    const list = model.snapshots.snapshots.filter((s) => s?.name !== name);
+    const order = [...$('snapshots-rows').children].map((el) => el.dataset.name);
+    const i = order.indexOf(name);
+    const next = [...order.slice(i + 1), ...order.slice(0, Math.max(0, i)).reverse()].find((n) => n !== name && list.some((s) => s?.name === n));
+    snapshotFocus = next ? { name: next, action: 'delete' } : { tab: true };
+    model.snapshots = { ...model.snapshots, snapshots: list };
+  }
+  mark('snapshots');
+}
+
 // ------------------------------------------------------------------ inspector tabs + splitter
 
 function selectView(name) {
-  if (!['console', 'network', 'logs', 'sessions', 'agents'].includes(name)) name = 'console';
+  if (!['console', 'network', 'logs', 'sessions', 'agents', 'snapshots'].includes(name)) name = 'console';
   ui.view = name;
   store.set('view', name);
   for (const tab of document.querySelectorAll('.itab')) {
@@ -2309,8 +2795,21 @@ function selectView(name) {
   for (const view of document.querySelectorAll('.view')) view.hidden = view.id !== `view-${name}`;
   const follow = { console: cons.follow, network: net.follow, logs: logs.follow }[name];
   if (follow) requestAnimationFrame(() => follow.stick());
+  requestAnimationFrame(revealSelectedTab);
   if (name === 'agents') void loadScripts();
+  if (name === 'snapshots') void loadSnapshots();
   mark(name);
+}
+
+/** On a phone the tab strip scrolls sideways: keep the selected tab in it (never scrolls the page). */
+function revealSelectedTab() {
+  const strip = document.querySelector('.inspector-head');
+  const tab = $(`itab-${ui.view}`);
+  if (!strip || !tab || strip.scrollWidth <= strip.clientWidth) return;
+  const s = strip.getBoundingClientRect();
+  const t = tab.getBoundingClientRect();
+  if (t.right > s.right) strip.scrollLeft += t.right - s.right;
+  else if (t.left < s.left) strip.scrollLeft -= s.left - t.left;
 }
 
 function applySplit(pct) {
@@ -2381,6 +2880,7 @@ const renderers = {
   logs: renderLogs,
   sessions: renderSessions,
   agents: renderAgents,
+  snapshots: renderSnapshots,
   browsers: renderBrowsers,
 };
 
@@ -2430,6 +2930,7 @@ function init() {
   });
   $('browser-select').addEventListener('change', (ev) => switchBrowser(ev.target.value));
   $('agents-rows').addEventListener('click', onAgentsClick);
+  $('snapshots-rows').addEventListener('click', onSnapshotsClick);
 
   // activity filters
   $('activity-tool').addEventListener('change', (ev) => {
@@ -2531,6 +3032,13 @@ function init() {
   );
   $('logs-rows').addEventListener('click', onLogsClick);
 
+  // Escape closes an open delete confirmation (wherever the focus is on the Snapshots tab)
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || ev.defaultPrevented || !ui.confirmDelete || ui.view !== 'snapshots') return;
+    cancelSnapshotDelete();
+    ev.preventDefault();
+  });
+
   // keyboard shortcuts
   document.addEventListener('keydown', (ev) => {
     // a held key auto-repeats: each toggle would reconnect the event stream and resend the whole history
@@ -2549,6 +3057,8 @@ function init() {
   applySplit(ui.split);
   initSplitter();
   selectView(ui.view);
+  // tab counts change the strip's width (e.g. "1 running · 1 waiting"): the selected tab stays in view
+  new ResizeObserver(revealSelectedTab).observe(document.querySelector('.itabs'));
 
   // timers
   setInterval(tickRunning, 250);
@@ -2562,10 +3072,11 @@ function init() {
       tickAgents();
       if (Date.now() - model.scriptsLoadedAt > 15_000) void loadScripts();
     }
+    if (ui.view === 'snapshots' && !document.hidden) tickSnapshots();
   }, 1000);
 
   $('app').dataset.conn = conn.state;
-  mark('header', 'stage', 'tabs', 'framemeta', 'activity', 'console', 'network', 'logs', 'sessions', 'agents', 'browsers');
+  mark('header', 'stage', 'tabs', 'framemeta', 'activity', 'console', 'network', 'logs', 'sessions', 'agents', 'snapshots', 'browsers');
   connect();
 }
 

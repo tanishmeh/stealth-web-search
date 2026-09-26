@@ -1,145 +1,36 @@
 import * as z from 'zod';
 import { ToolError } from '../browser/errors.ts';
-import { APPLY_STORAGE, STORAGE_STATE } from '../browser/scripts.ts';
-import type { Tab } from '../browser/tab.ts';
-import { CdpError } from '../cdp/client.ts';
+import {
+  activeOrigin,
+  allCookies as jarCookies,
+  applyStorage,
+  browserSend as connectionSend,
+  canonicalDomain,
+  cookieParam,
+  domainFromInput,
+  httpUrl,
+  normalizeOrigin,
+  nowSeconds,
+  readActiveStorage,
+  sortCookies,
+  storageItems,
+  toCookieOut,
+  type CookieParam,
+  type OriginState,
+} from '../browser/storage-state.ts';
 import { compactJson } from './format.ts';
-import { normalizeUrl } from './navigation.ts';
 import { DESTRUCTIVE_LOCAL, LOCAL_STATE, READ_ONLY, defineTool, textResult, type ToolContext } from './types.ts';
 
-/** Cookie as reported by Obscura's Network.getAllCookies. */
-interface CdpCookie {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires: number;
-  httpOnly: boolean;
-  secure: boolean;
-  session?: boolean;
-  sameSite?: string;
+export { canonicalDomain, domainFromInput, type CookieOut } from '../browser/storage-state.ts';
+
+// The cookie tools log their CDP calls as before (cookie values masked while LOG_REDACT_SECRETS=true);
+// storage reads and writes are quiet while it is on. The helpers live in browser/storage-state.ts.
+function browserSend<T>(ctx: ToolContext, method: string, params: Record<string, unknown> = {}): Promise<T> {
+  return connectionSend<T>(ctx.browser, method, params, { quiet: false });
 }
 
-/** Exported cookie shape (same as Playwright's storageState cookies; expires -1 = session cookie). */
-export interface CookieOut {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires: number;
-  httpOnly: boolean;
-  secure: boolean;
-  sameSite: string;
-}
-
-interface StorageItem {
-  name: string;
-  value: string;
-}
-
-interface OriginState {
-  origin: string;
-  localStorage: StorageItem[];
-  sessionStorage: StorageItem[];
-}
-
-const SAME_SITE = { strict: 'Strict', lax: 'Lax', none: 'None' } as const;
-
-/**
- * Cookies live in the browser-wide cookie jar that every tab shares, so the
- * commands go to the connection itself (no page session). This also avoids
- * touching background tabs, which can reset their JS state in Obscura v0.2.2.
- */
-async function browserSend<T>(ctx: ToolContext, method: string, params: Record<string, unknown> = {}): Promise<T> {
-  const conn = await ctx.browser.connection();
-  try {
-    return await conn.send<T>(method, params);
-  } catch (err) {
-    if (err instanceof CdpError) throw new ToolError(`${method} failed: ${err.message}`);
-    throw err;
-  }
-}
-
-async function allCookies(ctx: ToolContext): Promise<CdpCookie[]> {
-  const res = await browserSend<{ cookies?: CdpCookie[] }>(ctx, 'Network.getAllCookies');
-  return res.cookies ?? [];
-}
-
-export function canonicalDomain(domain: string): string {
-  return domain.trim().replace(/^\.+/, '').toLowerCase();
-}
-
-function toCookieOut(c: CdpCookie): CookieOut {
-  const session = c.session === true || typeof c.expires !== 'number' || c.expires <= 0;
-  return {
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path,
-    expires: session ? -1 : Math.round(c.expires),
-    httpOnly: Boolean(c.httpOnly),
-    secure: Boolean(c.secure),
-    sameSite: c.sameSite || 'Lax',
-  };
-}
-
-function sortCookies(cookies: CdpCookie[]): CdpCookie[] {
-  return [...cookies].sort(
-    (a, b) => canonicalDomain(a.domain).localeCompare(canonicalDomain(b.domain)) || a.path.localeCompare(b.path) || a.name.localeCompare(b.name),
-  );
-}
-
-/** Domain input may be a bare domain, ".domain", "host:port", "[ipv6]" or a URL. */
-export function domainFromInput(input: string): string {
-  const raw = input.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
-    try {
-      return canonicalDomain(new URL(raw).hostname);
-    } catch {
-      // fall through
-    }
-  }
-  const ipv6 = /^\[[0-9a-f:.]+\]/i.exec(raw);
-  if (ipv6) return ipv6[0].toLowerCase();
-  return canonicalDomain(raw.replace(/[/:?#].*$/, ''));
-}
-
-function httpUrl(input: string, ctx: ToolContext, what: string): URL {
-  const url = new URL(normalizeUrl(input, ctx.config));
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new ToolError(`${what} must be an http(s) URL, got ${url.protocol}`);
-  return url;
-}
-
-/** SameSite as Strict/Lax/None; also accepts browser-extension exports ("no_restriction", "unspecified"). */
-function normalizeSameSite(value: unknown): 'Strict' | 'Lax' | 'None' | null | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (typeof value !== 'string') return null;
-  const key = value.trim().toLowerCase();
-  if (key === 'unspecified') return undefined;
-  if (key === 'no_restriction') return 'None';
-  return SAME_SITE[key as keyof typeof SAME_SITE] ?? null;
-}
-
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000);
-}
-
-/** The active tab's http(s) origin, or null when it has none (blank tab, data: URL, no tab). */
-async function activeOrigin(tab: Tab | null): Promise<{ tab: Tab; origin: string } | null> {
-  if (!tab || tab.closed) return null;
-  let href: string;
-  try {
-    href = (await tab.pageInfo()).url;
-  } catch {
-    href = tab.url;
-  }
-  try {
-    const u = new URL(href);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    return { tab, origin: u.origin };
-  } catch {
-    return null;
-  }
+function allCookies(ctx: ToolContext) {
+  return jarCookies(ctx.browser, { quiet: false });
 }
 
 // ------------------------------------------------------------------ cookies
@@ -199,7 +90,7 @@ export const setCookie = defineTool({
     if (domain !== undefined && domain.trim() !== '') {
       host = domainFromInput(domain);
     } else if (url !== undefined && url.trim() !== '') {
-      host = canonicalDomain(httpUrl(url, ctx, 'url').hostname);
+      host = canonicalDomain(httpUrl(url, ctx.config, 'url').hostname);
     } else {
       const current = await activeOrigin(ctx.browser.activeTab);
       if (!current) throw new ToolError('Provide domain or url: the active tab is not on an http(s) page.');
@@ -278,110 +169,12 @@ export const storageState = defineTool({
   handler: async (_args, ctx) => {
     const cookies = sortCookies(await allCookies(ctx)).map(toCookieOut);
     const origins: OriginState[] = [];
-    const current = await activeOrigin(ctx.browser.activeTab);
-    if (current) {
-      const st = await current.tab.callFunction<OriginState>(STORAGE_STATE, [], { quiet: ctx.config.log.redactSecrets });
-      if (st && st.origin && st.origin !== 'null') {
-        origins.push({ origin: st.origin, localStorage: st.localStorage ?? [], sessionStorage: st.sessionStorage ?? [] });
-      }
-    }
+    const st = await readActiveStorage(ctx.browser.activeTab, { quiet: ctx.config.log.redactSecrets });
+    if (st) origins.push(st);
     // compact but valid JSON: most cookies fit on one line, which saves tokens when the agent passes it back
     return textResult(compactJson({ cookies, origins }, 200));
   },
 });
-
-interface CookieParam {
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  secure: boolean;
-  httpOnly: boolean;
-  sameSite?: string;
-  expires?: number;
-}
-
-/** Validate one exported cookie (ours, Playwright's, or Obscura's legacy http_only/same_site keys). */
-function cookieParam(entry: unknown, ctx: ToolContext): CookieParam | string {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'not an object';
-  const c = entry as Record<string, unknown>;
-  if (typeof c.name !== 'string' || c.name === '') return 'missing name';
-  const label = JSON.stringify(c.name);
-  let value: string;
-  if (typeof c.value === 'string') value = c.value;
-  else if (typeof c.value === 'number' || typeof c.value === 'boolean') value = String(c.value);
-  else return `${label}: missing value`;
-
-  let domain = '';
-  if (typeof c.domain === 'string' && c.domain.trim() !== '') domain = domainFromInput(c.domain);
-  else if (typeof c.url === 'string' && c.url.trim() !== '') {
-    try {
-      domain = canonicalDomain(httpUrl(c.url, ctx, 'url').hostname);
-    } catch (err) {
-      return `${label}: ${(err as Error).message}`;
-    }
-  }
-  if (!domain) return `${label}: missing domain (or url)`;
-
-  const path = typeof c.path === 'string' && c.path.startsWith('/') ? c.path : '/';
-  const httpOnly = c.httpOnly ?? c.http_only;
-  const sameSite = normalizeSameSite(c.sameSite ?? c.same_site);
-  if (sameSite === null) return `${label}: invalid sameSite ${JSON.stringify(c.sameSite ?? c.same_site)} (use Strict, Lax or None)`;
-  const out: CookieParam = { name: c.name, value, domain, path, secure: c.secure === true, httpOnly: httpOnly === true };
-  if (sameSite) out.sameSite = sameSite;
-
-  // chrome.cookies-style exports use expirationDate (seconds, fractional) and session: true
-  const expiresInput = c.session === true ? undefined : (c.expires ?? c.expirationDate);
-  if (expiresInput !== undefined && expiresInput !== null) {
-    const raw = typeof expiresInput === 'string' && expiresInput.trim() !== '' ? Number(expiresInput) : expiresInput;
-    if (typeof raw !== 'number' || !Number.isFinite(raw)) return `${label}: invalid expires ${JSON.stringify(expiresInput)}`;
-    const seconds = Math.floor(raw > 1e11 ? raw / 1000 : raw);
-    if (seconds > 0) {
-      if (seconds <= nowSeconds()) return `${label}: expired at ${new Date(seconds * 1000).toISOString()}`;
-      out.expires = seconds;
-    }
-  }
-  return out;
-}
-
-/** Accept [{name, value}], [[name, value]] (Obscura's legacy export) or {name: value}. */
-function storageItems(input: unknown, kind: string): { items: StorageItem[]; skipped: string[] } {
-  const items: StorageItem[] = [];
-  const skipped: string[] = [];
-  if (input === undefined || input === null) return { items, skipped };
-  // numbers/booleans/objects are stored as their JSON text; null or a missing value is skipped
-  const str = (v: unknown) => (typeof v === 'string' ? v : v === undefined || v === null ? undefined : JSON.stringify(v));
-  if (Array.isArray(input)) {
-    input.forEach((entry, i) => {
-      let name: unknown;
-      let value: unknown;
-      if (Array.isArray(entry)) [name, value] = entry;
-      else if (entry && typeof entry === 'object') ({ name, value } = entry as Record<string, unknown>);
-      const v = str(value);
-      if (typeof name !== 'string' || v === undefined) skipped.push(`${kind}[${i}]: expected {name, value}`);
-      else items.push({ name, value: v });
-    });
-  } else if (typeof input === 'object') {
-    for (const [name, value] of Object.entries(input as Record<string, unknown>)) {
-      const v = str(value);
-      if (v === undefined) skipped.push(`${kind}.${name}: missing value`);
-      else items.push({ name, value: v });
-    }
-  } else {
-    skipped.push(`${kind}: expected an array of {name, value}`);
-  }
-  return { items, skipped };
-}
-
-function normalizeOrigin(input: string): string | null {
-  try {
-    const u = new URL(input.trim());
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    return u.origin;
-  } catch {
-    return null;
-  }
-}
 
 function listSkipped(lines: string[], reasons: string[], max = 10): void {
   for (const r of reasons.slice(0, max)) lines.push(`  - ${r}`);
@@ -435,7 +228,7 @@ export const setStorageState = defineTool({
       const valid: CookieParam[] = [];
       const skipped: string[] = [];
       cookieEntries.forEach((entry, i) => {
-        const res = cookieParam(entry, ctx);
+        const res = cookieParam(entry, ctx.config);
         if (typeof res === 'string') skipped.push(`cookie #${i + 1} ${res}`);
         else valid.push(res);
       });
@@ -482,9 +275,7 @@ export const setStorageState = defineTool({
           ...local.items.map((it) => ({ ...it, session: false })),
           ...session.items.map((it) => ({ ...it, session: true })),
         ];
-        const res = entries.length
-          ? await current.tab.callFunction<{ applied: number; errors: string[] }>(APPLY_STORAGE, [entries], { quiet: ctx.config.log.redactSecrets })
-          : { applied: 0, errors: [] };
+        const res = await applyStorage(current.tab, entries, { quiet: ctx.config.log.redactSecrets });
         const skipped = [...local.skipped, ...session.skipped, ...(res.errors ?? [])];
         lines.push(
           `Storage for ${origin}: set ${local.items.length} localStorage and ${session.items.length} sessionStorage item(s)` +

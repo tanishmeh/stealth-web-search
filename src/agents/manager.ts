@@ -2,14 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Browser } from '../browser/browser.ts';
+import { ToolError } from '../browser/errors.ts';
 import type { BrowserRegistry } from '../browser/registry.ts';
 import type { Logger } from '../logger.ts';
 import type { McpDeps } from '../mcp/server.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
+import { SnapshotConflictError, SnapshotEmptyError, domainsText } from '../snapshots/service.ts';
+import { SnapshotError, SnapshotNotFoundError } from '../snapshots/store.ts';
+import { MAX_WAITING } from '../util/limits.ts';
 import { summarize } from '../util/summarize.ts';
+import { inlineJson, replyArguments } from './format.ts';
 import { KINDS } from './kinds.ts';
 import { ChatClient, LlmAbortedError } from './llm.ts';
-import { AgentRun, runAgentLoop, type AgentInput, type AgentKind, type RunEnv } from './run.ts';
+import { AgentRun, runAgentLoop, type AgentInput, type AgentKind, type AgentQuestion, type RunEnv, type RunStatus } from './run.ts';
+
+export { MAX_WAITING };
 
 const MAX_QUEUED = 20;
 const KEEP_RUNS = 100;
@@ -21,7 +28,8 @@ export class AgentBusyError extends Error {}
  * Starts and tracks sub-agent runs. Each run gets its own isolated browser (a separate Obscura
  * CDP connection: own tabs, cookies and storage), visible on the dashboard, and talks to the
  * configured OpenAI-compatible model. At most AGENT_MAX_CONCURRENT runs work at once; the rest
- * wait in order.
+ * wait in order. A run paused on a question to the host gives its slot up (keeping its browser) and
+ * gets one back, ahead of the queue, once the question is answered or expires.
  */
 export class AgentManager {
   readonly llm: ChatClient;
@@ -31,7 +39,10 @@ export class AgentManager {
   private readonly log: Logger;
   private readonly runs = new Map<string, AgentRun>();
   private readonly queue: AgentRun[] = [];
-  private running = 0;
+  /** Runs holding one of the AGENT_MAX_CONCURRENT slots. */
+  private readonly holders = new Set<AgentRun>();
+  /** Paused runs whose question closed, waiting for a slot: served before the queue. */
+  private readonly resumeWaiters: Array<{ run: AgentRun; grant: () => void }> = [];
   private shuttingDown = false;
   private readonly transcriptDir: string;
 
@@ -42,6 +53,12 @@ export class AgentManager {
     this.log = deps.log.child({ component: 'agent' });
     this.llm = new ChatClient(deps.config.agent, deps.log);
     this.transcriptDir = path.join(deps.config.log.dir, 'agent-runs');
+    // a snapshot the user deleted is never saved again by a run that uses it
+    deps.snapshots?.on('deleted', (name: string) => {
+      for (const run of this.runs.values()) {
+        if (!run.done && (run.snapshot?.name === name || run.snapshotSaved?.name === name)) run.deletedSnapshots.add(name);
+      }
+    });
   }
 
   start(kind: AgentKind, input: AgentInput, client: string | null): AgentRun {
@@ -59,12 +76,12 @@ export class AgentManager {
         kind,
         client,
         input: summarize(input, { maxString: 1_000 }),
-        queuePosition: this.running >= this.deps.config.agent.maxConcurrent ? this.queue.length + 1 : 0,
+        queuePosition: this.holders.size >= this.deps.config.agent.maxConcurrent ? this.queue.length + 1 : 0,
       },
       `agent run ${run.id} (${kind}) created`,
     );
     this.queue.push(run);
-    run.activity = this.running >= this.deps.config.agent.maxConcurrent ? `queued (position ${this.queue.length})` : 'starting';
+    run.activity = this.holders.size >= this.deps.config.agent.maxConcurrent ? `queued (position ${this.queue.length})` : 'starting';
     run.update();
     this.pump();
     return run;
@@ -79,20 +96,41 @@ export class AgentManager {
     return [...this.runs.values()].reverse();
   }
 
+  /** Runs holding a slot (a run paused on a question does not). */
   get activeCount(): number {
-    return this.running;
+    return this.holders.size;
   }
 
   get queuedCount(): number {
     return this.queue.length;
   }
 
+  /** Runs paused on an unanswered question. */
+  get waitingCount(): number {
+    let n = 0;
+    for (const run of this.runs.values()) if (run.isWaiting) n++;
+    return n;
+  }
+
+  /** Runs paused on an unanswered question, most recent first. */
+  waitingRuns(): AgentRun[] {
+    return this.list().filter((r) => r.isWaiting);
+  }
+
   /**
-   * Wait until the run is done, `ms` pass, or `signal` aborts. `onProgress` is called when the
-   * step changes and every few seconds while it thinks.
+   * Wait until the run is done, `ms` pass, or `signal` aborts; with returnOnQuestion (the default)
+   * also as soon as the run waits for the host's answer. `onProgress` is called when the step changes
+   * and every few seconds while it thinks.
    */
-  async wait(run: AgentRun, ms: number, onProgress?: (run: AgentRun) => void, signal?: AbortSignal): Promise<void> {
+  async wait(
+    run: AgentRun,
+    ms: number,
+    onProgress?: (run: AgentRun) => void,
+    signal?: AbortSignal,
+    opts: { returnOnQuestion?: boolean } = {},
+  ): Promise<void> {
     if (ms <= 0) return;
+    const onQuestion = opts.returnOnQuestion ?? true;
     await new Promise<void>((resolve) => {
       let lastStep = -1;
       let lastAt = 0;
@@ -109,6 +147,8 @@ export class AgentManager {
         if (onProgress && !run.done) onProgress(run);
       }, 10_000);
       const off = run.onUpdate((r) => {
+        // a question for the host: the caller has to answer it, so stop waiting
+        if (onQuestion && r.isWaiting) return finish();
         if (r.done) return;
         if (onProgress && (r.step !== lastStep || Date.now() - lastAt > 5_000)) {
           lastStep = r.step;
@@ -117,6 +157,7 @@ export class AgentManager {
         }
       });
       if (signal?.aborted) return finish();
+      if (onQuestion && run.isWaiting) return finish();
       signal?.addEventListener('abort', finish, { once: true });
       void run.settled.then(finish);
       if (onProgress && !run.done) {
@@ -126,6 +167,40 @@ export class AgentManager {
         onProgress(run);
       }
     });
+  }
+
+  /**
+   * The host's answer to a run's pending question (agent_reply). The question is closed and the run
+   * is running again before this returns, so a wait right after it never reports the same question.
+   */
+  reply(id: string, questionId: string, answer: string, opts: { secret?: boolean; client: string | null }): { run: AgentRun; question: AgentQuestion } {
+    const run = this.get(id);
+    if (!run) throw new ToolError(`No agent run ${JSON.stringify(id)}. Recent runs: ${this.list().slice(0, 10).map((r) => r.id).join(', ') || 'none'}`);
+    if (run.done) throw new ToolError(`Run ${run.id} already ${run.status}; it takes no answers. agent_status has its result.`);
+    if (run.abort.signal.aborted) throw new ToolError(`Run ${run.id} is being cancelled; it takes no answers.`);
+    const qid = questionId.trim();
+    const pending = run.question;
+    if (pending && pending.id === qid) {
+      const question = run.closeQuestion('answered', { answer, secret: opts.secret, by: opts.client })!;
+      this.log.info(
+        { runId: run.id, questionId: question.id, secret: question.secret, answerChars: answer.length, client: opts.client },
+        `agent run ${run.id}: question ${question.id} answered`,
+      );
+      return { run, question };
+    }
+    const earlier = run.questions.find((q) => q.id === qid);
+    if (pending) {
+      // never apply an answer to another question than the one it was meant for
+      const now = `run ${run.id} now asks ${pending.id}: ${JSON.stringify(pending.text)}. Answer ${pending.id} with agent_reply ${inlineJson(replyArguments(run, pending, '...'))}`;
+      throw new ToolError(earlier ? `Question ${qid} is closed; ${now}` : `Run ${run.id} has no question ${JSON.stringify(qid)}; ${now}`);
+    }
+    if (earlier?.status === 'expired') {
+      throw new ToolError(`Question ${qid} expired at ${earlier.expiresAt} without an answer; the run continued without it. Use agent_wait for its result.`);
+    }
+    if (earlier?.status === 'answered') {
+      throw new ToolError(`Question ${qid} was already answered; the run continued with that answer. Use agent_wait for its result.`);
+    }
+    throw new ToolError(`Run ${run.id} is not waiting for an answer (status ${run.status}). Use agent_wait for its result.`);
   }
 
   cancel(id: string, reason = 'cancelled by the host'): AgentRun | null {
@@ -146,18 +221,58 @@ export class AgentManager {
   }
 
   private pump(): void {
-    while (this.running < this.deps.config.agent.maxConcurrent && this.queue.length > 0) {
+    const max = this.deps.config.agent.maxConcurrent;
+    // runs resuming after a question go first: they already have a browser and a job half done
+    while (this.holders.size < max && this.resumeWaiters.length > 0) this.resumeWaiters.shift()!.grant();
+    let started = false;
+    while (this.holders.size < max && this.queue.length > 0) {
       const run = this.queue.shift()!;
-      this.running++;
-      void this.execute(run).finally(() => {
-        this.running--;
-        this.queue.forEach((r, i) => {
-          r.activity = `queued (position ${i + 1})`;
-          r.update();
-        });
-        this.pump();
+      this.holders.add(run);
+      started = true;
+      void this.execute(run).finally(() => this.releaseSlot(run));
+    }
+    if (started) {
+      this.queue.forEach((r, i) => {
+        r.activity = `queued (position ${i + 1})`;
+        r.update();
       });
     }
+  }
+
+  /** Give the run's slot up (a no-op when it holds none) and start whoever is next. */
+  private releaseSlot(run: AgentRun): void {
+    if (!this.holders.delete(run)) return;
+    this.pump();
+  }
+
+  /**
+   * A slot for a paused run whose question closed, ahead of queued runs (never through this.queue:
+   * cancel() treats queued runs as never started). False when the run is cancelled first.
+   */
+  private acquireSlot(run: AgentRun, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+    if (this.holders.has(run)) return Promise.resolve(true);
+    if (this.holders.size < this.deps.config.agent.maxConcurrent && this.resumeWaiters.length === 0) {
+      this.holders.add(run);
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      const waiter = {
+        run,
+        grant: () => {
+          signal.removeEventListener('abort', onAbort);
+          this.holders.add(run);
+          resolve(true);
+        },
+      };
+      const onAbort = () => {
+        const i = this.resumeWaiters.indexOf(waiter);
+        if (i >= 0) this.resumeWaiters.splice(i, 1);
+        resolve(false);
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.resumeWaiters.push(waiter);
+    });
   }
 
   private async execute(run: AgentRun): Promise<void> {
@@ -167,13 +282,29 @@ export class AgentManager {
     run.status = 'running';
     run.startedAt = new Date().toISOString();
     run.activity = 'starting';
-    const browser = new Browser(config, this.deps.log, this.obscura, this.deps.hub, { id: `agent-${run.id}` });
+    // the agent browser's CDP log masks the host's secret answers too: a code typed into a page comes
+    // back whenever the page is read
+    const scrubbed = (value: unknown) => run.scrubbed(value);
+    const browserLog = this.deps.log.child({}, { serializers: { params: scrubbed, result: scrubbed, error: scrubbed, url: scrubbed } });
+    const browser = new Browser(config, browserLog, this.obscura, this.deps.hub, { id: `agent-${run.id}` });
     run.browserId = browser.id;
     this.registry.add(browser, { label: `${spec.label[0].toUpperCase()}${spec.label.slice(1)} agent ${run.id}`, kind: 'agent', runId: run.id });
     run.update();
-    const env: RunEnv = { deps: this.deps, config, llm: this.llm, browser, log, forced: false };
-    log.info({ browserId: browser.id, maxSteps: run.input.maxSteps }, `agent run ${run.id} started`);
+    const env: RunEnv = {
+      deps: this.deps,
+      config,
+      llm: this.llm,
+      browser,
+      log,
+      forced: false,
+      pause: () => this.releaseSlot(run),
+      resume: (signal) => this.acquireSlot(run, signal),
+      waitingCount: () => this.waitingCount,
+    };
+    log.info({ browserId: browser.id, maxSteps: run.input.maxSteps, snapshot: run.input.snapshot }, `agent run ${run.id} started`);
     try {
+      // before the loop: the prompt shows the saved sign-in the browser starts with
+      if (run.input.snapshot) await this.loadSnapshot(run, browser);
       await runAgentLoop(run, spec, env);
       await spec.finalize?.(run, env);
       run.finish(run.outcome ? 'completed' : 'failed', run.outcome ? null : 'the agent ended without a result');
@@ -181,10 +312,14 @@ export class AgentManager {
       if (spec.finalize && !run.abort.signal.aborted) await spec.finalize(run, env).catch(() => undefined);
       if (err instanceof LlmAbortedError || run.abort.signal.aborted) run.finish('cancelled', run.error ?? 'cancelled');
       else {
-        log.error({ err: (err as Error).message }, `agent run ${run.id} failed`);
+        log.error({ err: run.scrub((err as Error).message) }, `agent run ${run.id} failed`);
         run.finish('failed', (err as Error).message);
       }
     } finally {
+      // a renewed sign-in dies with the browser: keep it first (only after a successful run)
+      if (run.snapshot && (run.status as RunStatus) === 'completed' && run.outcome?.success && !run.abort.signal.aborted) {
+        await this.refreshSnapshot(run, browser, log).catch((err) => log.warn({ err: run.scrub((err as Error).message) }, 'could not refresh the snapshot'));
+      }
       // a cancelled run may still have a browser call running: closing the browser ends it
       await browser.dispose().catch(() => undefined);
       this.registry.close(browser.id);
@@ -193,16 +328,21 @@ export class AgentManager {
       {
         status: run.status,
         success: run.outcome?.success ?? null,
-        steps: run.step,
+        steps: run.stepsUsed,
+        questions: run.questions.length || undefined,
+        waitedMs: run.pausedMs || undefined,
         durationMs: run.durationMs,
         usage: run.usage,
         compactions: run.compactions,
-        error: run.error,
-        outcome: summarize(run.outcome, { maxString: 1_000 }),
+        // the host's secret answers (one-time codes) are masked in whatever the agent reported
+        error: run.error && run.scrub(run.error),
+        outcome: summarize(run.scrubbed(run.outcome), { maxString: 1_000 }),
         sources: run.sources.map((s) => s.url),
         script: run.scriptName ? { name: run.scriptName, version: run.scriptVersion, tests: run.tests.map((t) => t.ok) } : undefined,
+        snapshot: run.snapshot ? { name: run.snapshot.name, version: run.snapshot.version } : undefined,
+        snapshotSaved: run.snapshotSaved ?? undefined,
       },
-      `agent run ${run.id} ${run.status} (${run.step} steps, ${Math.round(run.durationMs / 1000)} s)`,
+      `agent run ${run.id} ${run.status} (${run.stepsUsed} steps, ${Math.round(run.durationMs / 1000)} s)`,
     );
     if (config.agent.transcripts) await this.writeTranscript(run).catch((err) => log.warn({ err: (err as Error).message }, 'could not write the agent transcript'));
     run.compact();
@@ -210,11 +350,59 @@ export class AgentManager {
     run.settle();
   }
 
+  /** Load the run's snapshot into its new browser, and have it re-applied if the engine restarts. */
+  private async loadSnapshot(run: AgentRun, browser: Browser): Promise<void> {
+    const name = run.input.snapshot!;
+    const svc = this.deps.snapshots;
+    if (!svc) throw new Error(`snapshot "${name}" cannot be loaded: snapshots are not available on this server`);
+    run.activity = `loading snapshot ${name}`;
+    run.update();
+    let meta;
+    try {
+      ({ meta } = await svc.apply(browser, name));
+    } catch (err) {
+      const why = err instanceof SnapshotError ? ' (deleted or SNAPSHOTS_KEY changed since agent_run was called)' : '';
+      throw new Error(`snapshot "${name}" could not be loaded: ${(err as Error).message}${why}`);
+    }
+    run.snapshot = { name, version: meta.version, description: meta.description, cookieDomains: meta.cookieDomains };
+    svc.installReconnect(browser, name);
+    run.update();
+  }
+
+  /**
+   * Save the sign-in of a run that completed successfully back into the snapshot it started with (the
+   * site may have renewed it), unless the host turned that off, the user deleted the snapshot, another
+   * browser saved a newer version, the browser was reset, or it holds no sign-in cookies any more.
+   */
+  private async refreshSnapshot(run: AgentRun, browser: Browser, log: Logger): Promise<void> {
+    const svc = this.deps.snapshots;
+    const snap = run.snapshot!;
+    if (!svc || run.input.updateSnapshot === false) return;
+    const skip = (reason: string) => {
+      log.info({ snapshot: snap.name, reason }, `snapshot ${snap.name} not refreshed`);
+      // a sign-in the run saved itself stays reported
+      if (!run.snapshotSaved || run.snapshotSaved.action === 'skipped') run.snapshotSaved = { name: snap.name, version: null, action: 'skipped', reason };
+    };
+    if (run.deletedSnapshots.has(snap.name)) return skip('the user deleted it during the run');
+    const loaded = browser.loadedSnapshots.get(snap.name);
+    if (!loaded || !browser.connected) return skip('the browser was reset during the run');
+    try {
+      const out = await browser.mutex.run(() => svc.update(browser, snap.name, { mode: 'refresh', by: { runId: run.id }, expectVersion: loaded.version }));
+      run.snapshotSaved = { name: snap.name, version: out.meta.version, action: 'refreshed' };
+    } catch (err) {
+      if (err instanceof SnapshotConflictError) return skip(`v${err.current.version} was saved meanwhile`);
+      if (err instanceof SnapshotNotFoundError) return skip('the user deleted it during the run');
+      if (err instanceof SnapshotEmptyError) return skip(`the agent's browser had no sign-in cookies for ${domainsText(snap.cookieDomains)} at the end`);
+      return skip(run.scrub((err as Error).message));
+    }
+  }
+
   private async writeTranscript(run: AgentRun): Promise<void> {
     await mkdir(this.transcriptDir, { recursive: true });
     const stamp = run.createdAt.replace(/[:.]/g, '-');
     const file = path.join(this.transcriptDir, `${stamp}_${run.kind}_${run.id}.json`);
-    const body = {
+    // the transcript is a plain file: the host's secret answers are masked everywhere in it
+    const body = run.scrubbed({
       summary: run.summary(),
       input: run.input,
       outcome: run.outcome,
@@ -223,14 +411,18 @@ export class AgentManager {
       sources: run.sources,
       visited: [...run.visited.entries()].map(([url, v]) => ({ url, ...v })),
       script: run.scriptName ? { name: run.scriptName, version: run.scriptVersion, tests: run.tests } : null,
+      questions: run.questionLog(),
+      waitedMs: run.pausedMs,
       steps: run.steps,
-      // tool-call arguments as logged: values typed into password-like fields stay masked
-      messages: run.messages.map((m) =>
-        m.tool_calls?.some((c) => run.redactedCalls.has(c.id))
+      // tool-call arguments as logged (values typed into password-like fields stay masked), and tool
+      // results as shown (a secret answer masked)
+      messages: run.messages.map((m) => {
+        if (m.role === 'tool' && m.tool_call_id && run.redactedResults.has(m.tool_call_id)) return { ...m, content: run.redactedResults.get(m.tool_call_id)! };
+        return m.tool_calls?.some((c) => run.redactedCalls.has(c.id))
           ? { ...m, tool_calls: m.tool_calls.map((c) => (run.redactedCalls.has(c.id) ? { ...c, function: { ...c.function, arguments: run.redactedCalls.get(c.id)! } } : c)) }
-          : m,
-      ),
-    };
+          : m;
+      }),
+    });
     await writeFile(file, `${JSON.stringify(body, null, 2)}\n`, 'utf8');
     run.transcriptFile = file;
     const files = (await readdir(this.transcriptDir)).filter((f) => f.endsWith('.json')).sort();

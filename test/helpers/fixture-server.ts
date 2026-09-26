@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -11,6 +12,8 @@ export interface FixtureServer {
   baseUrl: string;
   port: number;
   requests: Array<{ method: string; url: string; body: string; headers: http.IncomingHttpHeaders }>;
+  /** Sign-ins issued by POST /login, by session token: tests check these values never leak. */
+  sessions: Map<string, { user: string; profile: string }>;
   close: () => Promise<void>;
 }
 
@@ -23,12 +26,24 @@ export interface FixtureServer {
  *   /redirect?to=U  302 to U
  *   /status/N       responds with HTTP status N
  *   /set-cookie?name=&value=   sets a cookie and shows document.cookie (&httponly=1 adds HttpOnly, &reverse=1 stores the reversed value)
+ *   /login          GET: a sign-in form (#user, #password, #signin). POST: signs in with a server-issued
+ *                   session cookie (HttpOnly) and puts a random "profile" into localStorage (no secret in a URL)
+ *   /account        #who says "Signed in as <user>" for a valid session cookie, else "Signed out"; #profile says
+ *                   whether localStorage holds that session's profile ("profile: restored"), never the value
+ *   /logout         clears the session cookie in this browser (the session stays valid on the server, so a
+ *                   saved copy of the cookie still signs in)
  *
  * FIXTURE_HOST overrides the host in baseUrl (e.g. host.docker.internal when
  * the server under test runs in a container).
  */
 export async function startFixtureServer(): Promise<FixtureServer> {
   const requests: FixtureServer['requests'] = [];
+  const sessions: FixtureServer['sessions'] = new Map();
+  const escape = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
+  const sessionOf = (req: http.IncomingMessage) => {
+    const token = /(?:^|;\s*)session=([^;]*)/.exec(req.headers.cookie ?? '')?.[1];
+    return token ? sessions.get(token) : undefined;
+  };
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
@@ -42,7 +57,6 @@ export async function startFixtureServer(): Promise<FixtureServer> {
       };
       try {
         if (url.pathname === '/echo') {
-          const escape = (s: string) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]!);
           return html(
             200,
             `<!doctype html><title>Echo</title><h1>Echo</h1><p id="method">${req.method}</p><p id="query">${escape(url.search)}</p><pre id="body">${escape(body)}</pre>`,
@@ -74,6 +88,40 @@ export async function startFixtureServer(): Promise<FixtureServer> {
             'Set-Cookie': `${name}=${value}; Path=/${url.searchParams.get('httponly') === '1' ? '; HttpOnly' : ''}`,
           });
         }
+        if (url.pathname === '/login' && req.method === 'POST') {
+          const user = new URLSearchParams(body).get('user')?.trim();
+          if (!user) return html(400, '<!doctype html><title>Sign in</title><p id="who">Missing user</p>');
+          const token = `sess-${randomBytes(12).toString('hex')}`;
+          const profile = `prof-${randomBytes(12).toString('hex')}`;
+          sessions.set(token, { user, profile });
+          // the profile goes into localStorage: site storage a saved sign-in must keep
+          return html(
+            200,
+            `<!doctype html><title>Signed in</title><h1>Welcome</h1><p id="who">Signed in as ${escape(user)}</p><script>localStorage.setItem('profile', ${JSON.stringify(profile)})</script>`,
+            { 'Set-Cookie': `session=${token}; Path=/; HttpOnly` },
+          );
+        }
+        if (url.pathname === '/login') {
+          return html(
+            200,
+            '<!doctype html><title>Sign in</title><h1>Sign in</h1><form action="/login" method="post">' +
+              '<label>User <input id="user" name="user"></label><label>Password <input id="password" name="password" type="password"></label>' +
+              '<button id="signin" type="submit">Sign in</button></form>',
+          );
+        }
+        if (url.pathname === '/account') {
+          const session = sessionOf(req);
+          // the page tells whether the profile is there, never its value: page text reaches the logs
+          return html(
+            200,
+            `<!doctype html><title>Account</title><h1>Account</h1><p id="who">${session ? `Signed in as ${escape(session.user)}` : 'Signed out'}</p><p id="profile"></p>` +
+              `<script>var v = localStorage.getItem('profile'); var want = ${JSON.stringify(session?.profile ?? null)};` +
+              `document.getElementById('profile').textContent = v === null ? 'profile: none' : v === want ? 'profile: restored' : 'profile: other';</script>`,
+          );
+        }
+        if (url.pathname === '/logout') {
+          return html(200, '<!doctype html><title>Signed out</title><p id="who">Signed out</p>', { 'Set-Cookie': 'session=; Path=/; Max-Age=0' });
+        }
         const file = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/+/, '');
         const resolved = path.resolve(SITE, file);
         if (!resolved.startsWith(SITE)) return html(403, 'forbidden');
@@ -93,6 +141,7 @@ export async function startFixtureServer(): Promise<FixtureServer> {
     baseUrl: `http://${host}:${port}`,
     port,
     requests,
+    sessions,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }

@@ -11,7 +11,7 @@
    3. Primitives (icon, dot, spinner, tag)     11. Network
    4. Controls                                 12. Logs
    5. App shell (top bar, layout, status bar)  13. Sessions
-   6. Pane anatomy                             14. Agents and stored scripts
+   6. Pane anatomy                             14. Agents, stored scripts, snapshots
    7. Live view                                15. Code and JSON blocks
    8. Activity                                 16. Responsive, fullscreen, motion
    ========================================================================== */
@@ -916,9 +916,10 @@ body.resizing {
   font-weight: 400;
 }
 
-/* a count stays neutral; a 5px dot says the list holds errors or warnings */
+/* a count stays neutral; a 5px dot says the list holds errors or warnings (accent: a run waits for an answer) */
 .count.err::after,
-.count.warn::after {
+.count.warn::after,
+.count.ask::after {
   content: "";
   display: inline-block;
   width: 5px;
@@ -931,6 +932,10 @@ body.resizing {
 
 .count.warn::after {
   background: var(--warn);
+}
+
+.count.ask::after {
+  background: var(--accent);
 }
 
 .toolbar {
@@ -1802,6 +1807,17 @@ body.resizing {
   display: none;
 }
 
+/* runs working and runs waiting for an answer: the spinner, then the still dot */
+#count-agents.ask {
+  color: var(--accent);
+}
+
+#count-agents.warn.ask::after {
+  display: inline-block;
+  margin-left: 0;
+  background: var(--accent);
+}
+
 #count-agents.warn::before {
   content: "";
   width: 9px;
@@ -2435,7 +2451,7 @@ kbd {
   border-bottom: 1px solid var(--line-subtle);
 }
 
-.agent-card:has(.agent-status[data-tone="live"]) {
+.agent-card:has(.agent-status:is([data-tone="live"], [data-tone="accent"])) {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -2488,6 +2504,11 @@ kbd {
 
 .agent-status[data-tone="muted"] {
   color: var(--fg-muted);
+}
+
+/* waiting for the host's answer: the word takes the accent, the dot stays still (nothing is working) */
+.agent-status[data-tone="accent"] {
+  color: var(--accent);
 }
 
 .agent-kind {
@@ -2587,6 +2608,107 @@ kbd {
   height: 12px;
 }
 
+/* the saved sign-in a run started with, and whether it was refreshed at the end */
+.agent-snapshot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.agent-snapshot .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-snapshot.warn {
+  color: var(--warn);
+}
+
+/* a waiting run's question: tinted with the accent, the one thing on the card that needs someone */
+.agent-question {
+  display: grid;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-3) var(--s-4) var(--s-3) 10px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.agent-question-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1) var(--s-3);
+  min-width: 0;
+  color: var(--accent);
+  font-size: var(--fs-meta);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+}
+
+.agent-question-head .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.agent-question-secret {
+  padding: 0 var(--s-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-tag);
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.agent-question-id {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.agent-question-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--fg-strong);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  line-clamp: 8;
+}
+
+.agent-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.agent-option {
+  max-width: 100%;
+  padding: 0 var(--s-3);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-tag);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-size: var(--fs-meta);
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-question-meta {
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
 .agent-result {
   display: -webkit-box;
   padding: 1px var(--s-4);
@@ -2607,7 +2729,8 @@ kbd {
   line-clamp: 3;
 }
 
-.agent-error {
+.agent-error,
+.snapshot-error {
   padding: var(--s-2) var(--s-4);
   border-left: 2px solid var(--err);
   background: var(--err-bg);
@@ -2795,6 +2918,79 @@ kbd {
   color: var(--fg-muted);
 }
 
+/* questions the run asked, in its details */
+.agent-questions {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-questions > li {
+  display: grid;
+  gap: var(--s-1);
+  min-width: 0;
+  padding: var(--s-3) 0;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.agent-questions > li:last-child {
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.agent-q-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--s-4);
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-meta);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.agent-q-head b {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.agent-q-text,
+.agent-q-options {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-answer {
+  padding: 1px var(--s-4);
+  border-left: 2px solid var(--line-strong);
+  overflow-wrap: anywhere;
+}
+
+.agent-answer-label {
+  margin-right: var(--s-3);
+  color: var(--fg-muted);
+  font-size: var(--fs-meta);
+}
+
+.agent-answer[data-status="answered"] {
+  border-left-color: var(--ok);
+}
+
+.agent-answer[data-status="pending"] {
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+
+.agent-answer[data-status="expired"] {
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
+.agent-answer[data-status="cancelled"] {
+  color: var(--fg-muted);
+}
+
 /* stored scripts */
 .section-title {
   display: flex;
@@ -2871,6 +3067,190 @@ kbd {
   white-space: normal;
   overflow: visible;
   overflow-wrap: anywhere;
+}
+
+/* saved sign-ins (Snapshots tab): name, cookie pill, cookie domains, Delete; then description and facts */
+.snapshots-scroll {
+  line-height: var(--lh-text);
+}
+
+#snapshots-empty {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.snapshot-row {
+  display: grid;
+  gap: var(--s-1);
+  min-width: 0;
+  padding: var(--s-3) var(--s-5) var(--s-4);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.snapshot-row.confirming {
+  background: var(--bg-open);
+}
+
+.snapshot-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1) var(--s-4);
+  min-width: 0;
+  min-height: var(--h-control);
+}
+
+.snapshot-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-strong);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-pill[data-tone="ok"] {
+  color: var(--fg);
+}
+
+.snapshot-domains {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: var(--fs-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-actions {
+  display: flex;
+  gap: var(--s-2);
+  margin-left: auto;
+}
+
+.snapshot-actions .chip {
+  height: 22px;
+}
+
+.snapshot-actions .chip[aria-expanded="true"] {
+  background: var(--bg-selected);
+}
+
+.snapshot-actions .chip:hover .icon {
+  color: var(--err);
+}
+
+.snapshot-desc {
+  min-width: 0;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.snapshot-note {
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.snapshot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--s-5);
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshot-meta > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* loaded in a browser: those sign-ins are live there */
+.snapshot-loaded {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s-3);
+  color: var(--accent);
+}
+
+.snapshot-loaded::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  align-self: center;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* inline delete confirmation */
+.snapshot-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3) var(--s-5);
+  margin-top: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-left: 2px solid var(--err);
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+.snapshot-confirm-text {
+  display: grid;
+  flex: 1 1 280px;
+  gap: var(--s-1);
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.snapshot-confirm-use {
+  font-weight: 600;
+}
+
+.snapshot-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.snapshot-confirm .chip {
+  height: 24px;
+}
+
+/* the destructive button: filled with the error color, text in the panel color (legible in both themes) */
+.chip.danger {
+  border-color: transparent;
+  background: var(--err);
+  color: var(--bg-panel);
+  font-weight: 500;
+}
+
+.chip.danger .icon {
+  color: currentColor;
+}
+
+.chip.danger:hover {
+  background: color-mix(in srgb, var(--err) 84%, var(--fg-strong));
+}
+
+.chip.danger[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.snapshot-error {
+  margin-top: var(--s-2);
+}
+
+.view-foot .warn,
+.view-foot .warn b {
+  color: var(--warn);
 }
 
 /* 15. Code and JSON blocks ================================================ */
@@ -3033,6 +3413,11 @@ kbd {
     row-gap: var(--s-2);
   }
 
+  /* a toolbar note wraps instead of losing its end */
+  .inspector-tools .tools-note {
+    white-space: normal;
+  }
+
   .search {
     flex: 1 1 180px;
   }
@@ -3101,6 +3486,11 @@ kbd {
 
   .agent-details {
     padding-left: var(--s-4);
+  }
+
+  .snapshot-domains {
+    flex-basis: 100%;
+    order: 5;
   }
 
   .script-row {
@@ -3231,7 +3621,8 @@ kbd {
   }
 
   .itab .count.err::after,
-  .itab .count.warn::after {
+  .itab .count.warn::after,
+  .itab .count.ask::after {
     margin-left: 0;
   }
 }
@@ -3246,7 +3637,9 @@ kbd {
   }
 
   .browser-pick .select,
-  .agent-actions .chip {
+  .agent-actions .chip,
+  .snapshot-actions .chip,
+  .snapshot-confirm .chip {
     height: 32px;
   }
 
@@ -3313,5 +3706,22 @@ kbd {
     background: HighlightText;
     -webkit-mask: var(--checkmark) center / 11px 11px no-repeat;
     mask: var(--checkmark) center / 11px 11px no-repeat;
+  }
+
+  /* a waiting run and a loaded snapshot keep their marker; the question and the delete prompt keep their edge */
+  .agent-status[data-tone="accent"] .dot,
+  .count.ask::after,
+  .snapshot-loaded::before {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+
+  .agent-question,
+  .snapshot-confirm {
+    border-left-color: Highlight;
+  }
+
+  .chip.danger {
+    border-color: ButtonText;
   }
 }

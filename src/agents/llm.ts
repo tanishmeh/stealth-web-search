@@ -61,6 +61,8 @@ export interface CompleteOptions {
   logContext?: Record<string, unknown>;
   /** Mask secrets in the logged tool-call arguments (e.g. text typed into a password field). */
   redactToolCall?: (name: string, args: unknown) => unknown;
+  /** Mask known secret values (e.g. a code the host gave a sub-agent) in the logged answer text. */
+  scrubLog?: (text: string) => string;
 }
 
 export class LlmError extends Error {
@@ -305,7 +307,7 @@ export class ChatClient {
           // the hook gets the raw text and parses it the way the agent loop does
           arguments: summarize(opts.redactToolCall ? opts.redactToolCall(c.name, c.arguments) : safeJson(c.arguments), { maxString: 300 }),
         })),
-        content: out.content ? out.content.slice(0, 500) : undefined,
+        content: out.content ? (opts.scrubLog ? opts.scrubLog(out.content) : out.content).slice(0, 500) : undefined,
         reasoningChars: out.reasoning.length,
         ...opts.logContext,
       },

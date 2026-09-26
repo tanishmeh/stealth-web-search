@@ -5,6 +5,7 @@ import { after, before, describe, test } from 'node:test';
 import { startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { startTestServer, type TestServer } from '../helpers/harness.ts';
+import { accountPage, signIn } from '../helpers/sign-in.ts';
 
 /** Cross-cutting guarantees: secrets stay out of logs, rejected calls are recorded, refs survive SPA routing. */
 describe('hardening', () => {
@@ -93,6 +94,42 @@ describe('hardening', () => {
       assert.equal(rawLogs().includes('modern-cookie-secret-55'), false, 'cookie value leaked into logs via the modern-era response log');
     } finally {
       await client.close();
+    }
+  });
+
+  test('saved sign-ins (snapshots) never put a cookie or storage value, or the storage seed script, into the logs or the dashboard', { skip: !!process.env.MCP_URL }, async () => {
+    const name = `hardening-${Date.now().toString(36)}`;
+    const s = await signIn(srv, fx, 'harden');
+    try {
+      const saved = await srv.call('snapshot_save', { name, description: 'Fixture shop — hardening' });
+      assert.equal(saved.isError, false, saved.text);
+      await srv.call('snapshot_list');
+      await srv.call('snapshot_describe', { name, description: 'Fixture shop — hardening account' });
+      await srv.call('browser_navigate', { url: `${fx.baseUrl}/logout` });
+      const loaded = await srv.call('snapshot_load', { name });
+      assert.equal(loaded.isError, false, loaded.text);
+      // the seed script restored the storage value on this page load, and the saved cookie signed it in
+      assert.deepEqual(await accountPage(srv, fx), { who: 'Signed in as harden', profile: 'profile: restored' });
+      assert.equal((await srv.call('snapshot_save', { name })).isError, false, 'refreshed');
+      await settle();
+      const logs = rawLogs();
+      assert.equal(logs.includes(s.token), false, 'session cookie value leaked into logs');
+      assert.equal(logs.includes(s.profile), false, 'site storage value leaked into logs');
+      assert.equal(logs.includes('hasOwnProperty.call(seed'), false, 'the storage seed script (it embeds the values) was logged');
+      // the CDP calls that carry them are logged by name only
+      const seedCalls = srv.logs().filter((l) => l.component === 'cdp' && l.method === 'Page.addScriptToEvaluateOnNewDocument' && l.dir === 'out');
+      assert.ok(seedCalls.length >= 2, 'the seed was registered at the save and at the load');
+      assert.ok(seedCalls.every((l) => l.params === '[not logged]'));
+      const snapshotLogs = srv.logs().filter((l) => l.component === 'snapshots' && l.snapshot === name);
+      assert.ok(snapshotLogs.some((l) => /created/.test(l.msg)) && snapshotLogs.some((l) => /loaded/.test(l.msg)), 'saves and loads are logged by name and counts');
+      for (const route of ['/api/state', '/api/snapshots']) {
+        const text = await (await fetch(`${srv.baseUrl}${route}`)).text();
+        assert.equal(text.includes(s.token), false, `session cookie value in ${route}`);
+        assert.equal(text.includes(s.profile), false, `site storage value in ${route}`);
+      }
+    } finally {
+      await srv.call('snapshot_delete', { name });
+      await srv.call('browser_clear_cookies');
     }
   });
 

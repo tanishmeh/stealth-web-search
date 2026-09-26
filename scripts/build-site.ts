@@ -69,6 +69,7 @@ const GROUPS: Array<{ title: string; pages: Page[] }> = [
     title: 'Use',
     pages: [
       { src: 'docs/AGENTS.md', slug: 'agents', nav: 'Sub-agents and scripts' },
+      { src: 'docs/SNAPSHOTS.md', slug: 'snapshots', nav: 'Snapshots (saved sign-ins)' },
       { src: 'docs/TOOLS.md', slug: 'tools', nav: 'Tool reference' },
     ],
   },

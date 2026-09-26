@@ -8,6 +8,7 @@ import { loadConfig } from '../../src/config.ts';
 import { Hub, type FrameData } from '../../src/dashboard/hub.ts';
 import { registerDashboardRoutes } from '../../src/dashboard/routes.ts';
 import { LogTap } from '../../src/logger.ts';
+import { SnapshotNotFoundError } from '../../src/snapshots/store.ts';
 
 interface SseEvent {
   type: string;
@@ -274,6 +275,125 @@ describe('dashboard event stream memory bounds', () => {
     } finally {
       stream.close();
       await ctx.close();
+    }
+  });
+});
+
+describe('dashboard snapshot routes', () => {
+  /** Routes with a fake snapshot service that records deletions. */
+  async function startSnapshotRoutes(env: Record<string, string> = {}, withService = true) {
+    const ctx = createDeps();
+    const deleted: Array<[string, string | null]> = [];
+    const snapshots = {
+      list: async () => ({ snapshots: [{ name: 'shop', loaded_in: ['main'], active_in: ['main'] }], dir: '/data/snapshots', encrypted: true, unencrypted_count: 0 }),
+      delete: async (name: string, client: string | null) => {
+        if (name === 'missing') throw new SnapshotNotFoundError(`No snapshot named "${name}"`);
+        deleted.push([name, client]);
+        return { loadedIn: ['main'] };
+      },
+    };
+    const deps = { ...ctx.deps, config: loadConfig(env), snapshots: withService ? snapshots : null };
+    const app = express();
+    registerDashboardRoutes(app, deps as any);
+    const server = await new Promise<http.Server>((resolve) => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const port = (server.address() as AddressInfo).port;
+    const del = (name: string, headers: Record<string, string>) =>
+      new Promise<{ status: number; body: any }>((resolve, reject) => {
+        // node:http, so the test controls Host, Origin and Sec-Fetch-Site exactly as a browser would send them
+        const req = http.request({ host: '127.0.0.1', port, method: 'DELETE', path: `/api/snapshots/${name}`, headers }, (res) => {
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (c: string) => (text += c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text ? JSON.parse(text) : null }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+    const close = async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    };
+    return { port, deleted, del, close, own: `http://127.0.0.1:${port}` };
+  }
+
+  test('GET lists the snapshots, never cached; without the service the list is empty', async () => {
+    const r = await startSnapshotRoutes();
+    try {
+      const res = await fetch(`http://127.0.0.1:${r.port}/api/snapshots`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('cache-control'), 'no-store');
+      const body = await res.json();
+      assert.equal(body.snapshots[0].name, 'shop');
+      assert.equal(body.encrypted, true);
+    } finally {
+      await r.close();
+    }
+    const none = await startSnapshotRoutes({}, false);
+    try {
+      assert.deepEqual(await (await fetch(`http://127.0.0.1:${none.port}/api/snapshots`)).json(), { snapshots: [] });
+    } finally {
+      await none.close();
+    }
+  });
+
+  test('DELETE is refused without the custom header, without this server\'s Origin, or from another site', async () => {
+    const r = await startSnapshotRoutes();
+    try {
+      const refused: Array<[string, Record<string, string>, RegExp]> = [
+        ['no header', { Origin: r.own }, /X-SBM-Request/],
+        ['wrong header value', { 'X-SBM-Request': 'yes', Origin: r.own }, /X-SBM-Request/],
+        ['no Origin', { 'X-SBM-Request': '1' }, /Origin/],
+        ['opaque Origin', { 'X-SBM-Request': '1', Origin: 'null' }, /Origin/],
+        ['foreign Origin', { 'X-SBM-Request': '1', Origin: 'https://evil.example' }, /another site/],
+        ['same host, other port', { 'X-SBM-Request': '1', Origin: `http://127.0.0.1:${r.port + 1}` }, /another site/],
+        ['cross-site fetch', { 'X-SBM-Request': '1', Origin: r.own, 'Sec-Fetch-Site': 'cross-site' }, /Sec-Fetch-Site/],
+        ['same-site fetch', { 'X-SBM-Request': '1', Origin: r.own, 'Sec-Fetch-Site': 'same-site' }, /Sec-Fetch-Site/],
+      ];
+      for (const [label, headers, error] of refused) {
+        const res = await r.del('shop', headers);
+        assert.equal(res.status, 403, label);
+        assert.match(res.body.error, error, label);
+      }
+      assert.deepEqual(r.deleted, [], 'nothing was deleted');
+    } finally {
+      await r.close();
+    }
+  });
+
+  test('DELETE works from this server\'s own pages, ALLOWED_HOSTS and PUBLIC_URL; names are checked and normalized', async () => {
+    const r = await startSnapshotRoutes({ ALLOWED_HOSTS: 'dash.internal', PUBLIC_URL: 'https://mcp.example.com/base' });
+    try {
+      const ok = await r.del('shop', { 'X-SBM-Request': '1', Origin: r.own, 'Sec-Fetch-Site': 'same-origin' });
+      assert.equal(ok.status, 200);
+      assert.deepEqual(ok.body, { deleted: 'shop', loaded_in: ['main'] });
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: r.own, 'Sec-Fetch-Site': 'none' })).status, 200, 'typed into the address bar');
+      // behind a TLS proxy the Origin is the public host, not the Host header this server sees
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://mcp.example.com' })).status, 200);
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://dash.internal' })).status, 200);
+      assert.equal((await r.del('shop', { 'X-SBM-Request': '1', Origin: 'https://dash.internal:9443' })).status, 403, 'an allowed host on another port is another origin');
+      const own = { 'X-SBM-Request': '1', Origin: r.own };
+      assert.equal((await r.del('My%20Shop', own)).status, 200);
+      for (const bad of ['%2e%2e', '%2f', 'a%2fb', '%00', '-x', 'x'.repeat(65)]) {
+        const res = await r.del(bad, own);
+        assert.equal(res.status, 400, bad);
+        assert.match(res.body.error, /Invalid snapshot name/, bad);
+      }
+      assert.equal((await r.del('missing', own)).status, 404);
+      assert.deepEqual(
+        r.deleted.map(([name]) => name),
+        ['shop', 'shop', 'shop', 'shop', 'my-shop'],
+      );
+      assert.ok(r.deleted.every(([, client]) => client === 'dashboard'), 'logged as the dashboard');
+    } finally {
+      await r.close();
+    }
+    const none = await startSnapshotRoutes({}, false);
+    try {
+      assert.equal((await none.del('shop', { 'X-SBM-Request': '1', Origin: none.own })).status, 404);
+    } finally {
+      await none.close();
     }
   });
 });

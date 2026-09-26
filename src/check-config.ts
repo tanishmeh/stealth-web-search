@@ -73,6 +73,7 @@ async function main(): Promise<number> {
   row('private network', config.obscura.allowPrivateNetwork ? 'allowed' : 'blocked');
   row('stealth', config.obscura.stealth ? 'on' : 'off');
   row('log files', config.log.dir);
+  row('snapshots', `${config.snapshots.dir} (encryption key: ${config.snapshots.key ? 'set' : 'none'})`);
   print('Server');
 
   const a = config.agent;
@@ -97,6 +98,13 @@ async function main(): Promise<number> {
   row('context budget', `${a.contextTokens} tokens, up to ${a.maxOutputTokens} per response (${a.maxTokensField})`);
   row('streaming', a.streaming ? 'on' : 'off');
   row('concurrency', `${a.maxConcurrent} runs at a time, ${a.maxSteps} steps each`);
+  row(
+    'questions',
+    a.maxQuestions > 0
+      ? `up to ${a.maxQuestions} per run; a run waits ${Math.round(a.replyTimeoutMs / 60_000)} min for agent_reply`
+      : 'off (AGENT_MAX_QUESTIONS=0)',
+  );
+  row('save sign-ins', a.snapshotSave ? 'on (save_sign_in, when the snapshots tools are enabled)' : 'off (AGENT_SNAPSHOT_SAVE=false)');
   if (src.type === 'file' && src.available.length > 1) row('in the file', src.available.join(', '));
   print('Sub-agents: on');
   if (src.warnings.length) {

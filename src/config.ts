@@ -174,11 +174,22 @@ const EnvSchema = z.object({
   AGENT_MAX_RESULT_CHARS: int(12_000, 1_000),
   AGENT_SEARCH_ENGINE: str('duckduckgo'),
   AGENT_TRANSCRIPTS: bool(true),
+  // How long a run paused on a question (ask_host) waits for agent_reply before it continues without an answer.
+  AGENT_REPLY_TIMEOUT_MS: int(30 * 60_000, 10_000, MAX_TIMER_MS),
+  // Questions one run may ask the host (0: sub-agents never ask).
+  AGENT_MAX_QUESTIONS: int(5, 0, 50),
+  // Sub-agents may save a sign-in as a snapshot (save_sign_in; only when the snapshots group is enabled).
+  AGENT_SNAPSHOT_SAVE: bool(true),
 
   // --- Automation scripts ---
   SCRIPTS_DIR: optStr(),
   SCRIPT_TIMEOUT_MS: int(5 * 60_000, 1_000, MAX_TIMER_MS),
   SCRIPT_MEMORY_MB: int(64, 8, 1_024),
+
+  // --- Snapshots (saved sign-ins: cookies and site storage) ---
+  SNAPSHOTS_DIR: optStr(),
+  // Encrypts the saved states (AES-256-GCM); any string. Never logged.
+  SNAPSHOTS_KEY: optStr(),
 
   // --- Logging ---
   LOG_LEVEL: level('info'),
@@ -294,6 +305,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, { defaultModels
   if (!['duckduckgo', 'bing'].includes(searchEngine)) {
     throw invalid('AGENT_SEARCH_ENGINE', `expected "duckduckgo" or "bing", got "${e.AGENT_SEARCH_ENGINE}"`);
   }
+  // Saved sign-ins hold live session cookies: never next to the logs (a bind mount users share) or the scripts
+  const logDir = path.resolve(e.LOG_DIR ?? path.join(PROJECT_ROOT, 'logs'));
+  const scriptsDir = path.resolve(e.SCRIPTS_DIR ?? path.join(PROJECT_ROOT, 'data', 'scripts'));
+  const snapshotsDir = path.resolve(e.SNAPSHOTS_DIR ?? path.join(PROJECT_ROOT, 'data', 'snapshots'));
+  if (snapshotsDir === logDir || snapshotsDir.startsWith(`${logDir}${path.sep}`)) {
+    throw invalid('SNAPSHOTS_DIR', `must not be inside LOG_DIR (${logDir}): log folders are shared and downloadable, snapshots hold sign-in cookies`);
+  }
+  if (snapshotsDir === scriptsDir) throw invalid('SNAPSHOTS_DIR', `must not be the same folder as SCRIPTS_DIR (${scriptsDir})`);
+
   // The agent's budget is AGENT_CONTEXT_TOKENS / AGENT_MAX_OUTPUT_TOKENS, capped by the model's limits from the file.
   const agentWarnings = [...(fileModel?.warnings ?? [])];
   let contextTokens = e.AGENT_CONTEXT_TOKENS;
@@ -394,12 +414,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, { defaultModels
       maxResultChars: e.AGENT_MAX_RESULT_CHARS,
       searchEngine: searchEngine as 'duckduckgo' | 'bing',
       transcripts: e.AGENT_TRANSCRIPTS,
+      replyTimeoutMs: e.AGENT_REPLY_TIMEOUT_MS,
+      maxQuestions: e.AGENT_MAX_QUESTIONS,
+      /** Sub-agents may save a sign-in as a snapshot (save_sign_in). */
+      snapshotSave: e.AGENT_SNAPSHOT_SAVE,
     },
 
     scripts: {
       dir: e.SCRIPTS_DIR ?? path.join(PROJECT_ROOT, 'data', 'scripts'),
       timeoutMs: e.SCRIPT_TIMEOUT_MS,
       memoryBytes: e.SCRIPT_MEMORY_MB * 1024 * 1024,
+    },
+
+    snapshots: {
+      dir: e.SNAPSHOTS_DIR ?? path.join(PROJECT_ROOT, 'data', 'snapshots'),
+      /** Encryption key of the saved states (never logged). */
+      key: e.SNAPSHOTS_KEY,
     },
 
     log: {

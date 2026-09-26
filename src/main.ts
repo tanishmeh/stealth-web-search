@@ -15,6 +15,7 @@ import type { McpDeps } from './mcp/server.ts';
 import { SessionRegistry } from './mcp/sessions.ts';
 import { ObscuraProcess } from './obscura/process.ts';
 import { ScriptService } from './scripts/service.ts';
+import { SnapshotService } from './snapshots/service.ts';
 import { enabledTools } from './tools/index.ts';
 import { SERVER_NAME, SERVER_VERSION } from './version.ts';
 
@@ -63,6 +64,8 @@ async function main(): Promise<void> {
           }
         : `disabled (${config.agent.disabledReason})`,
       scriptsDir: config.scripts.dir,
+      // the key itself is never logged
+      snapshots: { dir: config.snapshots.dir, key: config.snapshots.key ? 'configured' : 'none', agentSave: config.agent.snapshotSave },
       authRequired: Boolean(config.authToken),
       logLevel: config.log.level,
       logFileLevel: config.log.fileLevel,
@@ -125,9 +128,11 @@ async function main(): Promise<void> {
   const sessions = new SessionRegistry(logger, hub);
   sessions.startReaper(config.sessionIdleTimeoutMs);
   const registry = new BrowserRegistry(browser, hub);
-  const deps: McpDeps = { config, log: logger, hub, browser, sessions, agents: null, scripts: null };
+  const deps: McpDeps = { config, log: logger, hub, browser, sessions, agents: null, scripts: null, snapshots: null };
   const scripts = new ScriptService(deps, isolatedObscura, registry);
   deps.scripts = scripts;
+  const snapshots = new SnapshotService(deps, registry);
+  deps.snapshots = snapshots;
   const agents = config.agent.enabled ? new AgentManager(deps, isolatedObscura, registry) : null;
   deps.agents = agents;
 
@@ -152,6 +157,9 @@ async function main(): Promise<void> {
       );
     }
   }
+
+  // never fatal: an unwritable SNAPSHOTS_DIR is logged with a hint, and only snapshot tools fail
+  await snapshots.init();
 
   try {
     await obscura.start();

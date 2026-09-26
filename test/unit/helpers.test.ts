@@ -172,6 +172,26 @@ describe('secret redaction', async () => {
 
   test('LOG_REDACT_SECRETS=false logs everything', () => {
     assert.deepEqual(redactArgs('browser_fill', { ref: 'e1', value: 'pw' }, browser, false), { args: { ref: 'e1', value: 'pw' }, provisional: false });
+    assert.equal((redactArgs('browser_set_cookie', { name: 'sid', value: 's3cret' }, browser, false).args as any).value, 's3cret');
+  });
+
+  test("the host's answer to a sub-agent (agent_reply) is always masked: it can be a one-time code", () => {
+    const args = { run_id: 'r1a2b3c4', question_id: 'q1a2b3', answer: '482913', secret: false, wait_seconds: 5 };
+    for (const enabled of [true, false]) {
+      assert.deepEqual(redactArgs('agent_reply', args, browser, enabled), { args: { ...args, answer: '[REDACTED]' }, provisional: false }, `LOG_REDACT_SECRETS=${enabled}`);
+    }
+    assert.equal(args.answer, '482913', 'the tool still gets the real answer');
+  });
+
+  test('a typing call that carries a secret answer is masked even on a field that looks safe', () => {
+    assert.deepEqual(redactArgs('browser_fill', { ref: 'e2', value: 'code 482913' }, browser, true, true).args, { ref: 'e2', value: '[REDACTED]' });
+    const form = redactArgs('browser_fill_form', { fields: [{ ref: 'e2', value: '482913' }] }, browser, true, true);
+    assert.deepEqual(form.args, { fields: [{ ref: 'e2', value: '[REDACTED]' }] });
+  });
+
+  test('snapshot tools take names and descriptions only: nothing to mask', () => {
+    const args = { name: 'shop', description: 'Shop — personal account', domains: ['shop.example'], replace: true };
+    assert.deepEqual(redactArgs('snapshot_save', args, browser, true).args, args);
   });
 
   test('cleanJsError strips engine frames', () => {

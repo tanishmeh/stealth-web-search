@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { MCP_PATH } from '../mcp/constants.ts';
 import type { HttpDeps } from '../mcp/http.ts';
+import { SnapshotError, SnapshotNotFoundError, normalizeSnapshotName } from '../snapshots/store.ts';
 import { SERVER_NAME, SERVER_VERSION } from '../version.ts';
 import { MAIN_BROWSER, type FrameData, type HubEvent } from './hub.ts';
 
@@ -72,6 +73,8 @@ export function buildStatus(deps: HttpDeps, watch: string = MAIN_BROWSER) {
       endpoint: config.agent.endpoint ? new URL(config.agent.endpoint).origin : null, // origin only: never credentials
       contextTokens: config.agent.contextTokens,
       running: deps.agents?.activeCount ?? 0,
+      // paused on a question for the host (they hold no slot)
+      waiting: deps.agents?.waitingCount ?? 0,
       queued: deps.agents?.queuedCount ?? 0,
       maxConcurrent: config.agent.maxConcurrent,
       scriptsDir: config.scripts.dir,
@@ -81,6 +84,34 @@ export function buildStatus(deps: HttpDeps, watch: string = MAIN_BROWSER) {
 
 export function buildState(deps: HttpDeps, watch: string = MAIN_BROWSER) {
   return { ...buildStatus(deps, watch), history: deps.hub.history(watch) };
+}
+
+/**
+ * Why a state-changing dashboard request is refused (null: allowed): it must carry X-SBM-Request: 1
+ * and an Origin whose host (host:port) is this server's (the Host header, ALLOWED_HOSTS or PUBLIC_URL,
+ * so it also works behind a TLS proxy), and Sec-Fetch-Site, when sent, must be same-origin or none.
+ */
+export function csrfRefusal(req: Request, deps: Pick<HttpDeps, 'config'>): string | null {
+  if (req.header('x-sbm-request') !== '1') return 'missing X-SBM-Request header';
+  const origin = req.header('origin');
+  if (!origin) return 'missing Origin header';
+  let host: string;
+  try {
+    host = new URL(origin).host.toLowerCase();
+  } catch {
+    return 'invalid Origin header';
+  }
+  let publicHost: string | null = null;
+  try {
+    publicHost = new URL(deps.config.publicUrl).host.toLowerCase();
+  } catch {
+    publicHost = null;
+  }
+  const own = host === (req.header('host') ?? '').toLowerCase() || deps.config.allowedHosts.some((h) => h.toLowerCase() === host) || host === publicHost;
+  if (!own) return 'the request comes from another site (Origin)';
+  const site = req.header('sec-fetch-site');
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') return 'the request comes from another site (Sec-Fetch-Site)';
+  return null;
 }
 
 export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
@@ -105,17 +136,22 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
     res.setHeader('Cache-Control', 'no-store');
     const run = deps.agents?.get(String(req.params.id));
     if (!run) return void res.status(404).json({ error: 'no such agent run' });
-    res.json({
-      summary: run.summary(),
-      input: run.input,
-      outcome: run.outcome,
-      error: run.error,
-      notes: run.notes,
-      sources: run.sources,
-      script: run.scriptName ? { name: run.scriptName, version: run.scriptVersion, tests: run.tests.map((t) => ({ ...t, output: undefined, ok: t.ok })) } : null,
-      steps: run.steps.slice(-60).map((st) => ({ ...st, reasoning: st.reasoning.slice(-1_500), content: st.content.slice(0, 1_500) })),
-      transcript: run.transcriptFile,
-    });
+    // the host's secret answers (one-time codes) never reach the dashboard: masked by value, and not kept in the questions
+    res.json(
+      run.scrubbed({
+        summary: run.summary(),
+        input: run.input,
+        outcome: run.outcome,
+        error: run.error,
+        notes: run.notes,
+        sources: run.sources,
+        script: run.scriptName ? { name: run.scriptName, version: run.scriptVersion, tests: run.tests.map((t) => ({ ...t, output: undefined, ok: t.ok })) } : null,
+        questions: run.questionLog(),
+        waitedMs: run.waitingMs,
+        steps: run.steps.slice(-60).map((st) => ({ ...st, reasoning: st.reasoning.slice(-1_500), content: st.content.slice(0, 1_500) })),
+        transcript: run.transcriptFile,
+      }),
+    );
   });
 
   app.get('/api/scripts', async (_req, res) => {
@@ -124,6 +160,43 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
       res.json({ scripts: (await deps.scripts?.store.list()) ?? [] });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Saved sign-ins: metadata only (never cookie names or values), and where each one is loaded.
+  app.get('/api/snapshots', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (!deps.snapshots) return void res.json({ snapshots: [] });
+    try {
+      res.json(await deps.snapshots.list());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // The dashboard's only mutating route. Registered after the Host check and the AUTH_TOKEN check;
+  // a cross-site page cannot call it: the custom header forces a CORS preflight this server never
+  // approves, and the Origin must be this server's own.
+  app.delete('/api/snapshots/:name', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const refusal = csrfRefusal(req, deps);
+    if (refusal) {
+      log.warn({ path: req.path, reason: refusal, remoteAddress: req.socket?.remoteAddress }, 'refused a dashboard snapshot delete');
+      return void res.status(403).json({ error: refusal });
+    }
+    if (!deps.snapshots) return void res.status(404).json({ error: 'snapshots are not available on this server' });
+    let name: string;
+    try {
+      name = normalizeSnapshotName(String(req.params.name ?? ''));
+    } catch (err) {
+      return void res.status(400).json({ error: (err as Error).message });
+    }
+    try {
+      const { loadedIn } = await deps.snapshots.delete(name, 'dashboard');
+      res.json({ deleted: name, loaded_in: loadedIn });
+    } catch (err) {
+      if (err instanceof SnapshotNotFoundError) return void res.status(404).json({ error: `no snapshot named ${JSON.stringify(name)}` });
+      res.status(err instanceof SnapshotError ? 400 : 500).json({ error: (err as Error).message });
     }
   });
 

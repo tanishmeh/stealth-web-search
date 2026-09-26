@@ -4,6 +4,7 @@
 # Live dashboard:  http://127.0.0.1:8931/
 # Logs:            ./logs/ (JSON lines, rotated daily / by size; sub-agent transcripts in ./logs/agent-runs/)
 # Scripts:         the "scripts" volume (automation scripts made by agent_automate)
+# Snapshots:       the "snapshots" volume (saved sign-ins: session cookies, keep it private)
 #
 # Configure with a .env file next to this one (copy .env.example). Sub-agents need a model:
 # config/models.json (copy config/models.example.json) or AGENT_LLM_URL in .env.
@@ -40,6 +41,9 @@ services:
       # Automation scripts survive rebuilds and restarts. To keep them in a host folder instead, replace
       # this line with "- ./scripts-data:/data/scripts" (the folder must be writable by uid 1000).
       - scripts:/data/scripts
+      # Snapshots (saved sign-ins) hold live session cookies. A named volume keeps them private to the
+      # container; set SNAPSHOTS_KEY in .env to encrypt them. Do not put them under ./logs.
+      - snapshots:/data/snapshots
       # Persist cookies between restarts: uncomment and set OBSCURA_STORAGE_DIR=/data/cookies in .env
       # (on Linux: mkdir -p data && sudo chown -R 1000:1000 data)
       # - ./data:/data/cookies
@@ -59,3 +63,4 @@ services:
 
 volumes:
   scripts:
+  snapshots:

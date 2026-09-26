@@ -102,7 +102,9 @@ export type HubEvent =
   | { type: 'status'; data: unknown }
   | { type: 'browser'; data: BrowserEventData }
   | { type: 'agent'; data: AgentSummary }
-  | { type: 'browsers'; data: unknown };
+  | { type: 'browsers'; data: unknown }
+  /** Saved sign-ins (src/snapshots/service.ts SnapshotsPayload): metadata and where each is loaded. */
+  | { type: 'snapshots'; data: unknown };
 
 type Listener = (event: HubEvent) => void;
 
@@ -110,6 +112,9 @@ type Listener = (event: HubEvent) => void;
 const BROWSER_SCOPED = new Set<HubEvent['type']>(['console', 'network', 'frame', 'pointer', 'tabs', 'browser']);
 
 const browserOf = (data: { browserId?: string }): string => data.browserId ?? MAIN_BROWSER;
+
+/** Agent run statuses that do not change any more. */
+const FINAL_AGENT_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 class Ring<T> {
   readonly items: T[] = [];
@@ -151,6 +156,8 @@ export class Hub extends EventEmitter {
   private readonly agents = new Map<string, AgentSummary>();
   private readonly liveViewers = new Map<string, number>();
   private readonly latestFrames = new Map<string, FrameData>();
+  /** The latest snapshots list, for viewers that connect later (null until the server listed them). */
+  private snapshots: unknown = null;
   private readonly logTap: LogTap;
 
   constructor(logTap: LogTap) {
@@ -257,14 +264,17 @@ export class Hub extends EventEmitter {
   publishAgent(summary: AgentSummary): void {
     this.agents.delete(summary.id); // re-insert: most recently updated last
     this.agents.set(summary.id, summary);
-    if (this.agents.size > 100) {
-      const oldest = this.agents.keys().next().value;
-      if (oldest !== undefined) this.agents.delete(oldest);
+    // over the cap, the oldest finished runs go first; a queued, running or waiting run (it may need an
+    // answer) is never dropped
+    for (const [id, kept] of this.agents) {
+      if (this.agents.size <= 100) break;
+      if (FINAL_AGENT_STATUSES.has(kept.status)) this.agents.delete(id);
     }
     this.broadcast({ type: 'agent', data: summary });
   }
 
-  publish(type: 'tabs' | 'sessions' | 'status' | 'browsers', data: unknown): void {
+  publish(type: 'tabs' | 'sessions' | 'status' | 'browsers' | 'snapshots', data: unknown): void {
+    if (type === 'snapshots') this.snapshots = data;
     this.broadcast({ type, data } as HubEvent);
   }
 
@@ -284,6 +294,7 @@ export class Hub extends EventEmitter {
       logs: this.logTap.buffer.slice(-500),
       browserEvents: h ? [...h.events.items] : [],
       agents: [...this.agents.values()],
+      snapshots: this.snapshots,
     };
   }
 

@@ -6,6 +6,7 @@ import type { Logger } from '../logger.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
 import { ToolError } from './errors.ts';
 import { LiveView } from './liveview.ts';
+import type { StorageItem } from './storage-state.ts';
 import { Tab } from './tab.ts';
 
 export interface TabSummary {
@@ -14,6 +15,20 @@ export interface TabSummary {
   title: string;
   active: boolean;
   createdAt: string;
+}
+
+/** A snapshot (saved sign-in) loaded into a browser: the version loaded, and the connection it went into. */
+export interface LoadedSnapshot {
+  version: number;
+  loadedAt: string;
+  generation: number;
+}
+
+/** Site storage a loaded snapshot restores on every page load of one origin. */
+export interface SeedEntry {
+  snapshot: string;
+  localStorage: StorageItem[];
+  sessionStorage: StorageItem[];
 }
 
 /** FIFO async mutex: tool calls run one at a time, in arrival order. */
@@ -76,6 +91,24 @@ export class Browser extends EventEmitter {
   private pendingCloseReason: string | null = null;
   private shuttingDown = false;
   private generation = 0;
+  /** Why the connection was last lost (for the notice written after a reconnect). */
+  private lostReason: string | null = null;
+  /**
+   * Snapshots loaded into this browser, by name (SnapshotService sets them). Cookies and site storage
+   * live on the connection, so they are all cleared when it is lost.
+   */
+  readonly loadedSnapshots = new Map<string, LoadedSnapshot>();
+  /** The snapshot loaded, created or refreshed here most recently. */
+  activeSnapshot: string | null = null;
+  /** Site storage of loaded snapshots by origin, written on every page load by one new-document script. */
+  readonly storageSeed = new Map<string, SeedEntry>();
+  /** That script's identifier and the connection generation that issued it (identifiers restart on every connection). */
+  seedScript: { id: string; generation: number } | null = null;
+  /**
+   * Runs after a lost connection is re-established, before the new connection is used: an agent
+   * browser re-applies the snapshot its run started with. Resolves to the notice for the agent.
+   */
+  reconnectHook: ((conn: CdpConnection, generation: number) => Promise<string>) | null = null;
   private readonly log: Logger;
   private readonly rootLog: Logger;
   private readonly config: Config;
@@ -116,13 +149,55 @@ export class Browser extends EventEmitter {
     return this.conn?.isOpen ?? false;
   }
 
-  /** How many times the connection was lost with open tabs (their pages and cookies are gone). */
+  /** How many times the connection was lost with open tabs or loaded snapshots (their pages and cookies are gone). */
   get resetCount(): number {
     return this.resetGeneration;
   }
 
   get tabCount(): number {
     return this.tabs.size;
+  }
+
+  /** Changes with every new connection (and on dispose): state set on an older generation is gone. */
+  get connectionGeneration(): number {
+    return this.generation;
+  }
+
+  /** Record that a snapshot is loaded here (load, create, refresh) and make it the active one. */
+  markSnapshot(name: string, version: number, generation: number): void {
+    this.loadedSnapshots.set(name, { version, loadedAt: new Date().toISOString(), generation });
+    this.activeSnapshot = name;
+    this.emit('snapshots');
+  }
+
+  /** Forget a snapshot (it was deleted): its markers and its storage-seed entries. True when the seed changed. */
+  forgetSnapshot(name: string): boolean {
+    let changed = this.loadedSnapshots.delete(name);
+    if (this.activeSnapshot === name) {
+      this.activeSnapshot = null;
+      changed = true;
+    }
+    let seedChanged = false;
+    for (const [origin, entry] of this.storageSeed) {
+      if (entry.snapshot === name) {
+        this.storageSeed.delete(origin);
+        seedChanged = true;
+      }
+    }
+    if (changed || seedChanged) this.emit('snapshots');
+    return seedChanged;
+  }
+
+  /** Drop every snapshot marker and the storage seed (the connection that held them is gone). Returns the names that were loaded. */
+  private clearSnapshots(): string[] {
+    const names = [...this.loadedSnapshots.keys()];
+    const had = names.length > 0 || this.activeSnapshot !== null || this.storageSeed.size > 0 || this.seedScript !== null;
+    this.loadedSnapshots.clear();
+    this.activeSnapshot = null;
+    this.storageSeed.clear();
+    this.seedScript = null;
+    if (had) this.emit('snapshots');
+    return names;
   }
 
   async start(): Promise<void> {
@@ -156,6 +231,15 @@ export class Browser extends EventEmitter {
         const gen = ++this.generation;
         conn.on('event', (ev: CdpEvent) => this.routeEvent(ev));
         conn.once('disconnected', (reason: string) => this.onDisconnected(gen, reason));
+        if (this.reconnectHook && gen > 1) {
+          // before anyone uses the new connection, so the first new tab already has the sign-in
+          const line = await this.reconnectHook(conn, gen).catch(() => null);
+          if (line) this.resetNotice = `The browser connection was lost (${this.lostReason ?? 'connection closed'}). ${line}`;
+          if (this.shuttingDown) {
+            conn.close();
+            throw new ToolError('This browser has been closed.');
+          }
+        }
         this.conn = conn;
         this.hub.publishBrowserEvent('connected');
         this.publishTabs();
@@ -173,18 +257,35 @@ export class Browser extends EventEmitter {
     const why = this.pendingCloseReason ?? reason;
     this.pendingCloseReason = null;
     const hadTabs = this.tabs.size > 0;
+    const hadSeed = this.storageSeed.size > 0 || this.seedScript !== null;
     for (const tab of this.tabs.values()) tab.dispose();
     this.tabs.clear();
     this.activeTabId = null;
     this.conn = null;
-    if (hadTabs) {
+    this.lostReason = why;
+    // snapshots applied before any tab was opened are lost too: always tell the agent about them
+    const lost = this.clearSnapshots();
+    if (hadTabs || lost.length || hadSeed) {
       this.resetGeneration++;
-      this.resetNotice = `The browser connection was lost (${why}) and has been re-established; all previously open tabs, pages and cookies were reset.`;
+      this.resetNotice = hadTabs
+        ? `The browser connection was lost (${why}) and has been re-established; all previously open tabs, pages and cookies were reset.`
+        : `The browser connection was lost (${why}) and has been re-established; its cookies were reset.`;
+      // an agent browser with a reconnect hook gets its notice when the hook re-applies its sign-in
+      if (lost.length && !this.reconnectHook) this.resetNotice += ` ${this.lostSnapshotsLine(lost)}`;
     }
-    this.log.warn({ reason: why, hadTabs }, 'browser connection lost; tabs discarded');
+    this.log.warn({ reason: why, hadTabs, lostSnapshots: lost.length || undefined }, 'browser connection lost; tabs discarded');
     this.hub.publishBrowserEvent('disconnected', why);
     this.liveView.onTabsChanged();
     this.publishTabs();
+  }
+
+  /** What the agent is told about the snapshots a reset took away (sub-agents have no snapshot_load). */
+  private lostSnapshotsLine(names: string[]): string {
+    const quoted = names.map((n) => JSON.stringify(n)).join(', ');
+    if (this.id !== MAIN_BROWSER) return `The browser was reset; your saved sign-in ${quoted} was lost; sign in again or finish with success=false.`;
+    return names.length === 1
+      ? `The snapshot ${quoted} loaded in this browser was lost; load it again with snapshot_load.`
+      : `The snapshots ${quoted} loaded in this browser were lost; load them again with snapshot_load.`;
   }
 
   /**
@@ -341,10 +442,12 @@ export class Browser extends EventEmitter {
     this.liveView.stop();
     const conn = this.conn;
     this.generation++; // the close below must not be reported as a lost connection
+    this.reconnectHook = null;
     for (const tab of this.tabs.values()) tab.dispose();
     this.tabs.clear();
     this.activeTabId = null;
     this.conn = null;
+    this.clearSnapshots();
     conn?.close();
     this.hub.publishBrowserEvent('closed');
     this.publishTabs();

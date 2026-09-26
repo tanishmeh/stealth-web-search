@@ -7,6 +7,7 @@ import type { Config } from '../config.ts';
 import type { Hub, PointerData } from '../dashboard/hub.ts';
 import type { Logger } from '../logger.ts';
 import type { ScriptService } from '../scripts/service.ts';
+import type { SnapshotService } from '../snapshots/service.ts';
 
 export type { CallToolResult } from '@modelcontextprotocol/server';
 
@@ -14,7 +15,7 @@ export type { CallToolResult } from '@modelcontextprotocol/server';
  * Tool groups can be enabled selectively with TOOLSETS (e.g. `core,content`),
  * which helps small local models that struggle with large tool lists.
  */
-export const TOOL_GROUPS = ['core', 'content', 'forms', 'tabs', 'state', 'debug', 'capture', 'agents', 'scripts'] as const;
+export const TOOL_GROUPS = ['core', 'content', 'forms', 'tabs', 'state', 'debug', 'capture', 'agents', 'scripts', 'snapshots'] as const;
 export type ToolGroup = (typeof TOOL_GROUPS)[number];
 
 /** MCP progress notification for the calling client (long-running agent and script tools). */
@@ -33,13 +34,21 @@ export interface ToolContext {
   pointer(tab: Tab, x: number, y: number, kind: PointerData['kind'], label?: string): void;
   /**
    * Tell the logger this call handled a secret (e.g. it typed into a password field), so its
-   * arguments stay redacted in logs and on the dashboard (LOG_REDACT_SECRETS=true).
+   * arguments stay redacted in logs and on the dashboard (LOG_REDACT_SECRETS=true). `shown.result`
+   * replaces the result text in logs and on the dashboard, always (e.g. a secret answer from the host).
    */
-  markSensitive(): void;
+  markSensitive(shown?: { result?: string }): void;
+  /**
+   * A sub-agent call whose typed value contains a secret the host gave it (a one-time code): typing
+   * tools treat the field as sensitive and keep the value out of every log, whatever LOG_REDACT_SECRETS says.
+   */
+  secretInput?: boolean;
   /** Sub-agent runs; null when no agent model is configured. */
   agents: AgentManager | null;
   /** Stored automation scripts. */
   scripts: ScriptService | null;
+  /** Saved sign-ins (snapshots). */
+  snapshots: SnapshotService | null;
   /** Report progress to the calling client, when it asked for progress notifications. */
   progress?: ProgressFn;
   /** Aborted when the calling client cancels the request. */

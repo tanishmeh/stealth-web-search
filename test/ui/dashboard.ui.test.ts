@@ -10,6 +10,7 @@ import { findChrome, launchChrome, type Chrome, type Page } from '../helpers/chr
 import { startFakeLlm, type FakeLlm, type FakeTurn } from '../helpers/fake-llm.ts';
 import { startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 import { startTestServer, type TestServer } from '../helpers/harness.ts';
+import { signIn } from '../helpers/sign-in.ts';
 
 /**
  * The dashboard, driven in a real (headless) Chrome the way a person uses it: every control is
@@ -36,7 +37,20 @@ function freePort(): Promise<number> {
 async function spawnServer(port: number, extraEnv: Record<string, string> = {}): Promise<{ stop: () => Promise<void> }> {
   const child = spawn(process.execPath, ['src/main.ts'], {
     cwd: ROOT,
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), LOG_DIR: mkdtempSync(path.join(tmpdir(), 'sws-ui-logs-')), LOG_FORMAT: 'json', LOG_LEVEL: 'warn', AGENT_MODELS_FILE: 'none', SBM_EXIT_WITH_PARENT: '1', ...extraEnv },
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      LOG_DIR: mkdtempSync(path.join(tmpdir(), 'sws-ui-logs-')),
+      LOG_FORMAT: 'json',
+      LOG_LEVEL: 'warn',
+      AGENT_MODELS_FILE: 'none',
+      // never the developer's saved sign-ins or key
+      SNAPSHOTS_DIR: mkdtempSync(path.join(tmpdir(), 'sws-ui-snapshots-')),
+      SNAPSHOTS_KEY: '',
+      SBM_EXIT_WITH_PARENT: '1',
+      ...extraEnv,
+    },
     stdio: 'ignore',
   });
   const deadline = Date.now() + 45_000;
@@ -60,6 +74,11 @@ async function spawnServer(port: number, extraEnv: Record<string, string> = {}):
 }
 const call = (name: string, args: Record<string, unknown>): FakeTurn => ({ reasoning: `Thinking about ${name}.`, toolCalls: [{ name, arguments: args }] });
 
+// the ASK-UI run asks the host twice: an order to approve, then a one-time code (secret)
+const ORDER_QUESTION = 'Place the order for 1 Red Apple Phone, total $10.00, delivered to the saved address?';
+const CODE_QUESTION = 'The shop sent a 6-digit sign-in code to the account email. What is the code?';
+const CODE = '482913';
+
 describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_PATH)' }, () => {
   let chrome: Chrome;
   let page: Page;
@@ -78,6 +97,16 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     page.eval(`(() => { const s = document.getElementById(${JSON.stringify(id)}); s.value = ${JSON.stringify(value)}; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`);
   const typeInto = (id: string, value: string) =>
     page.eval(`(() => { const s = document.getElementById(${JSON.stringify(id)}); s.focus(); s.value = ${JSON.stringify(value)}; s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  // a snapshot's row (its buttons carry data-name too, so only direct children of the list)
+  const row = (name: string) => `#snapshots-rows > [data-name="${name}"]`;
+  const textOf = (selector: string) => `(document.querySelector(${JSON.stringify(selector)})?.textContent ?? '')`;
+  const exists = (selector: string) => `!!document.querySelector(${JSON.stringify(selector)})`;
+  const focusedOn = (action: string, name: string) => `(document.activeElement?.dataset?.action === ${JSON.stringify(action)} && document.activeElement?.dataset?.name === ${JSON.stringify(name)})`;
+  const savedNames = async () => ((await (await fetch(`${srv.baseUrl}/api/snapshots`)).json()) as { snapshots: Array<{ name: string }> }).snapshots.map((s) => s.name);
+  const openConfirm = async (name: string) => {
+    await page.click(`${row(name)} [data-action="delete"]`);
+    await page.waitFor(`the delete confirmation of ${name}`, `${exists(`${row(name)} [role="group"] [data-action="confirm-delete"]`)} && ${focusedOn('confirm-delete', name)}`);
+  };
 
   before(async () => {
     site = await startFixtureServer();
@@ -99,6 +128,18 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
             return call('script_test', {});
           default:
             return call('finish', { output: 'saved', verified: true });
+        }
+      }
+      if (task.includes('ASK-UI')) {
+        switch (req.step) {
+          case 1:
+            return call('browser_navigate', { url: `${site.baseUrl}/catalog.html` });
+          case 2:
+            return call('ask_host', { question: ORDER_QUESTION, options: ['Yes, place it', 'No'], reason: 'confirm' });
+          case 3:
+            return call('ask_host', { question: CODE_QUESTION, reason: 'sign_in' });
+          default:
+            return call('finish', { output: 'UI-ORDER-555' });
         }
       }
       switch (req.step) {
@@ -335,6 +376,160 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     await openTab('agents'); // opening the tab reloads the list
     await page.waitFor('the script row', `[...document.querySelectorAll('#scripts-rows > *')].some((r) => r.textContent.includes('ui-catalog'))`, 30_000);
     assert.equal(await text('count-scripts'), '1');
+  });
+
+  test('snapshots: the last tab, right after Agents, reachable with the arrow keys', async () => {
+    const order = await page.eval<string[]>(`[...document.querySelectorAll('#inspector [role="tab"]')].map((t) => t.dataset.view)`);
+    assert.equal(order.indexOf('snapshots'), order.indexOf('agents') + 1, order.join(', '));
+    assert.equal(order.at(-1), 'snapshots', order.join(', '));
+    await openTab('agents');
+    await page.eval(`document.querySelector('#inspector [data-view="agents"]').focus()`);
+    await page.press('ArrowRight');
+    await page.waitFor('the Snapshots tab', `document.querySelector('[data-view="snapshots"]').getAttribute('aria-selected') === 'true' && ${visible('view-snapshots')} && document.activeElement?.id === 'itab-snapshots'`);
+    await page.press('ArrowRight');
+    await page.waitFor('the first tab again', `document.querySelector('[data-view="console"]').getAttribute('aria-selected') === 'true'`);
+    await page.press('ArrowLeft');
+    await page.waitFor('the Snapshots tab again', `document.querySelector('[data-view="snapshots"]').getAttribute('aria-selected') === 'true' && ${visible('view-snapshots')}`);
+    // nothing saved yet: the view says how agents create one
+    await page.waitFor('the empty list', `${visible('snapshots-empty')} && /snapshot_save/.test(document.getElementById('snapshots-empty').textContent)`);
+    assert.equal(await text('count-snapshots'), '0');
+    assert.equal(await count('#snapshots-rows > [data-name]'), 0);
+    assert.match(await text('snapshots-foot'), /Encrypted/);
+  });
+
+  test('snapshots: saved sign-ins appear live with their sites and where they are loaded', async () => {
+    // the tab stays open: the rows must come from the live event, not from reopening it
+    const account = await signIn(srv, site, 'ui-tester');
+    const saved = await srv.call('snapshot_save', { name: 'ui-shop', description: 'Fixture shop, account ui-tester' });
+    assert.equal(saved.isError, false, saved.text);
+    await page.waitFor('the ui-shop row', exists(row('ui-shop')));
+    const local = await srv.call('browser_navigate', { url: `http://localhost:${new URL(site.baseUrl).port}/set-cookie?name=cart&value=ui-cart-42` });
+    assert.equal(local.isError, false, local.text);
+    const second = await srv.call('snapshot_save', { name: 'ui-local', description: 'Local shop cart' });
+    assert.equal(second.isError, false, second.text);
+    await page.waitFor('two rows', `document.querySelectorAll('#snapshots-rows > [data-name]').length === 2 && document.getElementById('count-snapshots').textContent === '2'`);
+    assert.equal(await page.eval(visible('snapshots-empty')), false);
+    assert.deepEqual(await page.eval(`[...document.querySelectorAll('#snapshots-rows > [data-name]')].map((r) => r.dataset.name)`), ['ui-local', 'ui-shop']);
+    const shop = await page.eval<string>(textOf(row('ui-shop')));
+    assert.ok(shop.includes('Fixture shop, account ui-tester'), shop);
+    assert.ok(shop.includes(new URL(site.baseUrl).hostname), shop);
+    assert.match(shop, /loaded in main/);
+    assert.match(shop, /v1/);
+    const cart = await page.eval<string>(textOf(row('ui-local')));
+    assert.ok(cart.includes('Local shop cart') && cart.includes('localhost'), cart);
+    assert.match(cart, /loaded in main/);
+    // never a cookie or storage value (the cart value is in the URL the test opened, so only this view is checked)
+    const view = await page.eval<string>(`document.getElementById('view-snapshots').outerHTML`);
+    for (const value of [account.token, account.profile, 'ui-cart-42']) assert.ok(!view.includes(value), 'a saved value is shown in the Snapshots view');
+  });
+
+  test('snapshots: Delete asks first; Cancel and Escape keep the snapshot', async () => {
+    await openConfirm('ui-local');
+    assert.equal(await page.eval(`document.querySelector(${JSON.stringify(`${row('ui-local')} [data-action="delete"]`)}).getAttribute('aria-expanded')`), 'true');
+    assert.match(await page.eval<string>(textOf(`${row('ui-local')} [role="group"]`)), /Delete snapshot "ui-local" for good\?/);
+    await page.click(`${row('ui-local')} [data-action="cancel-delete"]`);
+    await page.waitFor('the confirmation to close (Cancel)', `!${exists(`${row('ui-local')} [data-action="confirm-delete"]`)} && ${focusedOn('delete', 'ui-local')}`);
+
+    await openConfirm('ui-local');
+    await page.press('Escape');
+    await page.waitFor('the confirmation to close (Escape)', `!${exists(`${row('ui-local')} [data-action="confirm-delete"]`)} && ${focusedOn('delete', 'ui-local')}`);
+    assert.equal(await count('#snapshots-rows > [data-name]'), 2);
+    assert.deepEqual((await savedNames()).sort(), ['ui-local', 'ui-shop']);
+  });
+
+  test('snapshots: the confirmation survives a live update; confirming deletes through the API', async () => {
+    await openConfirm('ui-local');
+    // the row is rebuilt with the new description while the user decides
+    const described = await srv.call('snapshot_describe', { name: 'ui-local', description: 'Local shop cart (guest)' });
+    assert.equal(described.isError, false, described.text);
+    await page.waitFor('the live update', `${textOf(row('ui-local'))}.includes('Local shop cart (guest)')`);
+    assert.equal(await page.eval(exists(`${row('ui-local')} [data-action="confirm-delete"]`)), true, 'the confirmation is still open');
+    assert.equal(await page.eval(focusedOn('confirm-delete', 'ui-local')), true, 'the confirm button keeps the focus');
+
+    await page.click(`${row('ui-local')} [data-action="confirm-delete"]`);
+    await page.waitFor('the row to go', `!${exists(row('ui-local'))} && document.getElementById('count-snapshots').textContent === '1'`);
+    // focus moves to the neighbouring row
+    await page.waitFor('the focus on the next row', focusedOn('delete', 'ui-shop'));
+    assert.deepEqual(await savedNames(), ['ui-shop']);
+    const listed = await srv.call('snapshot_list', {});
+    assert.ok(!listed.text.includes('ui-local'), listed.text);
+  });
+
+  test('snapshots: a refused delete shows an alert and keeps the snapshot', async () => {
+    // send the DELETE without the X-SBM-Request header, so the server itself refuses it
+    await page.eval(`(() => { const real = window.fetch; window.__realFetch = real; window.fetch = (url, init) => real(url, init?.method === 'DELETE' ? { ...init, headers: {} } : init); return true; })()`);
+    try {
+      await openConfirm('ui-shop');
+      await page.click(`${row('ui-shop')} [data-action="confirm-delete"]`);
+      await page.waitFor('the error alert', `${textOf(`${row('ui-shop')} [role="alert"]`)}.includes('X-SBM-Request')`);
+      assert.equal(await page.eval(exists(`${row('ui-shop')} [data-action="confirm-delete"]`)), false);
+      await page.waitFor('the focus back on Delete', focusedOn('delete', 'ui-shop'));
+      assert.deepEqual(await savedNames(), ['ui-shop']);
+      assert.equal(await text('count-snapshots'), '1');
+    } finally {
+      await page.eval(`(() => { window.fetch = window.__realFetch; return true; })()`);
+    }
+  });
+
+  let askRun = '';
+  let firstQuestion = '';
+  const card = () => `#agents-rows [data-id="${askRun}"]`;
+
+  test('agents: a run waiting for an answer shows its question, the counter, and its snapshot in use', async () => {
+    await openTab('agents');
+    const started = await srv.call('agent_run', { task: 'ASK-UI Order one Red Apple Phone from the fixture shop', output: 'the order number', snapshot: 'ui-shop', wait_seconds: 0 });
+    assert.equal(started.isError, false, started.text);
+    askRun = started.raw.structuredContent.run_id as string;
+    const waiting = await srv.call('agent_wait', { run_id: askRun, wait_seconds: 60 });
+    assert.equal(waiting.raw.structuredContent.status, 'waiting', waiting.text);
+    firstQuestion = waiting.raw.structuredContent.question.id as string;
+    const origin = new URL(site.baseUrl).origin;
+    const question = `${card()} > [data-question="${firstQuestion}"]`;
+    await page.waitFor('the question on the card', `${textOf(question)}.includes(${JSON.stringify(ORDER_QUESTION)})`, 20_000);
+    const block = await page.eval<string>(textOf(question));
+    assert.ok(block.includes(`asked on ${origin}`), block);
+    assert.ok(block.includes('Yes, place it') && block.includes('agent_reply'), block);
+    assert.match(await page.eval<string>(textOf(card())), /waiting for answer/);
+    assert.ok((await page.eval<string>(textOf(card()))).includes('ui-shop'), 'the card names the snapshot the run started with');
+    await page.waitFor('the tab counter', `/1 waiting/.test(document.getElementById('count-agents').textContent)`);
+    assert.doesNotMatch(await text('count-agents'), /running|queued/);
+    await page.waitFor('the footer', `/1 waiting/.test(document.getElementById('agents-foot').textContent)`);
+
+    // the snapshot's row says the run's browser has it, and its delete confirmation names the run
+    await openTab('snapshots');
+    await page.waitFor('the agent browser in loaded-in', `${textOf(row('ui-shop'))}.includes(${JSON.stringify(askRun)})`);
+    await openConfirm('ui-shop');
+    assert.ok((await page.eval<string>(textOf(`${row('ui-shop')} [role="group"]`))).includes(`In use by run ${askRun} (waiting)`));
+    await page.press('Escape');
+    await page.waitFor('the confirmation to close', `!${exists(`${row('ui-shop')} [data-action="confirm-delete"]`)}`);
+    await openTab('agents');
+  });
+
+  test('agents: agent_reply resumes the run; Details list its questions with the secret answer hidden', async () => {
+    const first = await srv.call('agent_reply', { run_id: askRun, question_id: firstQuestion, answer: 'Yes, place the order.', wait_seconds: 60 });
+    assert.equal(first.isError, false, first.text);
+    assert.match(first.text, /^Answer delivered/);
+    assert.equal(first.raw.structuredContent.status, 'waiting', first.text);
+    const second = first.raw.structuredContent.question.id as string;
+    await page.waitFor('the next question', `${textOf(`${card()} > [data-question="${second}"]`)}.includes(${JSON.stringify(CODE_QUESTION)}) && !${exists(`${card()} > [data-question="${firstQuestion}"]`)}`);
+
+    const done = await srv.call('agent_reply', { run_id: askRun, question_id: second, answer: CODE, wait_seconds: 60 });
+    assert.equal(done.isError, false, done.text);
+    assert.equal(done.raw.structuredContent.status, 'completed', done.text);
+    await page.waitFor('the finished run', `${textOf(card())}.includes('UI-ORDER-555') && !${exists(`${card()} > [data-question]`)}`);
+    await page.waitFor('the tab counter', `!/waiting/.test(document.getElementById('count-agents').textContent)`);
+    // the run kept its sign-in fresh: the snapshot was refreshed from its browser
+    await page.waitFor('the refreshed snapshot', `${textOf(card())}.includes('refreshed to v2')`);
+
+    await page.click(`${card()} [data-action="details"]`);
+    const answered = `${card()} [data-question][data-status="answered"]`;
+    await page.waitFor('the questions in the details', `document.querySelectorAll(${JSON.stringify(answered)}).length === 2`);
+    assert.match(await page.eval<string>(textOf(card())), /Questions \(2/);
+    const approval = await page.eval<string>(textOf(`${card()} [data-question="${firstQuestion}"]`));
+    assert.ok(approval.includes(ORDER_QUESTION) && approval.includes('Yes, place the order.'), approval);
+    const code = await page.eval<string>(textOf(`${card()} [data-question="${second}"]`));
+    assert.ok(code.includes(CODE_QUESTION) && code.includes('(hidden)'), code);
+    assert.equal(await page.eval(`document.documentElement.outerHTML.includes(${JSON.stringify(CODE)})`), false, 'the secret answer is nowhere on the page');
   });
 
   test('the splitter resizes the panels with the mouse and the keyboard', async () => {

@@ -18,6 +18,7 @@ const GROUP_INFO: Record<string, string> = {
   capture: 'PDF export and viewport size.',
   agents: 'Hand whole jobs to sub-agents with their own isolated browser (needs a model: config/models.json or AGENT_LLM_URL). See [AGENTS.md](AGENTS.md).',
   scripts: 'Stored automation scripts made by agent_automate: list, inspect, run (no model needed) and delete.',
+  snapshots: 'Saved sign-ins (cookies and site storage for chosen sites; not page snapshots): list, save, describe, load and delete them. agent_run starts a sub-agent with one. See [SNAPSHOTS.md](SNAPSHOTS.md).',
 };
 
 /** HTML tag names in descriptions (<select>, <form>) as code, so Markdown renderers do not treat them as HTML. */

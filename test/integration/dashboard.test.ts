@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { after, before, describe, test } from 'node:test';
 import { startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 import { startTestServer, type TestServer } from '../helpers/harness.ts';
+import { signIn } from '../helpers/sign-in.ts';
 
 interface SseEvent {
   type: string;
@@ -250,6 +251,66 @@ describe('dashboard', () => {
     }
     // the next test counts viewers, so wait until the server has let both streams go
     await eventually('viewers released', async () => (await getState(srv.baseUrl)).liveView.viewers === before.liveView.viewers);
+  });
+
+  test("the snapshots API lists metadata only; DELETE needs the custom header, this server's Origin and a same-origin fetch", async () => {
+    const name = `dash-${Date.now().toString(36)}`;
+    const s = await signIn(srv, fx, 'dana');
+    const saved = await srv.call('snapshot_save', { name, description: 'Fixture shop — dana' });
+    assert.equal(saved.isError, false, saved.text);
+    const stream = openEventStream(`${srv.baseUrl}/api/events`);
+    try {
+      const hello = await stream.waitFor('hello', (e) => e.type === 'hello');
+      assert.ok(hello.data.history.snapshots?.snapshots.some((x: any) => x.name === name), 'hello carries the snapshots list');
+
+      const api = await fetch(`${srv.baseUrl}/api/snapshots`, { headers: authHeaders() });
+      assert.equal(api.status, 200);
+      assert.equal(api.headers.get('cache-control'), 'no-store');
+      const body = await api.json();
+      assert.equal(typeof body.dir, 'string');
+      assert.equal(typeof body.encrypted, 'boolean');
+      assert.equal(typeof body.unencrypted_count, 'number');
+      const e = body.snapshots.find((x: any) => x.name === name);
+      assert.equal(e.description, 'Fixture shop — dana');
+      assert.equal(e.cookie_count, 1);
+      assert.equal(e.expired_count, 0);
+      assert.deepEqual(e.loaded_in, ['main']);
+      assert.deepEqual(e.active_in, ['main']);
+      const text = JSON.stringify(body);
+      assert.ok(!text.includes(s.token) && !text.includes(s.profile), 'no cookie or storage value');
+
+      const own = new URL(srv.baseUrl).origin;
+      const del = (path: string, headers: Record<string, string>) => fetch(`${srv.baseUrl}/api/snapshots/${path}`, { method: 'DELETE', headers: { ...authHeaders(), ...headers } });
+      const refused: Array<[string, Record<string, string>]> = [
+        ['no X-SBM-Request header', { Origin: own, 'Sec-Fetch-Site': 'same-origin' }],
+        ['no Origin', { 'X-SBM-Request': '1' }],
+        ['a foreign Origin', { 'X-SBM-Request': '1', Origin: 'https://evil.example' }],
+        ['a cross-site fetch', { 'X-SBM-Request': '1', Origin: own, 'Sec-Fetch-Site': 'cross-site' }],
+      ];
+      for (const [label, headers] of refused) {
+        const res = await del(name, headers);
+        assert.equal(res.status, 403, label);
+        assert.equal(typeof (await res.json()).error, 'string', label);
+      }
+      assert.match((await srv.call('snapshot_list')).text, new RegExp(`^- ${name} — `, 'm'), 'nothing was deleted');
+
+      const good = { 'X-SBM-Request': '1', Origin: own, 'Sec-Fetch-Site': 'same-origin' };
+      for (const bad of ['%2f', 'a%2fb', '%00', '.hidden', 'x'.repeat(65)]) {
+        const res = await del(bad, good);
+        assert.equal(res.status, 400, bad);
+        assert.match((await res.json()).error, /Invalid snapshot name/, bad);
+      }
+      assert.equal((await del(`nope-${name}`, good)).status, 404);
+      const ok = await del(name.toUpperCase(), good);
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { deleted: name, loaded_in: ['main'] });
+      await stream.waitFor('snapshots event without it', (ev) => ev.type === 'snapshots' && !ev.data.snapshots.some((x: any) => x.name === name));
+      assert.equal((await del(name, good)).status, 404);
+      assert.doesNotMatch((await srv.call('snapshot_list')).text, new RegExp(`^- ${name} — `, 'm'));
+    } finally {
+      await stream.close();
+      await srv.call('browser_clear_cookies');
+    }
   });
 
   test('a paused (non-live) stream receives events but no frames and is not a viewer', async () => {

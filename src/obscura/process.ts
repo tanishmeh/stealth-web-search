@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { ToolError } from '../browser/errors.ts';
 import type { Config } from '../config.ts';
 import type { Logger } from '../logger.ts';
+import { MAX_WAITING, SCRIPT_MAX_RUNS } from '../util/limits.ts';
 
 export interface ObscuraStatus {
   mode: 'managed' | 'external';
@@ -114,8 +115,9 @@ export class ObscuraProcess extends EventEmitter {
 
   buildArgs(): string[] {
     const o = this.config.obscura;
-    // one CDP connection per browser: the main one, each running sub-agent and its script test, script runs
-    const connections = Math.max(16, 1 + 2 * this.config.agent.maxConcurrent + 8);
+    // one CDP connection per browser: the main one, each running sub-agent and its script test, sub-agents
+    // paused on a question (they keep their browser), script runs, and a few spare
+    const connections = Math.max(16, 1 + 2 * this.config.agent.maxConcurrent + MAX_WAITING + SCRIPT_MAX_RUNS + 4);
     const args = ['serve', '--host', '127.0.0.1', '--port', String(o.cdpPort), '--max-connections', String(connections)];
     if (o.stealth) args.push('--stealth');
     if (o.proxy) args.push('--proxy', o.proxy);

@@ -4,14 +4,18 @@ import type { AddressInfo } from 'node:net';
 import { after, before, describe, test } from 'node:test';
 import pino from 'pino';
 import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars } from '../../src/agents/conversation.ts';
+import { runResult } from '../../src/agents/format.ts';
 import { isSearchResultsPage, quoteFound, quoteMatch, siteOf } from '../../src/agents/kinds.ts';
 import { redactParams } from '../../src/mcp/server.ts';
 import { evaluationSource, isExpression } from '../../src/scripts/api.ts';
 import { ChatClient, LlmError, splitThinking, type ChatMessage } from '../../src/agents/llm.ts';
+import { AgentRun, questionRefusal, questionsAllowed, type AgentInput, type AgentKind } from '../../src/agents/run.ts';
 import { decodeResultUrl } from '../../src/agents/search.ts';
 import { chatCompletionsUrl, loadConfig } from '../../src/config.ts';
 import { Hub, type HubEvent } from '../../src/dashboard/hub.ts';
 import { LogTap } from '../../src/logger.ts';
+import { MAX_WAITING } from '../../src/util/limits.ts';
+import { REDACTED, scrubDeep, scrubText } from '../../src/util/scrub.ts';
 import { startFakeLlm, type FakeLlm } from '../helpers/fake-llm.ts';
 
 const silent = pino({ level: 'silent' });
@@ -50,6 +54,212 @@ describe('agent configuration', () => {
     assert.throws(() => loadConfig({ AGENT_CONTEXT_TOKENS: '16384', AGENT_MAX_OUTPUT_TOKENS: '9000' }), /AGENT_MAX_OUTPUT_TOKENS/);
     assert.throws(() => loadConfig({ AGENT_SEARCH_ENGINE: 'google' }), /AGENT_SEARCH_ENGINE/);
     assert.throws(() => loadConfig({ AGENT_LLM_THINKING: 'maybe' }), /AGENT_LLM_THINKING/);
+  });
+
+  test('questions to the host: a 30 min reply timeout and 5 questions per run by default; 0 turns them off', () => {
+    const c = loadConfig({});
+    assert.equal(c.agent.replyTimeoutMs, 1_800_000);
+    assert.equal(c.agent.maxQuestions, 5);
+    assert.equal(loadConfig({ AGENT_REPLY_TIMEOUT_MS: '10000' }).agent.replyTimeoutMs, 10_000);
+    assert.equal(loadConfig({ AGENT_MAX_QUESTIONS: '0' }).agent.maxQuestions, 0);
+    assert.equal(loadConfig({ AGENT_MAX_QUESTIONS: '50' }).agent.maxQuestions, 50);
+    assert.throws(() => loadConfig({ AGENT_REPLY_TIMEOUT_MS: '9999' }), /AGENT_REPLY_TIMEOUT_MS/);
+    assert.throws(() => loadConfig({ AGENT_REPLY_TIMEOUT_MS: 'soon' }), /AGENT_REPLY_TIMEOUT_MS/);
+    assert.throws(() => loadConfig({ AGENT_MAX_QUESTIONS: '51' }), /AGENT_MAX_QUESTIONS/);
+    assert.throws(() => loadConfig({ AGENT_MAX_QUESTIONS: '-1' }), /AGENT_MAX_QUESTIONS/);
+  });
+});
+
+describe('sub-agent questions to the host', () => {
+  const config = loadConfig({ AGENT_LLM_URL: 'http://127.0.0.1:1/v1' });
+  const input = (extra: Partial<AgentInput> = {}): AgentInput => ({ task: 'Buy the cable', output: 'the order number', outputFormat: 'text', maxSteps: 20, ...extra });
+  const newRun = (kind: AgentKind = 'task', extra: Partial<AgentInput> = {}) => {
+    const run = new AgentRun('r1a2b3c4', kind, input(extra), 'host-client');
+    run.status = 'running';
+    run.startedAt = new Date().toISOString();
+    return run;
+  };
+  const env = (waiting = 0, cfg = config) => ({ config: cfg, waitingCount: () => waiting }) as any;
+
+  test('who may ask: task and automation agents, unless the host or AGENT_MAX_QUESTIONS=0 says no; never the finder', () => {
+    assert.equal(questionsAllowed(newRun('task'), config), true);
+    assert.equal(questionsAllowed(newRun('automation'), config), true);
+    assert.equal(questionsAllowed(newRun('finder'), config), false);
+    assert.equal(questionsAllowed(newRun('task', { allowQuestions: false }), config), false);
+    assert.equal(questionsAllowed(newRun('task'), loadConfig({ AGENT_LLM_URL: 'http://127.0.0.1:1/v1', AGENT_MAX_QUESTIONS: '0' })), false);
+  });
+
+  test('a question is refused (the run does not pause) at the cap, when too many runs wait, or with too little budget left', () => {
+    const run = newRun();
+    run.deadline = Date.now() + 10 * 60_000;
+    run.step = 1;
+    assert.equal(questionRefusal(run, env()), null);
+    run.questionTurns = 5;
+    assert.match(questionRefusal(run, env())!, /^you already asked 5 questions, the limit for one job\. Decide on your own/);
+    run.questionTurns = 0;
+    assert.match(questionRefusal(run, env(MAX_WAITING))!, /^too many jobs are waiting for the host right now \(10\)/);
+    assert.equal(questionRefusal(run, env(MAX_WAITING - 1)), null);
+    run.step = 18; // 2 steps left: not enough to act on an answer
+    assert.equal(questionRefusal(run, env()), 'too little budget left to act on an answer; finish with success=false and say what needs approval');
+    run.questionTurns = 1; // question turns are free: 3 steps left again
+    assert.equal(questionRefusal(run, env()), null);
+    run.deadline = Date.now() + 90_000;
+    assert.match(questionRefusal(run, env())!, /^too little budget left/);
+  });
+
+  test('a waiting run reports its question, the reason hint and the exact agent_reply call', async () => {
+    const run = newRun();
+    run.step = 2;
+    const closed = run.ask({ text: 'Place the order for the USB-C cable, $12.99?', options: ['Yes', 'No'], reason: 'confirm', secret: false, pageUrl: 'https://shop.example/checkout?step=2' }, 1_800_000);
+    try {
+      const q = run.question!;
+      assert.match(q.id, /^q[0-9a-f]{6}$/);
+      assert.equal(run.status, 'waiting');
+      assert.equal(run.isWaiting, true);
+      assert.equal(run.stepsUsed, 1, 'the question turn is free');
+      const r = runResult(run);
+      assert.equal(r.isError, false);
+      assert.equal(
+        r.text,
+        [
+          `Run r1a2b3c4 is waiting for your answer (question ${q.id}, asked on https://shop.example):`,
+          '',
+          'Place the order for the USB-C cable, $12.99?',
+          '',
+          'Options: Yes | No',
+          '',
+          'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this.',
+          '',
+          `The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r1a2b3c4", "question_id": "${q.id}", "answer": "..."}`,
+          'Unanswered after 30 min it continues without an answer; agent_cancel stops it. Do not end your turn while it waits.',
+        ].join('\n'),
+      );
+      assert.equal(r.structured.status, 'waiting');
+      assert.equal(r.structured.steps, 1);
+      assert.deepEqual(r.structured.question, {
+        id: q.id,
+        text: 'Place the order for the USB-C cable, $12.99?',
+        options: ['Yes', 'No'],
+        reason: 'confirm',
+        secret: false,
+        page_url: 'https://shop.example/checkout?step=2',
+        origin: 'https://shop.example',
+        asked_at: q.askedAt,
+        expires_at: q.expiresAt,
+      });
+      assert.deepEqual(r.structured.reply_with, { tool: 'agent_reply', arguments: { run_id: 'r1a2b3c4', question_id: q.id, answer: '<your answer>' } });
+      const summary = run.summary() as any;
+      assert.equal(summary.status, 'waiting');
+      assert.equal(summary.question?.id, q.id);
+      assert.equal(summary.questions, 1);
+    } finally {
+      run.closeQuestion('cancelled');
+    }
+    assert.equal((await closed).status, 'cancelled');
+  });
+
+  test('closing a question changes the run at once; the answer is recorded and reported with the result', async () => {
+    const run = newRun();
+    run.step = 1;
+    const closed = run.ask({ text: 'Which colour?', options: ['red', 'blue'], reason: 'choose', secret: false, pageUrl: null }, 60_000);
+    assert.match(runResult(run).text, /asked on no web page/);
+    assert.doesNotMatch(runResult(run).text, /cannot be undone|never send a password/, 'no hint for a plain choice');
+    const record = run.closeQuestion('answered', { answer: 'blue', by: 'other-client' })!;
+    // synchronously, before the paused tool call even resumes
+    assert.equal(run.status, 'running');
+    assert.equal(run.question, null);
+    assert.equal(run.isWaiting, false);
+    assert.equal(run.activity, 'resuming: waiting for a free agent slot');
+    assert.equal(record.status, 'answered');
+    assert.equal(record.answer, 'blue');
+    assert.equal(record.answeredBy, 'other-client');
+    assert.equal(run.closeQuestion('expired'), null, 'a closed question cannot be closed again');
+    assert.deepEqual(await closed, { status: 'answered', answer: 'blue', secret: false });
+
+    run.endPause();
+    assert.ok(run.pausedMs >= 0);
+    run.outcome = { success: true, output: 'ORDER-1' };
+    run.finish('completed');
+    const r = runResult(run);
+    assert.match(r.text, /Questions the agent asked you \(paused [\d.]+ s in total\):\n- q[0-9a-f]{6} \(choose, answered\): Which colour\? → "blue"/);
+    assert.deepEqual(r.structured.questions, [
+      { id: record.id, text: 'Which colour?', reason: 'choose', origin: null, answer: 'blue', asked_at: record.askedAt, answered_at: record.answeredAt, status: 'answered' },
+    ]);
+    assert.equal(typeof r.structured.waited_ms, 'number');
+  });
+
+  test('a question that expires or is cancelled carries no answer', async () => {
+    const run = newRun();
+    const expired = run.ask({ text: 'Size?', options: [], reason: 'missing_info', secret: false, pageUrl: null }, 60_000);
+    run.closeQuestion('expired');
+    assert.deepEqual(await expired, { status: 'expired', answer: null, secret: false });
+    assert.equal(run.questions[0]!.status, 'expired');
+    assert.equal(run.questions[0]!.answer, null);
+    assert.equal(run.questions[0]!.answeredAt, null);
+
+    const cancelled = run.ask({ text: 'Again?', options: [], reason: 'missing_info', secret: false, pageUrl: null }, 60_000);
+    run.abort.abort();
+    assert.deepEqual(await cancelled, { status: 'cancelled', answer: null, secret: false });
+    assert.equal(run.questions[1]!.status, 'cancelled');
+    assert.equal(run.questionTurns, 2);
+  });
+
+  test('a secret answer reaches the model only: it is never stored, and masked in everything the run reports', async () => {
+    const run = newRun();
+    const closed = run.ask({ text: 'What is the sign-in code?', options: [], reason: 'sign_in', secret: true, pageUrl: 'https://login.shop.example/otp' }, 1_800_000);
+    const waiting = runResult(run);
+    assert.match(waiting.text, /Tell your user which site asks \(see "asked on"\); never send a password; do not relay a code for a site the task did not name\./);
+    assert.match(waiting.text, /"answer": "\.\.\.", "secret": true\}/);
+    assert.equal((waiting.structured.reply_with as any).arguments.secret, true);
+    run.closeQuestion('answered', { answer: ' 482913 ', by: 'host-client' });
+    assert.deepEqual(await closed, { status: 'answered', answer: ' 482913 ', secret: true }, 'the model gets the real answer');
+    assert.equal(run.questions[0]!.answer, null);
+    assert.equal(run.questions[0]!.answerChars, 8);
+    assert.ok(run.secretValues.has('482913'), 'trimmed');
+    assert.equal(run.scrub('typed 482913 into Code'), `typed ${REDACTED} into Code`);
+
+    run.thinking = 'I will type 482913 now';
+    assert.doesNotMatch(String(run.summary().thinking), /482913/);
+    run.outcome = { success: true, output: 'Signed in with code 482913', notes: 'used 482913' };
+    run.notes.push('code is 482913');
+    run.finish('completed');
+    const r = runResult(run);
+    assert.doesNotMatch(r.text, /482913/);
+    assert.doesNotMatch(JSON.stringify(r.structured), /482913/);
+    assert.equal((r.structured.questions as any[])[0].answer, REDACTED);
+    assert.match(String(r.structured.output), /Signed in with code \[REDACTED\]/);
+    assert.doesNotMatch(JSON.stringify(run.summary()), /482913/);
+    assert.equal(run.outcome.output, 'Signed in with code 482913', 'the run itself is unchanged');
+  });
+
+  test('the host can mark an answer secret; very short answers are not masked by value', async () => {
+    const run = newRun();
+    const first = run.ask({ text: 'Which account?', options: [], reason: 'choose', secret: false, pageUrl: null }, 60_000);
+    run.closeQuestion('answered', { answer: 'work-7781', secret: true, by: null });
+    await first;
+    assert.equal(run.questions[0]!.secret, true);
+    assert.equal(run.questions[0]!.answer, null);
+    assert.ok(run.secretValues.has('work-7781'));
+    const second = run.ask({ text: 'PIN?', options: [], reason: 'sign_in', secret: true, pageUrl: null }, 60_000);
+    run.closeQuestion('answered', { answer: 'yes', by: null });
+    await second;
+    assert.equal(run.secretValues.has('yes'), false, 'masking "yes" everywhere would hide ordinary words');
+    assert.equal(run.questions[1]!.answer, null, 'but it is still not stored');
+  });
+
+  test('masking helpers replace every occurrence, longest secret first, and keep unchanged values as they are', () => {
+    const secrets = new Set(['1234', '123456']);
+    assert.equal(scrubText('a 123456 b 1234 c', secrets), `a ${REDACTED} b ${REDACTED} c`);
+    assert.equal(scrubText('nothing here', secrets), 'nothing here');
+    assert.equal(scrubText('1234', new Set()), '1234');
+    const scrub = (t: string) => scrubText(t, secrets);
+    const value = { a: ['x 1234', { b: 'y' }], n: 5, keep: { c: 'z' } };
+    const out = scrubDeep(value, scrub);
+    assert.deepEqual(out, { a: [`x ${REDACTED}`, { b: 'y' }], n: 5, keep: { c: 'z' } });
+    assert.equal(out.keep, value.keep, 'unchanged parts are not copied');
+    assert.equal(value.a[0], 'x 1234', 'the input is not modified');
+    const date = new Date(0);
+    assert.equal(scrubDeep(date, scrub), date, 'class instances are left alone');
   });
 });
 
@@ -419,6 +629,41 @@ describe('dashboard hub with several browsers', () => {
     assert.deepEqual(hub.history('agent-r1').console.map((c) => c.text), ['from agent']);
     assert.deepEqual(hub.history().console.map((c) => c.text), ['from main']);
     assert.equal(hub.history().agents.length, 1);
+  });
+
+  test('over 100 runs the oldest finished ones are dropped first; queued, running and waiting runs never', () => {
+    const hub = new Hub(new LogTap());
+    hub.publishAgent({ id: 'waiting-1', kind: 'task', status: 'waiting' });
+    hub.publishAgent({ id: 'running-1', kind: 'task', status: 'running' });
+    hub.publishAgent({ id: 'queued-1', kind: 'task', status: 'queued' });
+    for (let i = 0; i < 120; i++) hub.publishAgent({ id: `done-${i}`, kind: 'task', status: i % 3 === 0 ? 'failed' : i % 3 === 1 ? 'cancelled' : 'completed' });
+    const ids = hub.history().agents.map((a: any) => a.id);
+    assert.equal(ids.length, 100);
+    assert.deepEqual(ids.slice(0, 3), ['waiting-1', 'running-1', 'queued-1']);
+    assert.equal(ids[3], 'done-23', 'the oldest finished runs went first');
+    assert.equal(ids.at(-1), 'done-119');
+
+    // more unfinished runs than the cap: none is dropped
+    const busy = new Hub(new LogTap());
+    for (let i = 0; i < 105; i++) busy.publishAgent({ id: `w-${i}`, kind: 'task', status: i % 2 ? 'waiting' : 'running' });
+    assert.equal(busy.history().agents.length, 105);
+    // once one of them finishes it is the only one that can go
+    busy.publishAgent({ id: 'w-0', kind: 'task', status: 'completed' });
+    assert.equal(busy.history().agents.length, 104);
+    assert.ok(!busy.history().agents.some((a: any) => a.id === 'w-0'));
+    assert.ok(busy.history().agents.every((a: any) => a.status !== 'completed'));
+  });
+
+  test('the snapshots list reaches every viewer and is kept for viewers that connect later', () => {
+    const hub = new Hub(new LogTap());
+    assert.equal(hub.history().snapshots, null);
+    const agentViewer: HubEvent[] = [];
+    hub.subscribe((e) => agentViewer.push(e), false, 'agent-r9');
+    const payload = { snapshots: [{ name: 'shop', loaded_in: ['main'], active_in: ['main'] }], dir: '/data/snapshots', encrypted: false, unencrypted_count: 1 };
+    hub.publish('snapshots', payload);
+    assert.deepEqual(agentViewer.map((e) => e.type), ['snapshots'], 'not scoped to one browser');
+    assert.equal(hub.history().snapshots, payload);
+    assert.equal(hub.history('agent-r9').snapshots, payload);
   });
 
   test('a channel only hears about its own viewers', () => {

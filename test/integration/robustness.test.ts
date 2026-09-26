@@ -47,6 +47,9 @@ function spawnMain(port: number, env: Record<string, string | null> = {}): RawSe
     LOG_LEVEL: 'info',
     SBM_EXIT_WITH_PARENT: '1',
     AGENT_MODELS_FILE: 'none',
+    // never the developer's saved sign-ins or key
+    SNAPSHOTS_DIR: mkdtempSync(path.join(tmpdir(), 'sbm-rob-snapshots-')),
+    SNAPSHOTS_KEY: '',
   };
   for (const [k, v] of Object.entries(env)) {
     if (v === null) delete merged[k];

@@ -83,6 +83,9 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
         SBM_EXIT_WITH_PARENT: '1',
         // never the developer's own config/models.json: tests configure their model themselves
         AGENT_MODELS_FILE: 'none',
+        // never the developer's saved sign-ins or key
+        SNAPSHOTS_DIR: mkdtempSync(path.join(tmpdir(), 'sbm-test-snapshots-')),
+        SNAPSHOTS_KEY: '',
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],

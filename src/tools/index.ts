@@ -8,6 +8,7 @@ import interaction from './interaction.ts';
 import navigation from './navigation.ts';
 import scripts from './scripts.ts';
 import snapshot from './snapshot.ts';
+import snapshots from './snapshots.ts';
 import state from './state.ts';
 import tabs from './tabs.ts';
 import { TOOL_GROUPS, type ToolDefinition } from './types.ts';
@@ -26,11 +27,12 @@ export const ALL_TOOLS: ToolDefinition<any>[] = [
   ...debug,
   ...agents,
   ...scripts,
+  ...snapshots,
 ];
 
 /**
  * Tools exposed to MCP clients, filtered by TOOLSETS. Accepts group names
- * (core, content, forms, tabs, state, debug, capture, agents, scripts), "all",
+ * (core, content, forms, tabs, state, debug, capture, agents, scripts, snapshots), "all",
  * and individual tool names (e.g. "core,browser_evaluate"). The agent tools
  * are only offered when a model is configured (config/models.json or AGENT_LLM_URL).
  */

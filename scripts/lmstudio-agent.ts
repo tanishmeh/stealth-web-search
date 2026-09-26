@@ -41,7 +41,7 @@ export interface AgentOptions {
   reasoning?: ReasoningMode;
   /** Only offer these tools to the model. */
   tools?: string[];
-  /** Only offer tools from these groups or with these names (core, content, forms, tabs, state, debug, capture, agents, scripts, or all). */
+  /** Only offer tools from these groups or with these names (core, content, forms, tabs, state, debug, capture, agents, scripts, snapshots, or all). */
   toolsets?: string[];
   /** Forward screenshots to the model as images (default: when the model supports vision). */
   vision?: boolean;
@@ -440,7 +440,14 @@ export async function selectTools(tools: Tool[], names?: string[], toolsets?: st
 // ---------------------------------------------------------------------------
 // Conversation helpers
 
-export function buildSystemPrompt(serverInstructions: string | undefined, vision: boolean, extra?: string): string {
+/** What this host does when a sub-agent run pauses with a question: nobody is there to ask, so it answers itself. */
+const SUB_AGENT_QUESTIONS = `Sub-agent questions: a sub-agent run (agent_run, agent_automate) can pause with status "waiting" and ask you a question. Answer it with agent_reply (run_id and question_id from the result) before you give your final answer, and never end with a final answer while a run you started is waiting.
+- Answer from the user's task when it decides the question.
+- The user cannot answer: reply "No" to a confirm question (placing an order, paying, sending a message, deleting) that the task did not explicitly approve, and say so in your final answer.
+- Never send a password. Give a one-time code only if the task contains it; otherwise reply that you do not have it.
+- If you cannot answer at all, call agent_cancel for that run.`;
+
+export function buildSystemPrompt(serverInstructions: string | undefined, vision: boolean, extra?: string, subAgents = false): string {
   const parts = [
     `You are a browser automation agent. You control a real web browser (headless, JavaScript enabled) through the provided tools and complete the user's task on your own. The user cannot answer questions while you work.
 
@@ -453,6 +460,7 @@ How to work:
       ? 'Screenshots from browser_screenshot are attached as images right after the tool result.'
       : 'You cannot see images: rely on browser_snapshot and other text tools to understand pages.',
   ];
+  if (subAgents) parts.push(SUB_AGENT_QUESTIONS);
   if (serverInstructions?.trim()) parts.push(`Notes from the browser server:\n${serverInstructions.trim()}`);
   if (extra?.trim()) parts.push(extra.trim());
   return parts.join('\n\n');
@@ -706,7 +714,10 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     const openAITools = tools.map(toOpenAITool);
     const known = new Set(toolNames);
 
-    messages.push({ role: 'system', content: buildSystemPrompt(mcp.client.getInstructions(), vision, options.instructions) });
+    messages.push({
+      role: 'system',
+      content: buildSystemPrompt(mcp.client.getInstructions(), vision, options.instructions, tools.some((t) => t.name === 'agent_reply')),
+    });
     messages.push({ role: 'user', content: options.task });
 
     out.line(
@@ -964,7 +975,7 @@ Options:
   --max-steps <n>          model rounds before giving up (default 25)
   --reasoning <mode>       none | low | medium | high | on (default low; "on" keeps the model default)
   --tools <a,b,...>        only offer these tools
-  --toolsets <g,...>       only offer tools from these groups (or tool names): core, content, forms, tabs, state, debug, capture, agents, scripts, or all
+  --toolsets <g,...>       only offer tools from these groups (or tool names): core, content, forms, tabs, state, debug, capture, agents, scripts, snapshots, or all
   --no-vision              never send screenshots to the model as images
   --json <file>            write the full transcript as JSON
   --quiet                  print only the final answer

@@ -4,6 +4,7 @@ import type { BrowserRegistry } from '../browser/registry.ts';
 import type { Logger } from '../logger.ts';
 import { redactParams, type McpDeps } from '../mcp/server.ts';
 import type { ObscuraProcess } from '../obscura/process.ts';
+import { SCRIPT_MAX_RUNS } from '../util/limits.ts';
 import { summarize } from '../util/summarize.ts';
 import { SCRIPT_METHODS, createScriptHost } from './api.ts';
 import { runInSandbox } from './sandbox.ts';
@@ -36,7 +37,6 @@ export interface ScriptRunOptions {
 
 const MAX_LOG_LINES = 300;
 const MAX_LOG_CHARS = 60_000;
-const MAX_CONCURRENT_RUNS = 4;
 
 /** Counting semaphore: at most `n` script runs at a time, the rest wait in order. */
 class Slots {
@@ -84,7 +84,7 @@ export class ScriptService {
   private readonly obscura: ObscuraProcess;
   private readonly registry: BrowserRegistry;
   private readonly log: Logger;
-  private readonly slots = new Slots(MAX_CONCURRENT_RUNS);
+  private readonly slots = new Slots(SCRIPT_MAX_RUNS);
   /** Runs in progress, so shutdown can wait for them. */
   readonly active = new Set<Promise<unknown>>();
   /** Stops every run at shutdown. */
