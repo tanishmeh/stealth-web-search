@@ -42,7 +42,8 @@ Stealth Web Search is an [MCP](https://modelcontextprotocol.io) server that give
 ## Features
 
 - **A real browser for agents.** 41 `browser_*` tools cover navigation, reading pages (text, Markdown, links, structured extraction), clicking, typing, forms, keyboard, scrolling, waiting, tabs, cookies and session state, JavaScript evaluation, console and network inspection, screenshots and PDFs. See the [tool reference](docs/TOOLS.md).
-- **Sub-agents.** Hand a whole job to an agent that runs inside the container with its own isolated browser and any OpenAI-compatible model (vLLM, LM Studio, Ollama, llama.cpp, OpenAI…). `agent_run` completes a TASK and returns the OUTPUT you describe; `agent_automate` also writes, verifies and stores a reusable script and tells you its parameters and how to run it; `agent_find` searches the web, cross-checks several sources and returns the answer with cited links. Stored scripts replay later with `script_run`, with no model. See [Sub-agents](docs/AGENTS.md).
+- **Sub-agents.** Hand a whole job to an agent that runs inside the container with its own isolated browser and any OpenAI-compatible model (vLLM, LM Studio, Ollama, llama.cpp, OpenAI…). `agent_run` completes a TASK and returns the OUTPUT you describe; `agent_automate` also writes, verifies and stores a reusable script and tells you its parameters and how to run it; `agent_find` searches the web, cross-checks several sources and returns the answer with cited links. Stored scripts replay later with `script_run`, with no model. A run asks your agent only when it has to, for example before it places an order or for a sign-in code, and continues when your agent answers with `agent_reply`. See [Sub-agents](docs/AGENTS.md).
+- **Saved sign-ins.** Sign in once, save it as a named, described snapshot (cookies and site storage for chosen sites), and load it into your browser or start a sub-agent with it, so agents do not sign in again. A successful run keeps the snapshot's sign-in fresh, snapshots can be encrypted at rest, and the dashboard lists them and deletes them on request. See [Snapshots](docs/SNAPSHOTS.md).
 - **One JSON file for the model.** Point the sub-agents at your model with [`config/models.json`](docs/MODELS.md), in the same provider format editors use for custom endpoints. It is validated at startup, and one command in the container shows what the agents will use and whether the model answers.
 - **JavaScript rendering.** Pages run their scripts in V8 before the agent reads them. Single-page apps and content loaded with JavaScript work.
 - **Stealth by default.** Obscura's stealth build uses a consistent Chrome fingerprint, TLS fingerprint impersonation, `navigator.webdriver` reported as `false`, and tracker blocking. Element references stay on the server, so tools never write marker attributes or globals into pages.
@@ -70,7 +71,7 @@ flowchart LR
     B -->|JSON logs| L[("./logs")]
 ```
 
-All MCP clients share one browser. Tool calls run one at a time, in order, so an agent always sees the result of its previous action. Sub-agents and scripts each get a private browser (their own tabs and cookies) on a second engine process, so they never disturb the shared one or each other. Details: [Architecture](docs/ARCHITECTURE.md).
+All MCP clients share one browser. Tool calls run one at a time, in order, so an agent always sees the result of its previous action. Sub-agents and scripts each get a private browser (their own tabs and cookies) on a second engine process, so they never disturb the shared one or each other. A sub-agent's browser starts signed out, unless your agent passes it a snapshot. Details: [Architecture](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -101,6 +102,7 @@ The defaults work for most setups. To change a setting, `cp .env.example .env` a
 | `TOOLSETS` | `all` | Use `core,content,forms` for small local models |
 | `OBSCURA_PROXY` | — | Route browsing through an HTTP or SOCKS5 proxy |
 | `HOST_PORT` | `8931` | Port 8931 is taken |
+| `SNAPSHOTS_KEY` | — | Set a secret to encrypt saved sign-ins ([snapshots](docs/SNAPSHOTS.md)) at rest |
 
 All options are in [Configuration](docs/CONFIGURATION.md). Apply changes with `docker compose up -d`.
 
@@ -204,7 +206,8 @@ Open **http://127.0.0.1:8931/** while an agent works.
 - **Live view.** The agent's active tab updates as the page changes, and animated markers show where the agent clicks, types or scrolls. A banner shows which tool is running and how many calls are queued. Buttons: **Pause** (`P`), **Fullscreen** (`F`), and **Screenshot** (full-resolution PNG).
 - **Activity.** One card per tool call with its status, duration, calling client, arguments and result. Filter by tool or show errors only.
 - **Console / Network / Logs / Sessions.** Page console output and uncaught errors; network requests with status, type and size; the live server log with level, component and text filters and a download button; connected MCP clients.
-- **Agents.** Sub-agent runs with their kind, status, current step and action, streaming reasoning and result. **Details** shows every step and the cited sources, and **Watch** (or the browser picker next to the address bar) switches the live view, console and network panes to that run's private browser. Stored automation scripts are listed below the runs.
+- **Agents.** Sub-agent runs with their kind, status, current step and action, streaming reasoning and result. A run that waits for an answer shows its question. **Details** shows every step, the cited sources and the questions asked, and **Watch** (or the browser picker next to the address bar) switches the live view, console and network panes to that run's private browser. Stored automation scripts are listed below the runs.
+- **Snapshots.** The saved sign-ins: name, description, sites, cookie counts and where each one is loaded, with a **Delete** button that asks for confirmation.
 
 | Watching a sub-agent's browser | A finder run's steps and sources |
 |---|---|
@@ -223,14 +226,15 @@ The screencast runs only while a dashboard is open and not paused, so the agent 
 | `state` (5) | `browser_get_cookies`, `browser_set_cookie`, `browser_clear_cookies`, `browser_storage_state`, `browser_set_storage_state` |
 | `debug` (3) | `browser_evaluate`, `browser_console_messages`, `browser_network_requests` |
 | `capture` (2) | `browser_pdf`, `browser_set_viewport` |
-| `agents` (6) | `agent_run`, `agent_automate`, `agent_find`, `agent_wait`, `agent_status`, `agent_cancel` (only when a model is configured) |
+| `agents` (7) | `agent_run`, `agent_automate`, `agent_find`, `agent_wait`, `agent_status`, `agent_cancel`, `agent_reply` (only when a model is configured) |
 | `scripts` (4) | `script_list`, `script_get`, `script_run`, `script_delete` |
+| `snapshots` (5) | `snapshot_list`, `snapshot_save`, `snapshot_describe`, `snapshot_load`, `snapshot_delete` |
 
-A typical agent loop: `browser_navigate`, then `browser_snapshot` (page text plus interactive elements with refs such as `e7`), then `browser_click {ref: "e7"}` / `browser_fill` / `browser_type`, then `browser_snapshot` again. Parameters and behaviour: [docs/TOOLS.md](docs/TOOLS.md).
+That is 57 tools with a sub-agent model configured, 50 without. A typical agent loop: `browser_navigate`, then `browser_snapshot` (page text plus interactive elements with refs such as `e7`), then `browser_click {ref: "e7"}` / `browser_fill` / `browser_type`, then `browser_snapshot` again. Parameters and behaviour: [docs/TOOLS.md](docs/TOOLS.md).
 
 ## Logging
 
-Logs go to stdout (`docker compose logs`) at `info` and to `./logs/` at `debug`. `./logs/` holds JSON lines, rotated daily or at 20 MB, 14 files kept, and `logs/current.log` points at the newest. Each entry has a `component`: `http`, `mcp`, `mcp-session`, `tool`, `browser`, `cdp`, `page-console`, `page-network`, `obscura`, `obscura-engine`, `live-view`, `dashboard`, `agent`, `agent-llm`, `script`. Sub-agent entries carry `agentRunId` and `browserId`, and every sub-agent run also leaves a JSON transcript in `./logs/agent-runs/`. Long payloads are truncated and images are replaced by size plus hash, with a note saying how much was cut. Passwords, cookie values and credential headers are masked unless `LOG_REDACT_SECRETS=false`.
+Logs go to stdout (`docker compose logs`) at `info` and to `./logs/` at `debug`. `./logs/` holds JSON lines, rotated daily or at 20 MB, 14 files kept, and `logs/current.log` points at the newest. Each entry has a `component`: `http`, `mcp`, `mcp-session`, `tool`, `browser`, `cdp`, `page-console`, `page-network`, `obscura`, `obscura-engine`, `live-view`, `dashboard`, `agent`, `agent-llm`, `script`, `snapshots`. Sub-agent entries carry `agentRunId` and `browserId`, and every sub-agent run also leaves a JSON transcript in `./logs/agent-runs/`. Long payloads are truncated and images are replaced by size plus hash, with a note saying how much was cut. Passwords, cookie values and credential headers are masked unless `LOG_REDACT_SECRETS=false`; the host's answers to sub-agent questions, secret answers such as one-time codes, and the cookies of saved sign-ins are masked always.
 
 ```bash
 # every tool call and its result, live
@@ -250,10 +254,11 @@ This server gives whoever can reach it a browser that runs on your machine. Trea
 - Obscura's CDP port is bound to the container's loopback interface and never published. Running the server directly instead of in Docker (`npm run dev`) exposes an **unauthenticated** Obscura CDP socket on `127.0.0.1` for as long as the server runs — anything with access to your loopback interface can drive that browser. The port is random unless you set `OBSCURA_CDP_PORT`. The Docker image keeps this socket inside the container; prefer Docker on shared or multi-user machines.
 - The container runs as a non-root user on a read-only filesystem, with all capabilities dropped and `no-new-privileges`.
 - Sub-agent and script browsers run on a second Obscura engine process (`OBSCURA_SEPARATE_ENGINE`, on by default): a page that crashes the engine there cannot reset your browser, and with `OBSCURA_STORAGE_DIR` (persisted cookies) untrusted pages they visit never see your persisted logins.
+- Snapshots are live sign-ins. They are stored owner-only on the `snapshots` volume, encrypted when you set `SNAPSHOTS_KEY`, and never logged. A sub-agent gets one only when your agent passes it to `agent_run`, and it and the pages it opens can then act as that account. The dashboard's delete request is protected against other websites (custom header and `Origin` check). See [Snapshots](docs/SNAPSHOTS.md#security-notes).
 - `config/models.json` can hold API keys. It is gitignored and kept out of the Docker build context; it reaches the container only through the read-only `./config` mount.
-- Pages visited by the agent are untrusted input. An agent can be manipulated by text on a page (prompt injection), so keep a human in the loop for sensitive accounts. Sub-agents are told to treat pages as data, work in private browsers that start without cookies, and use the same URL and private-network guards.
+- Pages visited by the agent are untrusted input. An agent can be manipulated by text on a page (prompt injection), so keep a human in the loop for sensitive accounts. Sub-agents are told to treat pages as data, work in private browsers that start without cookies unless your agent passes a snapshot, and use the same URL and private-network guards. They ask your agent before orders, payments and other steps that cannot be undone, and your agent should relay those questions to you.
 - Automation scripts run in a QuickJS WebAssembly sandbox with no Node.js APIs (no file system, network or processes) and with memory, time and call limits. Their only access to the outside is the guarded browser.
-- Obscura v0.2.2 does not enforce Chromium's cross-site request protections: it sends `SameSite=Strict`/`Lax` cookies on cross-site requests and treats `application/json` POSTs as simple requests (no CORS preflight). A page the agent visits can therefore make cross-site requests carrying any cookies you gave the browser (`browser_set_cookie`, `browser_set_storage_state`, or cookies persisted with `OBSCURA_STORAGE_DIR`). Treat visited pages as untrusted and avoid persisting sensitive logins. See [Configuration](docs/CONFIGURATION.md).
+- Obscura v0.2.2 does not enforce Chromium's cross-site request protections: it sends `SameSite=Strict`/`Lax` cookies on cross-site requests and treats `application/json` POSTs as simple requests (no CORS preflight). A page the agent visits can therefore make cross-site requests carrying any cookies you gave the browser (`browser_set_cookie`, `browser_set_storage_state`, a loaded snapshot, or cookies persisted with `OBSCURA_STORAGE_DIR`). Treat visited pages as untrusted and avoid persisting sensitive logins. See [Configuration](docs/CONFIGURATION.md).
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
@@ -266,7 +271,8 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 | [LM Studio](docs/LM_STUDIO.md) | LM Studio chats with the tools, the command-line agent, LM Studio as the sub-agents' model, end-to-end checks |
 | [Configuration](docs/CONFIGURATION.md) | Every environment variable |
 | [Model configuration](docs/MODELS.md) | `config/models.json`: format, model choice, overrides, examples |
-| [Sub-agents](docs/AGENTS.md) | `agent_run`, `agent_automate`, `agent_find`, scripts and their API |
+| [Sub-agents](docs/AGENTS.md) | `agent_run`, `agent_automate`, `agent_find`, questions and `agent_reply`, scripts and their API |
+| [Snapshots](docs/SNAPSHOTS.md) | Saved sign-ins: saving, loading, sub-agents, encryption, the dashboard tab |
 | [Tool reference](docs/TOOLS.md) | Every tool's parameters and behaviour (generated from the code) |
 | [Logging](docs/LOGGING.md) | What is logged, where, and how to query it |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common problems and fixes |
@@ -319,9 +325,11 @@ src/
   cdp/client.ts        Chrome DevTools Protocol client
   browser/             browsers (shared + isolated), tabs, page scripts, live view
   mcp/                 HTTP server, MCP transports, sessions, tool runner
-  tools/               the browser_*, agent_* and script_* tools
+  tools/               the browser_*, agent_*, script_* and snapshot_* tools
   agents/              sub-agents: model client, agent loop, the three agent kinds, web search
   scripts/             automation scripts: store, QuickJS sandbox, browser API
+  snapshots/           saved sign-ins: encrypted file store, capture and load
+  util/                shared helpers: log summaries, secret masking, limits
   dashboard/           dashboard API and static UI
   stdio-bridge.ts      stdio <-> HTTP bridge
 config/                models.example.json (copy to models.json)
@@ -341,7 +349,7 @@ These come from the Obscura engine (v0.2.2) and are handled or reported by the t
 - Hover does not trigger anything (no `mouseover`), so hover-only menus do not open. Drag and drop and file uploads are not supported.
 - Screenshots do not show typed input values or checkbox states (the values are set), and CJK, Thai and Devanagari text renders as boxes in screenshots. Text extraction is unaffected.
 - In stealth mode, `fetch`/XHR calls made by page scripts do not appear in `browser_network_requests`. Documents, scripts, stylesheets and images do.
-- `localStorage` and `sessionStorage` do not survive a navigation or reload. Cookies do, and persist across restarts with `OBSCURA_STORAGE_DIR`.
+- `localStorage` and `sessionStorage` do not survive a navigation or reload. Cookies do, and persist across restarts with `OBSCURA_STORAGE_DIR`. A loaded snapshot writes its saved site storage again on every page load.
 - URL-fragment navigation is ignored: clicking an `<a href="#…">` link or setting `location.hash` does not fire `hashchange` or change a hash-based SPA route. Use the app's real navigation, or `browser_evaluate` to call `history.pushState` and dispatch a `hashchange`/`popstate` event.
 - Inline elements that follow a block-level sibling can be laid out with a 0×0 box, so a few genuinely visible elements may be skipped by visibility checks and not captured in screenshots. Text extraction still sees them.
 - Background tabs can lose their in-page JavaScript state when you switch tabs.

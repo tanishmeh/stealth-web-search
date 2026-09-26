@@ -10,19 +10,23 @@ Besides the `browser_*` tools, which let your agent (the **host agent**) drive t
 
 The regular `browser_*` tools stay available: the host can keep driving its own browser while sub-agents work.
 
+Sub-agents work on their own, but a run can pause and ask the host a question when it cannot continue correctly without one, for example before it places an order: see [Questions from sub-agents](#questions-from-sub-agents). `agent_run` can also start signed in to a site with a saved sign-in: see [Snapshots](SNAPSHOTS.md).
+
 ## How it works
 
 ```text
 host agent ──MCP──▶ agent_run / agent_automate / agent_find
-                         │
-                         ▼
-               sub-agent (in the server)  ◀──chat completions──▶  your model endpoint
-                         │ tool calls (browser_*, web_search, note, finish, …)
-                         ▼
-               its own isolated browser (a separate Obscura CDP connection: own tabs, cookies, storage)
+     ▲    │                │
+     │    │                ▼
+     │    └─agent_reply─▶ sub-agent (in the server)  ◀──chat completions──▶  your model endpoint
+     └──── question ◀──────┤ (ask_host, only when it needs the host)
+                           │ tool calls (browser_*, web_search, note, finish, …)
+                           ▼
+                 its own isolated browser (a separate Obscura CDP connection: own tabs, cookies, storage;
+                 empty, or signed in from a snapshot the host named)
 ```
 
-- **Isolated browser per run.** Obscura keeps pages and cookies per CDP connection, so every run gets a private browser that starts empty and is discarded afterwards. The host's browser and other runs are never touched, and runs can work at the same time (`AGENT_MAX_CONCURRENT`, default 2; more wait in a queue). Sub-agent and script browsers also run on a second Obscura engine process (`OBSCURA_SEPARATE_ENGINE`, on by default), so a page that crashes the engine during a run (Obscura v0.2.2 has such bugs) cannot reset the host's browser; the run itself reconnects and is told its pages were reset. That engine never persists cookies, even with `OBSCURA_STORAGE_DIR`.
+- **Isolated browser per run.** Obscura keeps pages and cookies per CDP connection, so every run gets a private browser that starts empty and is discarded afterwards. The only exception is a snapshot the host passes to `agent_run`: the browser then starts with that saved sign-in ([Snapshots](SNAPSHOTS.md)). The host's browser and other runs are never touched, and runs can work at the same time (`AGENT_MAX_CONCURRENT`, default 2; more wait in a queue). Sub-agent and script browsers also run on a second Obscura engine process (`OBSCURA_SEPARATE_ENGINE`, on by default), so a page that crashes the engine during a run (Obscura v0.2.2 has such bugs) cannot reset the host's browser; the run itself reconnects and is told its pages were reset. That engine never persists cookies, even with `OBSCURA_STORAGE_DIR`.
 - **Same tools, same guards.** Sub-agents use the regular browser tools through the same code path as MCP clients, so URL scheme rules, the SSRF guard (`ALLOW_PRIVATE_NETWORK`), timeouts and secret redaction all apply. Sub-agents cannot start sub-agents.
 - **Everything is logged and visible.** Each model request and response, and every tool call, is logged with the run id. The dashboard lists runs in the **Agents** tab (live step, current action, the model's reasoning as it streams, the result), and its browser picker switches the live view to any sub-agent's browser. A JSON transcript of every run is written to `logs/agent-runs/`.
 - **Context budget.** Each run keeps its transcript within `AGENT_CONTEXT_TOKENS` (64k by default). Tool results are capped, older results are shortened first, and if needed the oldest steps are dropped. Facts the agent saved with `note` are kept. The characters-per-token ratio is calibrated from the token counts the endpoint reports.
@@ -124,9 +128,97 @@ Agent run r3f9a1c2 (finder) is still running: step 6 of 40, 1 min 50 s so far; n
 Call agent_wait with {"run_id": "r3f9a1c2"} to wait for the result (agent_status to check progress, agent_cancel to stop it).
 ```
 
-The run keeps going; the host collects the result with `agent_wait`. While a tool waits, the server sends MCP **progress notifications** (`step 6: browser_navigate …`) if the client asked for them, so clients that reset their timeout on progress wait patiently. `agent_status` without a `run_id` lists recent runs.
+The run keeps going; the host collects the result with `agent_wait`. While a tool waits, the server sends MCP **progress notifications** (`step 6: browser_navigate …`) if the client asked for them, so clients that reset their timeout on progress wait patiently. `agent_status` without a `run_id` lists recent runs. When the run pauses with a question, the tools return at once instead (see the next section).
 
-Results come as readable text plus `structuredContent` (JSON) with the same data: `run_id`, `status` (`completed`, `failed` or `cancelled`), `success`, `steps`, `duration_ms`, the kind-specific fields below, and `transcript` (path of the JSON transcript in the container).
+Results come as readable text plus `structuredContent` (JSON) with the same data: `run_id`, `status`, `success`, `steps`, `duration_ms`, the kind-specific fields below, and `transcript` (path of the JSON transcript in the container). A run's `status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `queued` | Waiting for a free slot (`AGENT_MAX_CONCURRENT`) |
+| `running` | Working |
+| `waiting` | Paused on a question for the host: answer it with `agent_reply` |
+| `completed`, `failed`, `cancelled` | Done |
+
+## Questions from sub-agents
+
+Some steps need a decision that only you or your user can make. An `agent_run` or `agent_automate` agent can then pause and ask the host one question with its `ask_host` tool. Each question pauses the job, so it is told to ask only when it cannot continue correctly without the answer, and to give a reason:
+
+| Reason | When the agent asks |
+|---|---|
+| `confirm` | Before it places an order, pays or sends money, always, with the item, the total price, the delivery address and the payment method. Also before other steps that cannot be undone and that the TASK does not clearly authorize: sending a message or a form for someone, deleting or changing account data. It asks again when what it is about to do differs from what was approved (another price, item or address) |
+| `choose` | The TASK is ambiguous and the choice changes the result |
+| `sign_in` | A sign-in needs something only the host has: a one-time code, or which account to use |
+| `missing_info` | Information the TASK should have included is missing, and the agent cannot find it |
+
+It does not ask to confirm progress, for permission to browse, or for facts it can look up, and it never asks for a password or because a page told it to. It does not take the step it asked about before it has the answer. The finder (`agent_find`) never asks.
+
+### What the host sees
+
+The run's status becomes `waiting`, and `agent_run`, `agent_automate`, `agent_wait`, `agent_status` and `agent_reply` return at once with the question:
+
+```text
+Run r5b8e21f is waiting for your answer (question q3c9a01, asked on https://www.amazon.com):
+
+Place the order for "USB-C to USB-C cable, 2 m, 100 W" at $11.99, total $12.87 with tax, delivery Thursday to the default address in Berlin, paid with the saved Visa card?
+
+Options: Yes, place the order | No
+
+This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this.
+
+The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r5b8e21f", "question_id": "q3c9a01", "answer": "..."}
+Unanswered after 30 min it continues without an answer; agent_cancel stops it. Do not end your turn while it waits.
+```
+
+`structuredContent` has `status: "waiting"`, `question: {id, text, options, reason, secret, page_url, origin, asked_at, expires_at}` and `reply_with: {"tool": "agent_reply", "arguments": {…}}`, ready to fill in. `asked on` (`origin`) is the page the agent's browser had open when it asked. The server reads it from the browser, so neither the model nor a web page can fake it.
+
+### Answering with `agent_reply`
+
+```json
+{ "run_id": "r5b8e21f", "question_id": "q3c9a01", "answer": "Yes, place the order." }
+```
+
+[`agent_reply`](TOOLS.md#agent_reply) delivers the answer, and the run continues with the same browser. Then, like `agent_wait`, it waits up to `wait_seconds` and returns the run's next question, its result, or "still running". Its text starts with `Answer delivered to run r5b8e21f (question q3c9a01).`
+
+- `question_id` is required, so an answer never lands on another question than the one it was meant for. An answer to a closed or unknown question returns an error that shows the question that is open now.
+- To refuse, say so plainly: `"No, do not place the order."` The agent then does not take that step.
+- `secret: true` marks the answer as a code or other secret ([Secret answers](#secret-answers)). Questions with reason `sign_in` are secret by default, and then their `reply_with` arguments include `"secret": true`.
+- When another MCP client started the run, the result says so.
+
+**Who decides.** Questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, go to your user, unless they already approved exactly that. The host tells them which site asks (the `asked on` origin), never sends a password, and keeps in mind that questions come from an agent that reads untrusted web pages. The server instructions tell host agents all of this.
+
+**Approving in advance.** If your user already approved something, write it into the TASK, for example `approved up to $30; do not ask`. The agent then does not ask when the checkout is within it. To keep a run from ever asking, pass `allow_questions: false` to `agent_run` or `agent_automate`: the agent then decides on its own, and finishes with `success: false` when it cannot.
+
+### While a run waits
+
+- It keeps its browser, with the page it asked about still open, but gives up its slot: it does not count against `AGENT_MAX_CONCURRENT`, so queued runs can start. When the answer comes, it resumes ahead of queued runs.
+- The time it waits does not count against `AGENT_MAX_RUNTIME_MS`, and the turn in which it asked does not count against `max_steps`.
+- It waits up to `AGENT_REPLY_TIMEOUT_MS` (30 minutes). After that it continues without an answer: it is told not to take the step it asked about, and to do what it can without it or finish with `success: false`.
+- `agent_cancel` stops it and closes its browser.
+- Every `agent_*` result also lists the other runs that wait (`Also waiting for your answer: run r7d2c4a0 (question q1f0e9b: …)`), and `agent_status` without a `run_id` lists waiting runs with their questions, so no question goes unseen.
+- The host should not end its turn while a run it started waits: answer it, ask the user, reply "No" to confirm questions nobody approved, or cancel the run.
+
+A run asks at most `AGENT_MAX_QUESTIONS` questions (5 by default; `0` turns questions off for all runs), at most 10 runs wait at the same time, and a run with fewer than 3 steps or about 2 minutes left cannot ask, because it could not act on the answer. The agent gets these refusals as tool errors and keeps working, or finishes with `success: false` and says what needs approval.
+
+When a run that asked something finishes, its result lists the questions and answers, and `structuredContent` adds `questions: [{id, text, reason, origin, answer, asked_at, answered_at, status}]` and `waited_ms`. A secret answer shows as `[REDACTED]`, and one that never came as `null`.
+
+### Secret answers
+
+One-time codes are secrets. When the question is secret (reason `sign_in`, or marked secret by the agent) or the reply has `secret: true`:
+
+- The answer is replaced by `[REDACTED]` in the tool log, the activity feed, the run's steps, the model log, the transcript, `/api/agents/<id>`, the run's result and on the dashboard, whatever `LOG_REDACT_SECRETS` says. The question record keeps only its length.
+- Values the agent types that contain it are masked the same way, and the automation agent's `script_save` refuses a script that contains it.
+- The sub-agent's model receives it, because the agent has to type it. Your model endpoint therefore sees secret answers.
+- Masking works by value and needs at least 4 characters. A shorter secret is hidden in the answer itself, but not where the agent repeats it.
+
+`agent_reply`'s `answer` argument is always masked in the tool log, the activity feed and the MCP message log, even when the answer is not secret. Answers that are not secret stay readable in the run's questions (its result, **Details** on the dashboard, and its transcript).
+
+### Short tool timeouts and LM Studio
+
+A waiting result comes back at once, so it fits any client's tool timeout, including LM Studio's 180 s. `agent_reply` then waits like `agent_wait`: up to `AGENT_WAIT_SECONDS` (170 s), then "still running".
+
+In an LM Studio chat, the chat model is the host. It shows you the question and should ask you before it answers a `confirm` or `sign_in` question. If it ends its turn while a run waits, the run keeps waiting (30 minutes by default): answer in the chat, for example *"Answer the waiting question: yes, place the order"*, and the model calls `agent_reply`. Small chat models may answer on their own, so write approvals into the TASK, or pass `allow_questions: false`, when you want no questions.
+
+The command-line agent (`npm run lmstudio:agent`) has nobody to ask while it runs. Its system prompt tells it to answer from its task, to reply "No" to confirm questions the task did not approve (and say so in its final answer), never to send a password, to give a one-time code only when the task contains it, and to cancel a run it cannot answer ([details](LM_STUDIO.md#7-the-command-line-agent)).
 
 ## Agentic mode: `agent_run`
 
@@ -145,7 +237,24 @@ OUTPUT:
 [{"title": "A Light in the Attic", "price": "£51.77"}, {"title": "The Black Maria", "price": "£52.15"}, {"title": "Shakespeare's Sonnets", "price": "£20.66"}]
 ```
 
-The agent has the core, content, forms and tabs browser tools, `browser_evaluate`, `web_search`, `note`, and `finish(output, success, notes)`. With `output_format: "json"`, `finish` only accepts valid JSON, and `structuredContent.output` is the parsed value. If the task cannot be done (login required, site down), the agent reports `success: false` with notes on what it tried.
+The agent has the core, content, forms and tabs browser tools, `browser_evaluate`, `web_search`, `note`, `ask_host` ([questions](#questions-from-sub-agents)), `save_sign_in` (when the `snapshots` tools are enabled, see below), and `finish(output, success, notes)`. With `output_format: "json"`, `finish` only accepts valid JSON, and `structuredContent.output` is the parsed value. If the task cannot be done (site down, data not available), the agent reports `success: false` with notes on what it tried.
+
+### Sites that need a sign-in
+
+A sub-agent's browser starts signed out. When a site asks it to sign in, the agent asks the host only for a one-time code or which account to use, and never types a password the TASK did not give it. Otherwise it finishes with `success: false` and says which site needs a sign-in.
+
+Do not put passwords into a TASK: task texts are logged. Instead, sign in once in your own browser, save the sign-in as a snapshot, and start the job with it:
+
+```json
+{
+  "task": "On https://shop.example.com, open my orders and list the ones from this month.",
+  "output": "A JSON array of {order_number, date, total}.",
+  "output_format": "json",
+  "snapshot": "example-shop"
+}
+```
+
+The agent's browser then starts signed in. When the run succeeds, the server saves the renewed sign-in back into the snapshot (`update_snapshot`, on by default). Runs started with a snapshot get no `browser_evaluate` unless you pass `allow_evaluate: true`, because page scripts could read the signed-in cookies. If the agent signs in during a job (with a code you gave it), `save_sign_in` keeps that sign-in for the next job. All of this is in [Snapshots](SNAPSHOTS.md#sub-agents-and-snapshots).
 
 ## Automation agent: `agent_automate`
 
@@ -154,6 +263,8 @@ The automation agent works in three phases:
 1. **Explore.** It does the task once and works out the pages, URLs and stable CSS selectors that work.
 2. **Script.** It writes a JavaScript script that repeats the job for any parameter values, and saves it (`script_save`). The syntax is checked on save.
 3. **Verify.** It runs the script in a **fresh, empty browser** (`script_test`) with the example parameters, compares the output with what it saw while exploring, and fixes and re-tests until it is right. If the agent never tested the final version, the server runs it once before reporting.
+
+The automation agent can [ask questions](#questions-from-sub-agents) too, for example for a sign-in code while it explores. Scripts are plain files that anyone with `script_get` can read, so `script_save` refuses a script whose code or example parameters contain a secret answer.
 
 ```json
 {
@@ -270,19 +381,23 @@ How the finder backs its answer:
 
 `structuredContent` has `answer`, `confidence`, `sources: [{n, title, url, quotes: [{text, verified}]}]`, `conflicts` and `notes`.
 
+The finder works on its own: it never asks the host questions and never starts with a snapshot.
+
 ## Watching sub-agents
 
 Open the dashboard (`http://127.0.0.1:8931/`):
 
-- The **Agents** tab lists runs with their kind, status, current step and action, the model's reasoning as it streams, and the result. **Details** shows the task, every step (reasoning, tool calls and results), cited sources, notes and the transcript path. The tab also lists stored scripts.
+- The **Agents** tab lists runs with their kind, status, current step and action, the model's reasoning as it streams, and the result. **Details** shows the task, every step (reasoning, tool calls and results), cited sources, notes, the questions the run asked with their answers (secret answers as "(hidden)"), and the transcript path. The tab also lists stored scripts.
+- A run that waits for an answer shows **waiting for answer** and its question: the text, the options, the site it was asked on, how long ago, and when it continues without an answer. The tab's counter and footer count waiting runs separately from running and queued ones. The host answers with `agent_reply`; the dashboard only shows the question.
+- A run started with a snapshot shows the snapshot's name and whether it was refreshed at the end. The **Snapshots** tab next to **Agents** lists the saved sign-ins ([Snapshots](SNAPSHOTS.md#the-snapshots-tab)).
 - **Watch** (or the browser picker in the live view toolbar) switches the live view, tabs, console and network panes to that run's private browser. After a run ends, its last frame stays visible.
 - Activity entries made by sub-agents carry the run id (`agent:finder r795fa66`), and script calls are labelled `script:<name>`.
 
-Logs: component `agent` (run lifecycle, one line per run with steps, tokens and outcome), `agent-llm` (every model request and response: timing, token usage, tool calls, finish reason), `tool` (every tool call, with `agentRunId` and `browserId`), and `script` (script runs and their `log()` lines). See [LOGGING.md](LOGGING.md).
+Logs: component `agent` (run lifecycle, one line per run with steps, tokens, questions and outcome, plus a line for every question answered, expired or cancelled), `agent-llm` (every model request and response: timing, token usage, tool calls, finish reason), `tool` (every tool call, with `agentRunId` and `browserId`), `script` (script runs and their `log()` lines) and `snapshots` (snapshots saved, loaded, refreshed and deleted). See [LOGGING.md](LOGGING.md).
 
 ## Testing
 
-- `npm run test:integration` includes `test/integration/agents.test.ts`. It uses a scripted fake OpenAI-compatible model that streams like vLLM, so it covers all three agents, scripts, cancellation, progress and errors deterministically, without a GPU.
+- `npm run test:integration` includes `test/integration/agents.test.ts` and `test/integration/snapshots.test.ts`. They use a scripted fake OpenAI-compatible model that streams like vLLM, so they cover all three agents, scripts, questions and answers (`ask_host`, `agent_reply`), runs started with a snapshot, `save_sign_in`, cancellation, progress and errors deterministically, without a GPU.
 - `npm run agents:e2e` runs live scenarios against a running server with your real model (`MCP_URL`, default `http://127.0.0.1:8931/mcp`). It uses the server's shared browser for its ground truth (it navigates the active tab), needs the `core`, `content`, `tabs`, `agents` and `scripts` tools, and stores a script named `e2e-quotes-by-tag`. It checks the results against ground truth that it reads itself: books from books.toscrape.com, a quotes script replayed with other parameters, finder answers confirmed on two websites, and two agents running at the same time. It also checks that the host's browser was not touched. Use `--only run,automate,find,parallel`, `--repeat N` and `--json results.json`.
 
 ## Limits and tips
@@ -291,5 +406,13 @@ Logs: component `agent` (run lifecycle, one line per run with steps, tokens and 
 - Give concrete TASKs: the site, what counts as done, and the exact OUTPUT shape. For `agent_automate`, include example values: they become the parameters' examples and the verification input.
 - Small models do better with smaller jobs. Split big jobs into several `agent_run` calls; each can run in parallel with the others.
 - Obscura v0.2.2 quirk: a page that declares a global variable with the same name as an element id (`var q` next to `id="q"`) sees the element instead of its variable. This rarely matters, but it can break a site's own search script.
-- Task texts, the agent's notes and its transcript are logged as they are. Values the agent types into password-like fields are masked in logs (`LOG_REDACT_SECRETS`), but free text is not, so do not put secrets into a TASK. If you must, set `AGENT_TRANSCRIPTS=false`, `LOG_FILE_LEVEL=warn` and `LOG_LEVEL=warn`; the dashboard still shows the task while the server runs.
-- Sub-agents browse the public web. Sites behind a login need cookies, and sub-agent browsers start empty: run such jobs on the host browser (a login inside a TASK puts the credentials in the logs, see above).
+- For sites behind a sign-in, pass a snapshot to `agent_run` ([Sites that need a sign-in](#sites-that-need-a-sign-in)) rather than a password in the TASK.
+- Tell the agent in the TASK what your user already approved (`approved up to $30; do not ask`), so it asks only about what is left open.
+
+## Security notes
+
+- **Task texts are logged.** Task texts, the agent's notes and its transcript are logged as they are. Values the agent types into password-like fields are masked in logs (`LOG_REDACT_SECRETS`), but free text is not, so do not put secrets into a TASK. If you must, set `AGENT_TRANSCRIPTS=false`, `LOG_FILE_LEVEL=warn` and `LOG_LEVEL=warn`; the dashboard still shows the task while the server runs.
+- **Questions come from an agent that reads untrusted pages.** A page can try to make the agent ask for something it should not get. Relay `confirm` and `sign_in` questions to your user unless they approved exactly that, check the `asked on` origin (read by the server, not written by the model), never send a password, and do not relay a code for a site the TASK did not name.
+- **Your model endpoint sees secret answers.** A one-time code the host sends with `agent_reply` is masked in logs, transcripts and on the dashboard, but the sub-agent's model receives it so the agent can type it. A code the agent types can also appear in what the page itself shows or sends: the live view, and the page's console and network entries (for example a form sent with GET puts it in the URL).
+- **A snapshot hands over an account.** A sub-agent started with a snapshot, and every page it opens, can act as that account: Obscura v0.2.2 sends cookies on cross-site requests, so a page the agent visits can make signed-in requests to the site. Pass a snapshot only for jobs on that site. The agent gets no `browser_evaluate` in such runs unless you pass `allow_evaluate: true`. See [Snapshots](SNAPSHOTS.md#security-notes).
+- **Sub-agents save sign-ins only when allowed.** `save_sign_in` is offered only when the `snapshots` tools are enabled and `AGENT_SNAPSHOT_SAVE` is on, and the agent is told to save only after signing in to the account the TASK or the host named.

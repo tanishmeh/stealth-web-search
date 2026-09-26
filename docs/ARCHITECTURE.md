@@ -3,7 +3,7 @@
 Stealth Web Search is one Docker container with three processes (two with `OBSCURA_SEPARATE_ENGINE=false`):
 
 - **Node.js MCP server** (this repository): speaks the Model Context Protocol to AI clients, serves the live dashboard, and writes the logs.
-- **Obscura** ([h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)), twice: a headless browser written in Rust that runs page JavaScript in V8 and renders pages. It runs in stealth mode and is controlled over the Chrome DevTools Protocol (CDP). One engine holds the shared browser that MCP clients drive. The other, the isolated engine, holds the private browsers of sub-agents and script runs, so a page that crashes it cannot reset the shared browser; it never persists cookies.
+- **Obscura** ([h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)), twice: a headless browser written in Rust that runs page JavaScript in V8 and renders pages. It runs in stealth mode and is controlled over the Chrome DevTools Protocol (CDP). One engine holds the shared browser that MCP clients drive. The other, the isolated engine, holds the private browsers of sub-agents and script runs, so a page that crashes it cannot reset the shared browser; it never persists cookies. A sign-in reaches a sub-agent's browser only through a [snapshot](SNAPSHOTS.md) the host names for that run.
 
 ```mermaid
 flowchart TB
@@ -52,12 +52,15 @@ flowchart TB
 
 `agent_run`, `agent_automate` and `agent_find` start a run in `AgentManager` (`src/agents/manager.ts`) and wait for it (bounded, with MCP progress notifications). Each run:
 
-1. Gets its **own `Browser`**: an independent CDP connection of its own. Obscura isolates pages, cookies and storage per connection, so the run cannot see or disturb the host's shared browser or other runs. Sub-agent and script browsers connect to a second, managed Obscura process (`OBSCURA_SEPARATE_ENGINE`, on by default): an engine crash caused by a page they visit does not reset the host's browser, and that engine never persists cookies, so `OBSCURA_STORAGE_DIR` logins stay with the host. It has its own tool queue and live view. The `BrowserRegistry` lists it for the dashboard, and events it publishes (frames, console, network, tabs, pointer markers) carry its `browserId`, so a viewer only receives events of the browser it watches.
-2. Runs the agent loop (`src/agents/run.ts`): ask the model (`src/agents/llm.ts`, OpenAI chat completions with function tools, streamed) for the next step, execute its tool calls through the same `runTool()` as MCP clients (logging, activity feed, redaction, timeouts, URL guards), feed the results back, repeat. The loop keeps the transcript within `AGENT_CONTEXT_TOKENS` (`src/agents/conversation.ts`), nudges a model that answers without calling a tool, and forces a final `finish` when steps or time run out.
-3. Uses the tools and prompt of its kind (`src/agents/kinds.ts`): the agentic kind has browser tools plus `web_search`/`note`/`finish`; the automation kind has `script_save`/`script_test`; the finder kind has `web_search` (`src/agents/search.ts`) and `cite_source`, which checks that a cited page was opened and that the quote is on it.
-4. Ends by closing its browser, writing a transcript to `logs/agent-runs/`, and returning a text plus `structuredContent` result (`src/agents/format.ts`).
+1. Gets its **own `Browser`**: an independent CDP connection of its own. Obscura isolates pages, cookies and storage per connection, so the run cannot see or disturb the host's shared browser or other runs. Sub-agent and script browsers connect to a second, managed Obscura process (`OBSCURA_SEPARATE_ENGINE`, on by default): an engine crash caused by a page they visit does not reset the host's browser, and that engine never persists cookies, so `OBSCURA_STORAGE_DIR` logins stay with the host. It has its own tool queue and live view. The `BrowserRegistry` lists it for the dashboard, and events it publishes (frames, console, network, tabs, pointer markers) carry its `browserId`, so a viewer only receives events of the browser it watches. If the host passed `snapshot` to `agent_run`, the `SnapshotService` loads it into this browser before the loop starts, and installs a reconnect hook that loads it again if the engine restarts during the run.
+2. Runs the agent loop (`src/agents/run.ts`): ask the model (`src/agents/llm.ts`, OpenAI chat completions with function tools, streamed) for the next step, execute its tool calls through the same `runTool()` as MCP clients (logging, activity feed, redaction, timeouts, URL guards), feed the results back, repeat. The loop keeps the transcript within `AGENT_CONTEXT_TOKENS` (`src/agents/conversation.ts`), nudges a model that answers without calling a tool, and forces a final `finish` when steps or time run out. Secret answers from the host are masked by value in everything the loop logs or records (`AgentRun.scrub`, `src/util/scrub.ts`).
+3. Uses the tools and prompt of its kind (`src/agents/kinds.ts`): the agentic kind has browser tools plus `web_search`/`note`/`ask_host`/`save_sign_in`/`finish`; the automation kind has `ask_host` and `script_save`/`script_test`; the finder kind has `web_search` (`src/agents/search.ts`) and `cite_source`, which checks that a cited page was opened and that the quote is on it.
+4. Can pause on a question. `ask_host` is a concurrent tool, so it never holds the browser queue: it records the question with the URL of the browser's active tab, sets the run to `waiting`, releases the run's slot and waits. `AgentManager.reply()` (the host's `agent_reply`), the `AGENT_REPLY_TIMEOUT_MS` timer or a cancel closes the question and sets the run back to `running` before the waiting call resumes, so a result read right after a reply never shows the old question. The run then takes a slot back ahead of queued runs, and `run.deadline`, the only deadline the loop reads, moves by the time it waited. `AgentManager.wait()` returns as soon as a run waits, which is how `agent_run`, `agent_wait` and `agent_reply` hand the question to the host at once.
+5. Ends by saving its sign-in back into its snapshot (only after a successful run, and only if nobody saved a newer version meanwhile), closing its browser, writing a transcript to `logs/agent-runs/`, and returning a text plus `structuredContent` result (`src/agents/format.ts`).
 
 Agent and script tools are marked `concurrent`: they never wait in the host browser's queue, so the host keeps browsing while sub-agents work.
+
+Paused runs keep their browser open, so the `--max-connections` budget the server gives Obscura counts them: the main browser, two connections per concurrent run (its browser and a script test), up to 10 waiting runs (`MAX_WAITING`), 4 script runs and a few spare (`src/util/limits.ts`, `src/obscura/process.ts`).
 
 **Automation scripts** (`src/scripts/`) are stored as `<name>.js` + `<name>.json` in `SCRIPTS_DIR`. `script_run` and the automation agent's tests run them in a fresh isolated browser, inside a QuickJS WebAssembly sandbox (`sandbox.ts`) with no Node.js APIs. The script's only outlet is the `browser` object (`api.ts`), whose methods call the regular browser tools.
 
@@ -71,7 +74,23 @@ flowchart LR
     B1 <--> Obscura["obscura serve (shared)"]
     B2 <--> ObscuraIso["obscura serve (isolated engine)"]
     Host -->|script_run| Svc["ScriptService"] --> QJS["QuickJS sandbox"] -->|browser.* → runTool| B3["Browser script-… (own CDP connection)"] <--> ObscuraIso
+    Loop -.->|"ask_host: question"| Host
+    Host -.->|agent_reply| Mgr
+    Host -->|"snapshot_save / snapshot_load"| Snap["SnapshotService"]
+    Snap <--> Store[("SNAPSHOTS_DIR")]
+    Snap -->|"agent_run snapshot"| B2
+    Snap --> B1
 ```
+
+## Snapshots
+
+Snapshots ([SNAPSHOTS.md](SNAPSHOTS.md)) are saved sign-ins that move between browsers only when an agent asks.
+
+- `SnapshotStore` (`src/snapshots/store.ts`) keeps `<name>.json` (metadata, no secrets) and `<name>.state` (cookies and site storage, AES-256-GCM with `SNAPSHOTS_KEY`) in `SNAPSHOTS_DIR`. It writes the state first, through temporary files that are renamed, and serializes writes per name. An update re-reads the metadata under that lock and never creates a snapshot, so a deleted one stays deleted.
+- `SnapshotService` (`src/snapshots/service.ts`) captures a browser's cookies for a domain filter plus the open page's storage, and applies a snapshot to a browser. The cookie and storage helpers are shared with the `state` tools (`src/browser/storage-state.ts`); snapshot code always sends them quietly, so no value reaches the CDP log.
+- Obscura v0.2.2 loses `localStorage` on every navigation, so a loaded snapshot's storage is written by one `Page.addScriptToEvaluateOnNewDocument` script per browser (the storage seed), which runs on every new document of the saved origins. Script identifiers restart on every CDP connection, so an old one is removed only on the connection that issued it.
+- Each `Browser` records which snapshots it has loaded, at which version and on which connection. A lost connection clears them: the main browser's next tool result says the snapshot was lost, and a sub-agent's browser gets it back through its reconnect hook. A save that finds another version than the one this browser loaded is refused.
+- Every change to the store or to a browser's loaded snapshots publishes a `snapshots` event on the hub, which the dashboard's Snapshots tab renders. `DELETE /api/snapshots/:name` is the dashboard's only mutating route. It sits behind the Host and `AUTH_TOKEN` checks, and requires an `X-SBM-Request: 1` header and the server's own `Origin` (the custom header forces a CORS preflight that the server never approves).
 
 ## Why the MCP server drives Obscura over CDP
 
@@ -123,9 +142,12 @@ This project owns the CDP connections: one for the shared browser and one per su
 | `src/mcp/http.ts` | Express app, MCP transports, auth, host checks |
 | `src/mcp/server.ts` | Tool registration and the `runTool` wrapper |
 | `src/mcp/sessions.ts` | MCP session registry and idle reaper |
-| `src/tools/*.ts` | The `browser_*`, `agent_*` and `script_*` tools |
+| `src/tools/*.ts` | The `browser_*`, `agent_*`, `script_*` and `snapshot_*` tools |
 | `src/browser/registry.ts` | All browsers (main, sub-agents, script runs) for the dashboard |
-| `src/agents/` | Sub-agents: model client, agent loop, context compaction, the three kinds, web search, result formatting |
+| `src/browser/storage-state.ts` | Reading and writing cookies and site storage, shared by the `state` tools and snapshots |
+| `src/agents/` | Sub-agents: model client, agent loop (with questions to the host), context compaction, the three kinds, web search, result formatting |
 | `src/scripts/` | Automation scripts: file store, QuickJS sandbox, the scripts' `browser` API, running them |
+| `src/snapshots/` | Snapshots: the file store (with encryption) and the service that captures, applies and tracks them |
+| `src/util/` | Shared helpers: log summaries, masking of secret answers, limits shared by the agent manager, script runs and the Obscura connection budget |
 | `src/dashboard/` | Event hub, API routes, static UI |
 | `src/stdio-bridge.ts` | stdio ↔ HTTP bridge for stdio-only MCP clients |

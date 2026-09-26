@@ -497,7 +497,7 @@ Most tool calls finish in seconds. Some take longer:
 | Tool | Longest wait | Setting |
 |---|---|---|
 | `browser_*` tools | 120 s, then the call returns an error | `TOOL_TIMEOUT_MS` |
-| `agent_run`, `agent_automate`, `agent_find`, `agent_wait` | 170 s, then the tool answers "still running" and the model calls `agent_wait` | `AGENT_WAIT_SECONDS`, or `wait_seconds` per call |
+| `agent_run`, `agent_automate`, `agent_find`, `agent_wait`, `agent_reply` | 170 s, then the tool answers "still running" and the model calls `agent_wait`. A run that asks a question returns it at once | `AGENT_WAIT_SECONDS`, or `wait_seconds` per call |
 | `script_run` | The whole script run, up to 300 s | `SCRIPT_TIMEOUT_MS` |
 
 While an agent tool waits, the server sends MCP progress notifications if the client asked for them.
@@ -512,9 +512,11 @@ Set the client's tool timeout to at least 180 seconds, or 330 seconds if you run
 
 If a client gives up earlier and has no setting for it, lower `AGENT_WAIT_SECONDS` in `.env` below the client's limit. Runs keep going on the server either way. `agent_wait` collects the result later.
 
+A sub-agent run can also pause and wait for your agent's answer to a question ([Questions from sub-agents](AGENTS.md#questions-from-sub-agents)). The question comes back at once, and the run waits up to `AGENT_REPLY_TIMEOUT_MS` (30 minutes) for `agent_reply`, so no client timeout is involved. A client that ends its turn without answering leaves the run waiting until then.
+
 ## Small local models
 
-A long tool list costs context and confuses small models. With sub-agents configured the server offers 51 tools, 45 without. Start the server with a smaller set, for example `TOOLSETS=core` in `.env`: 16 tools for navigation (navigate, back, forward, reload), snapshot, click, fill, type, keys, select, check, scroll, waits and screenshot. See [Tools](TOOLS.md) for the groups.
+A long tool list costs context and confuses small models. With sub-agents configured the server offers 57 tools, 50 without. Start the server with a smaller set, for example `TOOLSETS=core` in `.env`: 16 tools for navigation (navigate, back, forward, reload), snapshot, click, fill, type, keys, select, check, scroll, waits and screenshot. See [Tools](TOOLS.md) for the groups.
 
 Some clients can also turn off individual tools, for example LM Studio in its Integrations panel.
 

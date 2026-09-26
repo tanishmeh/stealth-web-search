@@ -31,15 +31,16 @@ Every entry has `time`, `level`/`levelName`, `component` and `msg`. Components:
 | `obscura-engine` | per line | Obscura's own log output, parsed into levels (`target` = Rust module) |
 | `live-view` | info/debug | Viewers connecting and leaving, screencast start and stop |
 | `dashboard` | debug | Dashboard event streams opened and closed |
-| `agent` | info/warn | Sub-agent runs: created (input), started (browser), finished (status, steps, duration, token usage, compactions, outcome, sources, script tests) |
+| `agent` | info/warn | Sub-agent runs: created (input), started (browser, snapshot), finished (status, steps, duration, token usage, compactions, questions and time waited, outcome, sources, script tests, snapshot refresh). Every question to the host: answered (question id, whether it is secret, answer length and the answering client, never the answer), expired or cancelled |
 | `agent-llm` | debug/info | Every model request (messages, tools, prompt size) and response (duration, finish reason, token usage, tool calls, answer text), retries |
 | `script` | info | Script runs (parameters, result, duration, browser calls) and each `log()` line of the script |
+| `snapshots` | info/warn/error | Snapshots created, refreshed, replaced, loaded (into which browser, cookies restored, expired and refused counts), described and deleted (by which client, where it was loaded); startup checks of `SNAPSHOTS_DIR` and encryption of older files. Names, versions, domains and counts only |
 
 Everything a sub-agent or script does carries `agentRunId` (sub-agent run), `browserId` (its private browser, e.g. `agent-r1a2b3c4`) or `script`/`scriptRunId`. Tool calls made by sub-agents appear under `component: "tool"` like any other call, with the `client` label `agent:<kind> <run id>`.
 
 ### Sub-agent transcripts
 
-With `AGENT_TRANSCRIPTS=true` (the default), every run also writes `logs/agent-runs/<time>_<kind>_<run id>.json`. It contains the input, the outcome, the saved notes, cited sources, visited pages, script tests, every step (model timing, token usage, full reasoning, tool calls and result previews) and the complete message transcript. The newest 300 transcripts are kept.
+With `AGENT_TRANSCRIPTS=true` (the default), every run also writes `logs/agent-runs/<time>_<kind>_<run id>.json`. It contains the input, the outcome, the saved notes, cited sources, visited pages, script tests, the questions the run asked with their answers and the time it waited, the snapshot it started with and whether it was refreshed, every step (model timing, token usage, full reasoning, tool calls and result previews) and the complete message transcript. Secret answers appear as `[REDACTED]` everywhere in it. The newest 300 transcripts are kept.
 
 ### Payload summarization
 
@@ -52,6 +53,10 @@ Logs stay readable and bounded without dropping information silently:
   - values typed into password- or OTP-like fields (`type=password`, or a name, label, autocomplete attribute or selector mentioning password, token, OTP, PIN, CVV or card number). A call that targets a field by an arbitrary CSS selector is logged with `[REDACTED]` first; the result line then shows the real value if the field was not sensitive.
   - cookie values in `browser_set_cookie` arguments, `browser_get_cookies` and `browser_storage_state` results, `browser_set_storage_state` input, and CDP cookie commands.
   - `Cookie`, `Set-Cookie`, `Authorization`, `Proxy-Authorization` and `X-API-Key` headers in CDP network events.
+- Some values are masked whatever `LOG_REDACT_SECRETS` says:
+  - the `answer` of every `agent_reply` call, in the `tool` and `mcp` logs and the activity feed. Answers that are not secret stay readable in the run's own question record (its result, transcript and dashboard details).
+  - secret answers (one-time codes, see [Secret answers](AGENTS.md#secret-answers)): every value of 4 characters or more is replaced by `[REDACTED]` wherever the run shows it: its tool calls and results (including values it types into the page), its steps, the `agent-llm` log, the transcript, the result and the dashboard. They are never stored with the question. The model endpoint still receives them, and the page itself can show or send a typed code: the live view, and the page's console and network entries (a form sent with GET puts it in the URL).
+  - the cookies and site storage of [snapshots](SNAPSHOTS.md). The browser commands that read and write them are never logged, and snapshot tool results, the dashboard and the `snapshots` log carry names, domains and counts only.
 - `LOG_CDP_EVENTS=false` stops logging CDP events (network and lifecycle noise) and keeps commands and responses.
 
 ## Useful queries
@@ -77,6 +82,12 @@ jq -c 'select(.agentRunId=="<run id>" or .runId=="<run id>") | {time, component,
 
 # Model latency and token usage per sub-agent step
 jq -c 'select(.component=="agent-llm" and .usage) | {runId, step, durationMs, usage, finishReason}' logs/current.log
+
+# Questions sub-agents asked the host, and what became of them
+jq -c 'select(.component=="agent" and .questionId) | {time, runId, questionId, msg}' logs/current.log
+
+# Snapshots saved, loaded and deleted
+jq -c 'select(.component=="snapshots") | {time, msg, snapshot, version, browserId, client}' logs/current.log
 
 # Pretty-print the live stream
 tail -F logs/current.log | npx pino-pretty

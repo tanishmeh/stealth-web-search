@@ -90,7 +90,7 @@
         <article class="feature">
           <div class="feature-icon"><svg class="i"><use href="#f-bot"/></svg></div>
           <h3>Sub-agents for whole jobs</h3>
-          <p>Hand over a task and get back only the result. Each run gets its own isolated browser and uses any OpenAI-compatible model: vLLM, LM Studio, Ollama, llama.cpp or a hosted API.</p>
+          <p>Hand over a task and get back only the result. Each run gets its own isolated browser and uses any OpenAI-compatible model: vLLM, LM Studio, Ollama, llama.cpp or a hosted API. It asks your agent only when it must, such as before placing an order, and can start signed in from a saved sign-in.</p>
         </article>
         <article class="feature">
           <div class="feature-icon"><svg class="i"><use href="#f-eye"/></svg></div>
@@ -137,14 +137,14 @@
       <div class="section-head">
         <p class="eyebrow">Sub-agents</p>
         <h2>Give a <span class="grad-text">TASK</span>, get back the <span class="grad-text">OUTPUT</span></h2>
-        <p>Sub-agents run inside the container next to the browser. Your agent stays in charge and keeps its context small; the sub-agent does the clicking and reading, and returns only what you asked for.</p>
+        <p>Sub-agents run inside the container next to the browser. Your agent stays in charge and keeps its context small; the sub-agent does the clicking and reading, and returns only what you asked for. It pauses to ask your agent only when it has to, for example before it places an order or for a sign-in code.</p>
       </div>
       <div class="agents">
         <article class="agent">
           <div class="agent-head">
             <span class="agent-kind">agent_run</span>
             <h3>Agentic</h3>
-            <p>Completes a task in its own browser and returns the output in the shape you describe, as text or validated JSON.</p>
+            <p>Completes a task in its own browser and returns the output in the shape you describe, as text or validated JSON. Pass a saved sign-in and it starts signed in.</p>
           </div>
           <div class="agent-io">
             <div><b>Task</b><span>On books.toscrape.com, open the Poetry category and read the first 3 books.</span></div>
@@ -177,7 +177,7 @@ script_run {"name": "quotes-by-tag", "params": {"tag": "love", "count": 3}}</spa
           </div>
         </article>
       </div>
-      <p style="margin-top:28px"><a href="docs/agents.html">How sub-agents work, their limits and the script API <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a></p>
+      <p style="margin-top:28px"><a href="docs/agents.html">How sub-agents work, their questions, their limits and the script API <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a> · <a href="docs/snapshots.html">Saved sign-ins (snapshots) <svg class="i" style="vertical-align:-4px"><use href="#i-arrow"/></svg></a></p>
     </div>
   </section>
 
@@ -400,8 +400,8 @@ script_run {"name": "quotes-by-tag", "params": {"tag": "love", "count": 3}}</spa
         <li><b>DNS-rebinding protection.</b> Host and Origin headers are validated, so a web page cannot reach the server through a rebound domain.</li>
         <li><b>URL guards.</b> <code>file:</code> and <code>javascript:</code> URLs are refused, and private networks are blocked unless you allow them.</li>
         <li><b>Locked-down container.</b> Non-root user, read-only file system, all capabilities dropped, <code>no-new-privileges</code>.</li>
-        <li><b>Isolation.</b> Sub-agents and scripts use a separate engine and start with empty browsers; scripts run in a WebAssembly sandbox.</li>
-        <li><b>Redacted logs.</b> Passwords, cookie values and credential headers are masked in the logs and on the dashboard.</li>
+        <li><b>Isolation.</b> Sub-agents and scripts use a separate engine and start with empty browsers, unless your agent hands a sub-agent a saved sign-in; scripts run in a WebAssembly sandbox.</li>
+        <li><b>Redacted logs.</b> Passwords, cookie values, credential headers and one-time codes are masked in the logs and on the dashboard. Saved sign-ins can be encrypted at rest.</li>
       </ul>
       <p style="margin-top:28px;color:var(--text-2)">Pages are untrusted input: text on a page can try to steer a model. Keep a human in the loop for sensitive accounts. <a href="docs/security.html">Security policy</a></p>
     </div>

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Sub-agent questions.** An `agent_run` or `agent_automate` run can pause with the new status `waiting` and ask the host one question (`ask_host`), only when it cannot continue correctly without it: before it places an order, pays or takes another step that cannot be undone, when the TASK is ambiguous, for a sign-in code or which account, or for missing information. `agent_run`, `agent_wait`, `agent_status` and the new `agent_reply` tool return the question at once, with the page it was asked on (read by the server). `agent_reply` answers it (`question_id` is required), and the run continues with the same browser. A waiting run gives up its slot, its wait does not count against its step and time budgets, and it continues without an answer after `AGENT_REPLY_TIMEOUT_MS` (30 minutes). `AGENT_MAX_QUESTIONS` (5 per run; `0` turns questions off) and `allow_questions: false` per call limit them. Secret answers such as one-time codes are masked in logs, transcripts, results and on the dashboard, and never stored. See [Questions from sub-agents](docs/AGENTS.md#questions-from-sub-agents).
+- **Snapshots (saved sign-ins).** A new `snapshots` tool group (`snapshot_list`, `snapshot_save`, `snapshot_describe`, `snapshot_load`, `snapshot_delete`) saves a browser's cookies and site storage for chosen sites under a name and a description, and loads them into a browser so agents do not sign in again. `agent_run` takes `snapshot` to start a sub-agent signed in, refreshes the snapshot when the run succeeds (`update_snapshot`), and leaves out `browser_evaluate` in such runs unless `allow_evaluate` is set. Sub-agents can save a sign-in they made with `save_sign_in` (`AGENT_SNAPSHOT_SAVE`). Snapshots are stored owner-only in `SNAPSHOTS_DIR` (the `snapshots` Docker volume) and encrypted at rest with AES-256-GCM when `SNAPSHOTS_KEY` is set. Agents delete a snapshot only when the user asks. See [Snapshots](docs/SNAPSHOTS.md).
+- **Dashboard.** A **Snapshots** tab next to **Agents** lists the saved sign-ins and deletes one after a confirmation (`DELETE /api/snapshots/<name>`, protected by a custom header and an `Origin` check). The **Agents** tab shows waiting runs with their question, and the run details list the questions asked.
+
+### Changed
+
+- The server now offers 57 tools with a sub-agent model configured, 50 without.
+- Sub-agent prompts: an agent that needs a sign-in asks only for a one-time code or which account, never types a password the TASK did not give it, and otherwise reports which site needs a sign-in. The command-line agent (`npm run lmstudio:agent`) is told to answer sub-agent questions itself and to refuse orders its task did not approve.
+- The Obscura connection budget (`--max-connections`) now counts runs that wait for an answer.
+
 ## [0.1.0] - 2026-09-26
 
 First public release.

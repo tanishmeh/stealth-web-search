@@ -25,7 +25,7 @@ Tested with LM Studio 0.4.18 on macOS and `qwen/qwen3.8-27b` (MLX 4-bit, vision,
 
 - **LM Studio 0.3.18 or newer.** MCP support arrived in 0.3.17, but the per-server `timeout` in `mcp.json`, which this setup needs for tool calls longer than 60 s, arrived in 0.3.18. The model list API used by the CLI agent needs 0.4.
 - **A model trained for tool use.** In LM Studio's model list these models show a hammer icon, and `lms ls` lists them with the `tool use` capability. Qwen3-family models work well. Models with vision also let the CLI agent show them screenshots.
-- **A context length of at least 32k tokens.** The tool definitions alone take about 8.5k tokens for the 45 tools the server offers by default (41 `browser_*` and 4 `script_*` tools). With a sub-agent model configured, the 6 `agent_*` tools are added (51 tools, about 10k tokens). Each page snapshot adds up to about 3k. LM Studio's default of 4k–8k is far too small.
+- **A context length of at least 32k tokens.** The tool definitions alone take about 9.5k tokens for the 50 tools the server offers by default (41 `browser_*`, 4 `script_*` and 5 `snapshot_*` tools). With a sub-agent model configured, the 7 `agent_*` tools are added (57 tools, about 12k tokens). Each page snapshot adds up to about 3k. LM Studio's default of 4k–8k is far too small.
 - **The Stealth Web Search server** running in Docker (recommended) or locally with Node 24.
 - **LM Studio's local server** (**Developer > Start Server**, or `~/.lmstudio/bin/lms server start`) for the CLI agent, the end-to-end checks and integration 2. Chats in the app do not need it.
 
@@ -141,20 +141,20 @@ When a sub-agent model is configured ([section 9b](#9b-lm-studio-as-the-model-fo
 | Setting | Recommendation | Why |
 |---|---|---|
 | Model | Tool-use trained (hammer icon). Qwen3-family models at 14B or larger are reliable | Smaller or untrained models call tools with wrong arguments or write the call as plain text |
-| Context length | 32k minimum, 64k for long sessions | Tool definitions (~8.5k tokens for the default 45 tools) plus snapshots add up quickly |
+| Context length | 32k minimum, 64k for long sessions | Tool definitions (~9.5k tokens for the default 50 tools) plus page snapshots add up quickly |
 | Temperature | 0.1–0.3 | Browser tasks need precise, repeatable actions |
 | Reasoning | Low or medium | Full reasoning is slower and rarely helps with navigation steps |
-| Tool set | `TOOLSETS=core` for models under ~14B | 16 tools instead of 45 (51 with sub-agents) keeps the prompt short and the choice easy |
+| Tool set | `TOOLSETS=core` for models under ~14B | 16 tools instead of 50 (57 with sub-agents) keeps the prompt short and the choice easy |
 
 To shrink the tool list, set `TOOLSETS` in `.env` and restart with `docker compose up -d`:
 
 ```ini
 TOOLSETS=core               # navigate, back, forward, reload, snapshot, click, fill, type, keys, select, check, scroll, waits, screenshot
 TOOLSETS=core,content       # adds markdown, links, search, extract, get_text ...
-TOOLSETS=core,agents        # core plus the 6 agent_* tools (needs a sub-agent model, section 9b)
+TOOLSETS=core,agents        # core plus the 7 agent_* tools (needs a sub-agent model, section 9b)
 ```
 
-The groups are `core` (16 tools), `content` (8), `forms` (2), `tabs` (5), `state` (5), `debug` (3), `capture` (2), `agents` (6) and `scripts` (4). A custom list leaves out every group it does not name, including `agents` and `scripts`. Sub-agents always use their own tools, whatever `TOOLSETS` says.
+The groups are `core` (16 tools), `content` (8), `forms` (2), `tabs` (5), `state` (5), `debug` (3), `capture` (2), `agents` (7), `scripts` (4) and `snapshots` (5). A custom list leaves out every group it does not name, including `agents`, `scripts` and `snapshots`. Sub-agents always use their own tools, whatever `TOOLSETS` says.
 
 LM Studio reads the tool list when a chat first uses the server. Start a new chat after changing `TOOLSETS`.
 
@@ -208,7 +208,7 @@ Final answer (3 steps, 2 tool calls, 76.5 s)
 - Text alignment: ...
 ```
 
-The first step is the slowest because LM Studio processes the tool definitions once (about 8,000 prompt tokens with all 41 browser tools). Later steps reuse its prompt cache. With `--toolsets core` the prompt is about 3,300 tokens. The sample was recorded with the 41 `browser_*` tools. The current default list has 45 tools (51 with sub-agents), so expect a somewhat larger first prompt.
+The first step is the slowest because LM Studio processes the tool definitions once (about 8,000 prompt tokens with all 41 browser tools). Later steps reuse its prompt cache. With `--toolsets core` the prompt is about 3,300 tokens. The sample was recorded with the 41 `browser_*` tools. The current default list has 50 tools (57 with sub-agents), so expect a somewhat larger first prompt.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -235,6 +235,7 @@ How the loop behaves:
 - Invalid tool-call JSON, unknown tool names, empty replies and tool calls written as plain text are reported back to the model so it can correct itself. It gets at most two nudges for empty replies and text tool calls. If it still writes tool calls as text, the run ends with an error (exit code 1) rather than printing that text as the answer.
 - Transient LM Studio errors are retried. If the MCP session is lost (idle timeout or server restart), the agent reconnects once.
 - The model's reasoning is printed in dim text. It streams as it arrives when LM Studio sends it as `reasoning_content`. `<think>` blocks in the reply are printed when the response ends.
+- When the server offers `agent_reply`, the system prompt tells the model how to handle [sub-agent questions](AGENTS.md#questions-from-sub-agents), because nobody can answer them while the agent runs. It is told to answer from the task, to reply "No" to confirm questions (orders, payments, messages, deletions) the task did not explicitly approve and say so in its final answer, never to send a password, to give a one-time code only when the task contains it, to cancel a run it cannot answer, and never to end with a final answer while a run it started is waiting. To let a sub-agent order something, approve it in the task, for example *"… order it; approved up to $15"*.
 
 ## 8. End-to-end checks with the real model
 
@@ -429,9 +430,10 @@ An LM Studio chat can use the sub-agent tools like any other tool. The chat mode
 
 - **The chat waits while a sub-agent works.** A chat does not generate while it waits for a tool result, so a single run has the model to itself. Runs that overlap (`AGENT_MAX_CONCURRENT`, 2 by default) share the model and each runs slower than it would alone. Set `AGENT_MAX_CONCURRENT=1` in `.env` to queue them instead.
 - **The contexts are separate.** Each run has its own conversation. The pages a sub-agent reads never enter the chat; the chat receives only the result.
-- **One context length applies to both.** The model is loaded once, with one context length. The chat (about 10k tokens of tool definitions plus the conversation) and each sub-agent request must fit in it. Keep `contextWindow` at or below the loaded context length.
+- **One context length applies to both.** The model is loaded once, with one context length. The chat (about 12k tokens of tool definitions plus the conversation) and each sub-agent request must fit in it. Keep `contextWindow` at or below the loaded context length.
 - **Settings are per request.** The chat uses the settings of the LM Studio chat. The sub-agents send their own `reasoning_effort`, `temperature` and `top_p` from the file.
 - **Long runs return early.** The `agent_*` tools answer "still running" after 170 s (`AGENT_WAIT_SECONDS`), which fits under the 180 s timeout in `mcp.json` (stored scripts are the exception: see the `--timeout` option above). The chat model then calls `agent_wait` to collect the result.
+- **Questions come back at once.** When a sub-agent asks something, for example before it places an order, the tool returns the question right away, well within the timeout. The chat model shows it to you; answer in the chat, and it calls `agent_reply`, which again waits at most 170 s. If the model ends its turn instead, the run keeps waiting for 30 minutes (`AGENT_REPLY_TIMEOUT_MS`): tell the model what to answer. Small models may answer questions on their own, so write approvals into the task, or ask for `allow_questions: false`, when you want no questions. See [Questions from sub-agents](AGENTS.md#short-tool-timeouts-and-lm-studio).
 
 ## 10. Troubleshooting
 

@@ -29,7 +29,7 @@ Things to know about `npm run dev`:
 
 - It does not read `.env`. Set variables in your shell, or run `node --env-file=.env --watch src/main.ts` instead.
 - It reads `config/models.json` from the project folder, like the container does. Copy `config/models.example.json` to start one. The file is gitignored.
-- Logs go to `./logs/` and automation scripts to `./data/scripts`. Both are gitignored.
+- Logs go to `./logs/`, automation scripts to `./data/scripts` and snapshots (saved sign-ins) to `./data/snapshots`. All of them are gitignored. Snapshots hold live session cookies: never commit or share that folder.
 - It exposes an unauthenticated Obscura CDP socket on `127.0.0.1` while it runs (see [Security](README.md#security) in the README). Do not run it on a shared machine.
 
 `npm run build` compiles `src/` to `dist/` and copies the dashboard's static files. `npm start` runs the built server. The Docker image runs the same `dist/main.js`.
@@ -47,15 +47,17 @@ src/
   cdp/client.ts        Chrome DevTools Protocol client
   browser/             browsers (shared + isolated), tabs, page scripts, live view
   mcp/                 HTTP server, MCP transports, sessions, tool runner
-  tools/               the browser_*, agent_* and script_* tools
+  tools/               the browser_*, agent_*, script_* and snapshot_* tools
   agents/              sub-agents: model client, agent loop, the three agent kinds, web search
   scripts/             automation scripts: store, QuickJS sandbox, browser API
+  snapshots/           saved sign-ins: encrypted file store, capture and load
+  util/                shared helpers: log summaries, secret masking, limits
   dashboard/           dashboard API and static UI
   stdio-bridge.ts      stdio <-> HTTP bridge
 scripts/               Obscura download, LM Studio setup/agent/e2e, sub-agent e2e, docs generator, website builder
 config/                models.example.json (copy it to models.json)
 test/                  unit and integration tests, fixture website
-docs/                  getting started, clients, LM Studio, configuration, models file, sub-agents, tools, logging, troubleshooting, architecture
+docs/                  getting started, clients, LM Studio, configuration, models file, sub-agents, snapshots, tools, logging, troubleshooting, architecture
 site/                  the website's landing page and assets
 examples/              MCP client configuration files
 ```
@@ -147,7 +149,7 @@ A good pull request:
 
 ### Logs and transcripts
 
-Log files in `logs/` and sub-agent transcripts in `logs/agent-runs/` can contain page content, URLs, text the agent typed, task texts and model responses. With `LOG_REDACT_SECRETS=false` they also contain passwords, cookie values and credential headers. Never attach them to an issue or pull request unredacted. Paste only the lines that matter, and remove anything private first.
+Log files in `logs/` and sub-agent transcripts in `logs/agent-runs/` can contain page content, URLs, text the agent typed, task texts, answers to sub-agent questions and model responses. With `LOG_REDACT_SECRETS=false` they also contain passwords, cookie values and credential headers. Never attach them to an issue or pull request unredacted, and never attach snapshot files. Paste only the lines that matter, and remove anything private first.
 
 ## License
 

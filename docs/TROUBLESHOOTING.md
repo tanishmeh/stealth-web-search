@@ -102,9 +102,43 @@ On macOS, programs on the host itself may be blocked from LAN addresses by the L
 
 **`still running` results.** Normal for long jobs: call `agent_wait` with the `run_id`. Raise `AGENT_WAIT_SECONDS` if your MCP client allows long tool calls (LM Studio's timeout is set to 180 s by `npm run lmstudio:setup`).
 
+**A run is `waiting`** (`Run r… is waiting for your answer`). The sub-agent asked the host a question, for example before placing an order. Answer it with `agent_reply` and the `run_id` and `question_id` from the result; `agent_status` without a `run_id` lists every waiting run with its question. Unanswered, the run continues without an answer after `AGENT_REPLY_TIMEOUT_MS` (30 minutes), and `agent_cancel` stops it. To get fewer questions, write what your user already approved into the TASK (`approved up to $30; do not ask`); `allow_questions: false` in the call, or `AGENT_MAX_QUESTIONS=0`, turns them off. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents).
+
+**`agent_reply` returns `Question q… is closed; run r… now asks q…`**, `… expired at … without an answer`, `… was already answered`, or `… is not waiting for an answer`. The answer was meant for a question that is no longer open, so it was not delivered. Answer the question the error names, with its id, or collect the result with `agent_wait`.
+
+**The chat model ends its turn while a run waits** (common with small models in LM Studio). The run keeps waiting until `AGENT_REPLY_TIMEOUT_MS`. Tell the model in the chat what to answer, for example *"Answer the waiting question: yes"*, and it calls `agent_reply`.
+
+**The result says a site needs a sign-in.** Sub-agent browsers start signed out, and agents never type a password the TASK did not give them. Sign in once in your own browser, save it with `snapshot_save`, and pass `snapshot` to `agent_run`. See [Snapshots](SNAPSHOTS.md).
+
 **Context errors from the endpoint** (`maximum context length`). The server compacts the transcript and retries. If it keeps happening, `AGENT_CONTEXT_TOKENS` is larger than the model's real context (vLLM `--max-model-len`): lower it, set the model's `contextWindow` in `config/models.json` (it caps the budget), or lower `AGENT_MAX_RESULT_CHARS`.
 
 **A script fails that passed before.** Sites change. `script_get` shows the code; run `agent_automate` again with `script_name` and `overwrite: true` to re-record it. Script errors name the failing `browser.*` call and the line.
+
+## Snapshots
+
+**`SNAPSHOTS_DIR /data/snapshots is not writable`** at startup. The server keeps running, but the snapshot tools fail. The `snapshots` named volume from `compose.yaml` is writable by the server. If you mounted a host folder there instead, give it to uid 1000 and keep it private: `sudo chown -R 1000:1000 <folder> && sudo chmod 700 <folder>`. A folder that others can read is restricted to 0700 at startup, or the log warns when that is not possible.
+
+**`Invalid configuration: SNAPSHOTS_DIR: must not be inside LOG_DIR`** (or `… the same folder as SCRIPTS_DIR`). Snapshots hold sign-in cookies and must not sit next to shareable logs or scripts. Choose another folder, or remove the variable to use the default.
+
+**`cannot decrypt snapshot "…": SNAPSHOTS_KEY is missing or differs from the one used to save it`**. The snapshot was saved with another key, or `SNAPSHOTS_KEY` is no longer set. Put the old key back in `.env` and run `docker compose up -d`. If it is lost, sign in again and save with `snapshot_save {"name": "…", "replace": true}`, or delete the snapshot when your user agrees.
+
+**`This browser has no sign-in cookies for …; snapshot not changed.`** The browser has no unexpired cookies for the snapshot's sites: sign in first. When creating, open a page of the site you signed in to, or pass `domains`.
+
+**`Snapshot "…" is not loaded in this browser`** or **`… changed after this browser loaded it`**. A refresh saves only into the snapshot this browser loaded, at the version it loaded, so it never overwrites a sign-in another browser renewed. Load it with `snapshot_load` first, or, if you signed in again by hand to the same account, save with `replace: true`.
+
+**A loaded snapshot does not sign the browser in.**
+- The cookies expired: `snapshot_list` and the dashboard count expired cookies, and `snapshot_load` reports the ones it skipped. Sign in again and save with `replace: true`.
+- The site keeps its sign-in on a domain the snapshot does not cover, such as a separate login domain. Save it again with `replace: true` and `domains` listing every domain involved.
+- The site ended the session on its side, or asks again because it sees a new device or address. Snapshots cannot help there.
+- The site keeps its sign-in in IndexedDB, which snapshots do not save.
+
+**`The snapshot "…" loaded in this browser was lost; load it again with snapshot_load.`** The engine restarted (a page crashed it) and the browser lost its cookies. Load the snapshot again. A sub-agent's browser gets its snapshot back by itself.
+
+**A snapshot is listed as `incomplete`.** Its saved state has no valid metadata, or the other way round, usually after a crash while saving. It cannot be loaded. Delete it with `snapshot_delete` or on the dashboard when your user agrees, and save it again.
+
+**`Snapshot limit (500) reached.`** Ask your user which snapshots they no longer need, and delete those.
+
+**The dashboard's Delete button fails with `403`.** The delete request must come from the dashboard's own origin. Behind a reverse proxy, add the proxy's host name to `ALLOWED_HOSTS` or set `PUBLIC_URL` to the address you open the dashboard at. The log line `refused a dashboard snapshot delete` gives the reason.
 
 ## Models file (`config/models.json`)
 

@@ -63,6 +63,7 @@ cp .env.example .env
 | `TOOLSETS` | `all` | Use `core,content,forms` (or `core`) for small local models |
 | `OBSCURA_PROXY` | — | Route browsing through an HTTP or SOCKS5 proxy, e.g. `socks5://user:pass@host:1080` |
 | `HOST_PORT` | `8931` | Port 8931 is taken on your machine. Change `HOST_PORT`, not `PORT`: `compose.yaml` fixes `HOST` and `PORT` inside the container |
+| `SNAPSHOTS_KEY` | — | Set a secret to encrypt saved sign-ins ([snapshots](SNAPSHOTS.md)) at rest |
 
 `.env` is in `.gitignore`, so it stays on your machine. If the server is already running, apply changes with `docker compose up -d`. Every option is described in [Configuration](CONFIGURATION.md). The sub-agents' model has its own file, `config/models.json`, covered in [Turn on sub-agents](#turn-on-sub-agents).
 
@@ -229,7 +230,7 @@ It prints the model's reasoning, each tool call and its result, and the final an
 
 ## Turn on sub-agents
 
-Sub-agents take a whole job from your client and return only the result. They run inside the container, each with its own private browser, and use any OpenAI-compatible chat completions model with tool calling. Once a model is configured, your client gets `agent_run`, `agent_automate`, `agent_find`, `agent_wait`, `agent_status` and `agent_cancel`. What they do is described in [Sub-agents](AGENTS.md).
+Sub-agents take a whole job from your client and return only the result. They run inside the container, each with its own private browser, and use any OpenAI-compatible chat completions model with tool calling. Once a model is configured, your client gets `agent_run`, `agent_automate`, `agent_find`, `agent_wait`, `agent_status`, `agent_cancel` and `agent_reply`. What they do is described in [Sub-agents](AGENTS.md).
 
 The model is set in `config/models.json`. Every field of that file is described in [Models](MODELS.md).
 
@@ -301,10 +302,11 @@ Configuration is valid.
 Server
   MCP endpoint     http://127.0.0.1:8931/mcp
   auth             none
-  tools            51 (TOOLSETS=all)
+  tools            57 (TOOLSETS=all)
   private network  blocked
   stealth          on
   log files        /app/logs
+  snapshots        /data/snapshots (encryption key: none)
 
 Sub-agents: on
   config          /app/config/models.json (provider "Local vLLM", vendor customendpoint)
@@ -316,6 +318,8 @@ Sub-agents: on
   context budget  65536 tokens, up to 8192 per response (max_tokens)
   streaming       on
   concurrency     2 runs at a time, 40 steps each
+  questions       up to 5 per run; a run waits 30 min for agent_reply
+  save sign-ins   on (save_sign_in, when the snapshots tools are enabled)
   in the file     Local vLLM / qwen3.8-27b, LM Studio / qwen/qwen3.8-27b
 
 Checking http://192.168.1.50:8000/v1/chat/completions ...
@@ -356,6 +360,8 @@ Ask your client something like *"Use agent_find to find out which year Python wa
 
 The dashboard's **Agents** tab shows each run's steps, the model's reasoning as it streams, the sources and the result. **Watch** switches the live view to that run's private browser.
 
+A sub-agent may pause and ask your client a question, for example before it places an order. Your client relays it to you and answers with `agent_reply` ([Questions from sub-agents](AGENTS.md#questions-from-sub-agents)). For sites that need a sign-in, sign in once in your client's browser and save it as a snapshot, then start jobs with it ([Snapshots](SNAPSHOTS.md)).
+
 You can also configure the model with `AGENT_LLM_*` variables in `.env` instead of the file. When both are present, the variables you set (`AGENT_LLM_URL`, `AGENT_LLM_API_KEY`, `AGENT_LLM_TEMPERATURE`, `AGENT_LLM_TOP_P`, `AGENT_LLM_REASONING_EFFORT`, `AGENT_LLM_STREAMING`) override the file field by field. `AGENT_LLM_MODEL` picks a model in the file, and `AGENT_LLM_EXTRA_BODY` is merged over its `modelOptions`. `AGENT_MODELS_FILE` points the server at a different file, and `AGENT_MODELS_FILE=none` ignores the file. See [Models](MODELS.md) and [Sub-agents](AGENTS.md).
 
 ## Update
@@ -365,7 +371,7 @@ git pull
 docker compose up -d --build
 ```
 
-Your `.env`, `config/models.json`, logs and stored automation scripts are kept. `curl -s http://127.0.0.1:8931/healthz` shows the running `version` once the server is back.
+Your `.env`, `config/models.json`, logs, stored automation scripts and snapshots are kept. `curl -s http://127.0.0.1:8931/healthz` shows the running `version` once the server is back.
 
 ## Stop and uninstall
 
@@ -373,7 +379,7 @@ Your `.env`, `config/models.json`, logs and stored automation scripts are kept. 
 |---|---|
 | `docker compose stop` | Stops the container. `docker compose start` starts it again |
 | `docker compose restart` | Restarts the server, which reads `config/models.json` again. It does not apply changes to `.env`: use `docker compose up -d` for those |
-| `docker compose down` | Stops and removes the container. Logs, config and the `scripts` volume stay. `docker compose up -d` brings it back |
+| `docker compose down` | Stops and removes the container. Logs, config and the `scripts` and `snapshots` volumes stay. `docker compose up -d` brings it back |
 
 To remove everything:
 
@@ -381,7 +387,7 @@ To remove everything:
 npm run lmstudio:setup -- --remove    # only if you added the server to LM Studio
 docker compose cp stealth-web-search:/data/scripts ~/stealth-web-search-scripts   # optional: keep your automation scripts
 docker compose down
-docker volume rm stealth-web-search_scripts
+docker volume rm stealth-web-search_scripts stealth-web-search_snapshots
 docker image rm stealth-web-search:latest
 cd .. && rm -rf stealth-web-search
 ```
@@ -402,7 +408,7 @@ npm run dev
 - `npm run dev` runs `src/main.ts` with auto-reload on `http://127.0.0.1:8931`.
 - `.env` is not read. Set variables in your shell instead, for example `ALLOW_PRIVATE_NETWORK=true npm run dev`.
 - `config/models.json` in the project folder is read as in Docker. `host.docker.internal` does not resolve outside Docker, so use `127.0.0.1` URLs for models on your machine. Check it with `npm run config:check -- --ping`, adding `--env-file .env` if the file uses `${NAME}` variables from `.env`.
-- Log files go to `./logs/` as JSON lines. The terminal output is human-readable when the terminal is interactive. Automation scripts are stored in `./data/scripts/`.
+- Log files go to `./logs/` as JSON lines. The terminal output is human-readable when the terminal is interactive. Automation scripts are stored in `./data/scripts/`, and snapshots in `./data/snapshots/`.
 - For a production-style run, use `npm run build` and then `npm start`.
 
 > **Security.** Without Docker, Obscura's CDP endpoints listen on `127.0.0.1` without authentication for as long as the server runs, one per Obscura process. Anything with access to your loopback interface can drive those browsers. The ports are random, except that `OBSCURA_CDP_PORT` fixes the main one. The Docker image keeps them inside the container, so prefer Docker on shared or multi-user machines.
@@ -412,7 +418,8 @@ npm run dev
 - [Clients](CLIENTS.md): set up Claude Code, Claude Desktop, Cursor, VS Code and other MCP clients.
 - [LM Studio](LM_STUDIO.md): model settings, the command-line agent and end-to-end checks.
 - [Models](MODELS.md): every field of `config/models.json`.
-- [Sub-agents](AGENTS.md): `agent_run`, `agent_automate`, `agent_find` and automation scripts.
+- [Sub-agents](AGENTS.md): `agent_run`, `agent_automate`, `agent_find`, their questions, and automation scripts.
+- [Snapshots](SNAPSHOTS.md): saved sign-ins for your browser and for sub-agents.
 - [Tool reference](TOOLS.md): every tool and its parameters.
 - [Configuration](CONFIGURATION.md): every environment variable.
 - [Logging](LOGGING.md): what is logged and how to query it.

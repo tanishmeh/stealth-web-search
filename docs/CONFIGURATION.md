@@ -25,7 +25,7 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`. Durations (`*_MS`) a
 | `DASHBOARD_ENABLED` | `true` | Serve the live dashboard at `/` |
 | `SESSION_IDLE_TIMEOUT_MS` | `1800000` | Close MCP sessions idle for this long (`0` disables). Clients reconnect automatically |
 | `MAX_SESSIONS` | `100` | Maximum concurrent MCP sessions; further `initialize` requests get HTTP 503 |
-| `TOOLSETS` | `all` | Tool groups to expose: `core`, `content`, `forms`, `tabs`, `state`, `debug`, `capture`, `agents`, `scripts`. Individual tool names are also accepted. See [TOOLS.md](TOOLS.md) |
+| `TOOLSETS` | `all` | Tool groups to expose: `core`, `content`, `forms`, `tabs`, `state`, `debug`, `capture`, `agents`, `scripts`, `snapshots`. Individual tool names are also accepted. See [TOOLS.md](TOOLS.md) |
 
 > **Under Docker Compose, `HOST` and `PORT` are fixed by `compose.yaml`.** The server inside the container must bind `0.0.0.0:8931` (the port the image publishes and health-checks), so `compose.yaml` sets `HOST` and `PORT` explicitly and they override anything you put in `.env`. To change the port you reach the server on, set `HOST_PORT` (published on `127.0.0.1` only), not `PORT`. To change the base URL shown in logs and on the dashboard, set `PUBLIC_URL` in `.env` — Compose respects it and falls back to `http://127.0.0.1:${HOST_PORT}` when it is unset. Running the server directly (`npm run dev`), `HOST` and `PORT` work as documented above.
 
@@ -37,7 +37,7 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`. Durations (`*_MS`) a
 | `OBSCURA_PROXY` | — | `http://…` or `socks5://user:pass@host:port` for all browser traffic |
 | `OBSCURA_USER_AGENT` | — | Custom User-Agent |
 | `ALLOW_PRIVATE_NETWORK` | `false` | Allow browsing `localhost`, RFC 1918 addresses and `host.docker.internal`. Blocked by default as SSRF protection |
-| `OBSCURA_STORAGE_DIR` | — | Persist cookies of the main browser in this directory. Mount a volume there, for example `./data:/data/cookies` with `OBSCURA_STORAGE_DIR=/data/cookies` (on Linux the folder must be writable by uid 1000: `mkdir -p data && sudo chown -R 1000:1000 data`). Sub-agent and script browsers run on the second engine, which has no storage, so they never see these cookies |
+| `OBSCURA_STORAGE_DIR` | — | Persist cookies of the main browser in this directory. Mount a volume there, for example `./data:/data/cookies` with `OBSCURA_STORAGE_DIR=/data/cookies` (on Linux the folder must be writable by uid 1000: `mkdir -p data && sudo chown -R 1000:1000 data`). Sub-agent and script browsers run on the second engine, which has no storage, so they never see these cookies. To give a sub-agent a sign-in, pass it a [snapshot](SNAPSHOTS.md) |
 | `OBSCURA_NAV_TIMEOUT_MS` | `30000` | Maximum time for one navigation, including redirects and JS-triggered navigations |
 | `OBSCURA_JS_WATCHDOG_MS` | `30000` | Stops page JavaScript that runs synchronously for longer than this (`0` = off) |
 | `OBSCURA_RESTART_ON_CRASH` | `true` | Restart Obscura with backoff if it exits unexpectedly |
@@ -48,7 +48,7 @@ Booleans accept `true/false`, `1/0`, `yes/no` and `on/off`. Durations (`*_MS`) a
 | `OBSCURA_CDP_URL` | — | Use an Obscura instance you run yourself, for example `ws://127.0.0.1:9222/devtools/browser`. No process is spawned |
 | `OBSCURA_BIN` | `/opt/obscura/obscura` in Docker; `.obscura/obscura` or `obscura` on your `PATH` locally | Path to the Obscura binary |
 
-> **Cookies and CSRF.** Obscura v0.2.2 does not enforce cross-site request protections the way Chromium does: it attaches `SameSite=Strict`/`Lax` cookies to cross-site requests and treats `application/json` POSTs as "simple" requests (no CORS preflight). So any page the agent visits can make cross-site requests that carry cookies you have given the browser — cookies set with `browser_set_cookie`, restored with `browser_set_storage_state`, or persisted across restarts with `OBSCURA_STORAGE_DIR`. Treat every visited page as untrusted, do not persist sensitive logins with `OBSCURA_STORAGE_DIR`, and clear cookies (`browser_clear_cookies`) before sending the agent to untrusted sites.
+> **Cookies and CSRF.** Obscura v0.2.2 does not enforce cross-site request protections the way Chromium does: it attaches `SameSite=Strict`/`Lax` cookies to cross-site requests and treats `application/json` POSTs as "simple" requests (no CORS preflight). So any page the agent visits can make cross-site requests that carry cookies you have given the browser — cookies set with `browser_set_cookie`, restored with `browser_set_storage_state`, loaded from a [snapshot](SNAPSHOTS.md) (`snapshot_load`, or `agent_run` with `snapshot`), or persisted across restarts with `OBSCURA_STORAGE_DIR`. Treat every visited page as untrusted, do not persist sensitive logins with `OBSCURA_STORAGE_DIR`, and clear cookies (`browser_clear_cookies`) before sending the agent to untrusted sites.
 
 ### Build arguments (Docker)
 
@@ -95,12 +95,15 @@ See [AGENTS.md](AGENTS.md). A models file (`config/models.json`, see [MODELS.md]
 | `AGENT_CONTEXT_TOKENS` | `65536` | Context budget of one run; the transcript is compacted to fit. Capped by the model's `contextWindow` in the models file |
 | `AGENT_MAX_OUTPUT_TOKENS` | `8192` | Output-token limit per model turn (reasoning included), sent in the `AGENT_LLM_MAX_TOKENS_FIELD` field; must be under half of the context budget. Capped by the model's `maxOutputTokens` in the models file |
 | `AGENT_MAX_STEPS` | `40` | Default step budget per run (automation runs get at least 50); the host can pass `max_steps` (up to 200) |
-| `AGENT_MAX_RUNTIME_MS` | `900000` | Wall-clock limit of one run |
-| `AGENT_MAX_CONCURRENT` | `2` | Runs that work at the same time, each with its own browser; more wait in a queue (up to 20) |
-| `AGENT_WAIT_SECONDS` | `170` | How long `agent_*` tools wait before answering "still running" (the host passes `wait_seconds` to change it per call) |
+| `AGENT_MAX_RUNTIME_MS` | `900000` | Wall-clock limit of one run. Time a run spends waiting for the host's answer to a question does not count |
+| `AGENT_MAX_CONCURRENT` | `2` | Runs that work at the same time, each with its own browser; more wait in a queue (up to 20). A run waiting for the host's answer gives up its slot |
+| `AGENT_WAIT_SECONDS` | `170` | How long `agent_*` tools wait before answering "still running" (the host passes `wait_seconds` to change it per call). They return at once when the run asks a question |
 | `AGENT_MAX_RESULT_CHARS` | `12000` | Tool results longer than this are shortened before they reach the model |
 | `AGENT_SEARCH_ENGINE` | `duckduckgo` | `web_search` engine: `duckduckgo` (Bing as fallback) or `bing` |
 | `AGENT_TRANSCRIPTS` | `true` | Write a JSON transcript of every run to `LOG_DIR/agent-runs/` (the newest 300 are kept) |
+| `AGENT_MAX_QUESTIONS` | `5` | Questions one run may ask the host with `ask_host` (0 to 50). `0` means sub-agents never ask and decide on their own. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents) |
+| `AGENT_REPLY_TIMEOUT_MS` | `1800000` | How long a run paused on a question waits for `agent_reply` before it continues without an answer (at least `10000`) |
+| `AGENT_SNAPSHOT_SAVE` | `true` | Offer `agent_run` agents the `save_sign_in` tool, which saves a sign-in they made as a [snapshot](SNAPSHOTS.md#save_sign_in-a-sub-agent-saves-its-sign-in). Only when `TOOLSETS` includes `snapshots` (the default `all` does) |
 
 ## Automation scripts
 
@@ -109,6 +112,17 @@ See [AGENTS.md](AGENTS.md). A models file (`config/models.json`, see [MODELS.md]
 | `SCRIPTS_DIR` | `/data/scripts` in Docker (the `scripts` volume), `./data/scripts` locally | Where `agent_automate` stores scripts (`<name>.js` + `<name>.json`) |
 | `SCRIPT_TIMEOUT_MS` | `300000` | Time limit of one script run (also stops endless loops) |
 | `SCRIPT_MEMORY_MB` | `64` | Memory limit of the script sandbox |
+
+## Snapshots (saved sign-ins)
+
+See [SNAPSHOTS.md](SNAPSHOTS.md). A snapshot holds live session cookies, so its folder is kept private.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SNAPSHOTS_DIR` | `/data/snapshots` in Docker (the `snapshots` volume), `./data/snapshots` locally | Where snapshots are stored (`<name>.json` metadata and `<name>.state` cookies and storage). Created with mode 0700, files 0600. Must not be inside `LOG_DIR` or be `SCRIPTS_DIR` (the server refuses to start). If it is not writable, the server logs an error at startup and only the snapshot tools fail |
+| `SNAPSHOTS_KEY` | — | Encrypt the saved cookies and storage at rest with this secret (any string; AES-256-GCM, key derived with scrypt). Snapshots saved without a key are encrypted at the next start. A changed or missing key makes older snapshots unreadable. Never logged |
+
+`compose.yaml` mounts the named volume `snapshots` at `/data/snapshots`, so snapshots survive rebuilds and restarts, stay private to the container and out of `./logs`. `docker compose down -v` deletes the volume, and with it every snapshot.
 
 ## Logging
 
@@ -123,5 +137,5 @@ See [LOGGING.md](LOGGING.md) for what is logged.
 | `LOG_FILE_MAX_SIZE` | `20m` | Rotate when a file reaches this size |
 | `LOG_FILE_MAX_FILES` | `14` | Rotated files to keep |
 | `LOG_MAX_STRING_LENGTH` | `2000` | Truncate long strings in logged payloads (images are replaced by size and hash) |
-| `LOG_REDACT_SECRETS` | `true` | Keep secrets out of logs and the dashboard: values typed into password- or OTP-like fields, cookie values, session state, and `Cookie`/`Set-Cookie`/`Authorization` headers. The agent still receives everything |
+| `LOG_REDACT_SECRETS` | `true` | Keep secrets out of logs and the dashboard: values typed into password- or OTP-like fields, cookie values, session state, and `Cookie`/`Set-Cookie`/`Authorization` headers. The agent still receives everything. Some values are masked whatever this says: the answers sent with `agent_reply`, secret answers wherever a sub-agent repeats them, and the cookies and storage of snapshots |
 | `LOG_CDP_EVENTS` | `true` | Log every CDP event (network, lifecycle, console) |
