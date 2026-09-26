@@ -25,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --test-reporter=spec test/unit/*.test.ts",
     "test:integration": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/integration/*.test.ts",
+    "test:ui": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/ui/*.test.ts",
     "obscura:download": "node scripts/download-obscura.mjs",
     "stdio-bridge": "node dist/stdio-bridge.js",
     "lmstudio:setup": "node scripts/setup-lmstudio.mjs",
