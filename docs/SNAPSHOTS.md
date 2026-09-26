@@ -322,6 +322,8 @@ Cookies the snapshot already put into a browser stay there until they are cleare
 
 ## The Snapshots tab
 
+![The Snapshots tab listing two saved sign-ins with their descriptions, where each is loaded, and Delete buttons](images/snapshots-tab.png)
+
 The dashboard (`http://127.0.0.1:8931/`) has a **Snapshots** tab next to **Agents**. It lists every snapshot with its name, description, cookie count (marked when some cookies expired or the entry is incomplete), cookie domains, where it is loaded (the main browser or a sub-agent run), and its version with who updated it and when. The footer shows the folder, whether snapshots are encrypted, and a warning for snapshots saved without encryption. The list updates live, and a cookie count turns to `N expired` or `all expired` when a saved cookie expires while the tab is open.
 
 **Delete** asks for confirmation in the row, and says when a running sub-agent uses the snapshot. Escape cancels. Screen readers announce the confirmation's warning with the red **Delete** button, and an error once. A held Enter or Space counts as one press, so one long press opens the confirmation or confirms it, never both, and never deletes more than one snapshot. After a delete, the keyboard focus moves to the neighbouring row itself (Tab reaches its **Delete** button), or to the Snapshots tab when no row is left.

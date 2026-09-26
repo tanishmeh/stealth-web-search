@@ -212,6 +212,8 @@ Open **http://127.0.0.1:8931/** while an agent works.
 | Watching a sub-agent's browser | A finder run's steps and sources |
 |---|---|
 | ![The live view switched to a finder's private browser while it reads a page](docs/images/watch-agent.png) | ![The details of a finder run: steps, tool calls and the verified quotes of its sources](docs/images/agent-details.png) |
+| **A sub-agent asks before it places an order** | **Saved sign-ins in the Snapshots tab** |
+| ![A sub-agent paused on a checkout page, asking the host to approve the order with the item, total, address and card](docs/images/agent-question.png) | ![The Snapshots tab listing two saved sign-ins with their descriptions, where each is loaded, and Delete buttons](docs/images/snapshots-tab.png) |
 
 The screencast runs only while a dashboard is open and not paused, so the agent does not pay for it otherwise. The page reconnects by itself after a server restart. With `AUTH_TOKEN` set, open `http://127.0.0.1:8931/?token=<token>` once.
 

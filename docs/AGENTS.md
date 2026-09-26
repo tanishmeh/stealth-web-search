@@ -154,6 +154,8 @@ It does not ask to confirm progress, for permission to browse, or for facts it c
 
 ### What the host sees
 
+![A sub-agent paused on a checkout page: its card in the Agents tab shows the question with the item, total, address and card, and the options](images/agent-question.png)
+
 The run's status becomes `waiting`, and `agent_run`, `agent_automate`, `agent_wait`, `agent_status` and `agent_reply` return at once with the question:
 
 ```text
@@ -207,7 +209,7 @@ A button counts as the final step of an order or payment when its label or visib
 Blocked: "Place your order" looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", giving the item, the total price, the delivery address and the payment method. Click it again after the host approves.
 ```
 
-Each refusal also logs a warning, `blocked the final step of an order or payment: the host has not approved it`, with the label (component `agent`). Once the host has answered a `confirm` question of the run, whatever the answer, the button works for the rest of the run: the agent is told not to take a step you refused. A question that expired or was cancelled without an answer does not unblock it.
+Each refusal also logs a warning, `blocked the final step of an order or payment: the host has not approved it`, with the label (component `agent`). An answered `confirm` question unblocks the button only on the page it was asked on (same address; the `?query` and `#fragment` may differ), whatever the answer: the agent is told not to take a step you refused. An approval the agent got on another page, for example the cart before the total was shown, does not count: the refusal then says so, and the agent asks again on the checkout page, where the total, the address and the payment method are visible. A question that expired or was cancelled without an answer does not unblock it.
 
 **Approved in advance.** When your user already approved the purchase, pass `confirm_purchases: false` and put the limits into the TASK:
 
@@ -465,7 +467,7 @@ Logs: component `agent` (run lifecycle, one line per run with steps, tokens, que
 
 - **Task texts are logged.** Task texts, the agent's notes and its transcript are logged as they are. Values the agent types into password-like fields are masked in logs (`LOG_REDACT_SECRETS`), but free text is not, so do not put secrets into a TASK. If you must, set `AGENT_TRANSCRIPTS=false`, `LOG_FILE_LEVEL=warn` and `LOG_LEVEL=warn`; the dashboard still shows the task while the server runs.
 - **Questions come from an agent that reads untrusted pages.** A page can try to make the agent ask for something it should not get. Relay `confirm` and `sign_in` questions to your user unless they approved exactly that, check the `asked on` origin (read by the server, not written by the model), never send a password, and do not relay a code for a site the TASK did not name.
-- **The purchase guard is a second line of defense.** In `agent_run` jobs the server refuses the final order or payment button until the host has answered a `confirm` question (unless `confirm_purchases: false`). It recognizes the button by its label, and covers clicks, form submits and Enter or Space from the browser tools, but not page scripts, `browser_evaluate`, a checkout URL opened directly, or automation runs ([what it does not cover](#orders-and-payments)).
+- **The purchase guard is a second line of defense.** In `agent_run` jobs the server refuses the final order or payment button until the host has answered a `confirm` question asked on that page (unless `confirm_purchases: false`). It recognizes the button by its label, and covers clicks, form submits and Enter or Space from the browser tools, but not page scripts, `browser_evaluate`, a checkout URL opened directly, or automation runs ([what it does not cover](#orders-and-payments)).
 - **Your model endpoint sees secret answers.** A one-time code the host sends with `agent_reply` is masked in logs, transcripts and on the dashboard, but the sub-agent's model receives it so the agent can type it. A code the agent types can also appear in what the page itself shows or sends: the live view, and the page's console and network entries (for example a form sent with GET puts it in the URL).
 - **A snapshot hands over an account.** A sub-agent started with a snapshot, and every page it opens, can act as that account: Obscura v0.2.2 sends cookies on cross-site requests, so a page the agent visits can make signed-in requests to the site. Pass a snapshot only for jobs on that site. The agent gets no `browser_evaluate` in such runs unless you pass `allow_evaluate: true`. See [Snapshots](SNAPSHOTS.md#security-notes).
 - **Sub-agents save sign-ins only when allowed.** `save_sign_in` is offered only when the `snapshots` tools are enabled and `AGENT_SNAPSHOT_SAVE` is on, and the agent is told to save only after signing in to the account the TASK or the host named. A job started with a snapshot also refreshes it at the end without `save_sign_in`, from whatever account its browser holds then (it is skipped when the browser lost the saved sign-in cookies). Pass `update_snapshot: false` for jobs that open pages you do not trust.
