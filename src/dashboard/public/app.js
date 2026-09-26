@@ -1240,6 +1240,7 @@ function updateActivityCard(rec) {
   const queuedMs = num(entry.queuedMs);
   refs.dur.title = queuedMs ? `Waited ${fmtDuration(queuedMs)} in the queue before running` : '';
   setText(refs.summary, argsSummary(entry.args));
+  refs.summary.title = refs.summary.textContent;
   const firstErrorLine = status === 'error' ? str(entry.error ?? entry.preview).split('\n').find((l) => l.trim()) ?? 'Failed' : '';
   setText(refs.error, firstErrorLine.replace(/^Error:\s*/, ''));
   refs.error.hidden = !firstErrorLine;
@@ -1278,7 +1279,7 @@ function renderActivityBody(rec) {
     parts.push(h('div', null, h('div', { class: 'act-label', text: 'Result' }), h('pre', { class: 'code', text: 'Running…' })));
   }
   const foot = [`call ${entry.id}`, entry.endedAt ? `ended ${fmtClock(entry.endedAt, true)}` : null, entry.url ? `page ${entry.url}` : null].filter(Boolean).join('  ·  ');
-  parts.push(h('div', { class: 'act-foot', text: foot }));
+  parts.push(h('div', { class: 'act-foot', text: foot, title: entry.url || undefined }));
   refs.body.replaceChildren(...parts);
 }
 
@@ -1765,7 +1766,9 @@ function logRow(rec) {
     h('span', { class: `lvl lvl-${level}`, text: level }),
     h('span', { class: 'log-comp', style: { '--hue': String(hashHue(component || 'none')) }, text: component || '–', title: component || undefined }),
     h('span', { class: 'log-msg', text: str(r.msg), title: str(r.msg).length > 80 ? str(r.msg) : undefined }),
-    details ? icon('chevron', 'log-caret') : h('span'),
+    details
+      ? h('button', { class: 'log-toggle', type: 'button', 'aria-label': 'Show details', 'aria-expanded': String(logs.open.has(rec.seq)) }, icon('chevron', 'log-caret'))
+      : h('span'),
   );
   if (details && logs.open.has(rec.seq)) openLogRow(row, rec);
   return row;
@@ -1842,6 +1845,7 @@ function onLogsClick(ev) {
     logs.open.add(seq);
     openLogRow(row, rec);
   }
+  row.querySelector('.log-toggle')?.setAttribute('aria-expanded', String(logs.open.has(seq)));
 }
 
 // ------------------------------------------------------------------ sessions
@@ -1880,7 +1884,7 @@ function renderSessions() {
   const server = model.server;
   const browser = model.browser;
   if (server || browser) {
-    const item = (label, value) => h('span', null, `${label} `, h('b', { text: value }));
+    const item = (label, value) => h('span', null, `${label} `, h('b', { text: value, title: value }));
     foot.replaceChildren(
       ...[
         browser?.viewport ? item('Viewport', `${browser.viewport.width}×${browser.viewport.height}`) : null,
@@ -2057,8 +2061,8 @@ function agentDetailsBlock(id) {
               h('b', { text: `#${st.step}` }),
               h('span', { class: 'muted', text: `model ${fmtDuration(st.llmMs)}${st.promptTokens ? ` · ${st.promptTokens} prompt tokens` : ''}` }),
             ),
-            st.reasoning ? h('details', null, h('summary', { text: 'Reasoning' }), h('pre', { class: 'code', dataset: { key: `reasoning-${st.step}` }, text: str(st.reasoning) })) : null,
-            st.content ? h('pre', { class: 'code', dataset: { key: `content-${st.step}` }, text: str(st.content) }) : null,
+            str(st.reasoning).trim() ? h('details', null, h('summary', { text: 'Reasoning' }), h('pre', { class: 'code', dataset: { key: `reasoning-${st.step}` }, text: str(st.reasoning).trim() })) : null,
+            str(st.content).trim() ? h('pre', { class: 'code', dataset: { key: `content-${st.step}` }, text: str(st.content).trim() }) : null,
             ...(Array.isArray(st.toolCalls) ? st.toolCalls : []).map((c) =>
               h(
                 'div',
@@ -2144,6 +2148,7 @@ function buildAgentCard(a) {
                 type: 'button',
                 dataset: { action: 'watch', browser: a.browserId, run: a.id },
                 'aria-pressed': String(watching),
+                'aria-label': `${watching ? 'Watching' : 'Watch'} ${KIND_LABEL[a.kind] ?? str(a.kind)} run ${a.id}`,
                 disabled: browser ? undefined : true,
                 title: browser ? 'Show this agent\'s browser in the live view' : 'Its browser is no longer listed',
               },
@@ -2151,7 +2156,7 @@ function buildAgentCard(a) {
               watching ? 'Watching' : 'Watch',
             )
           : null,
-        h('button', { class: 'chip', type: 'button', dataset: { action: 'details', run: a.id }, 'aria-expanded': String(open) }, icon('chevron', open ? 'rot' : ''), 'Details'),
+        h('button', { class: 'chip', type: 'button', dataset: { action: 'details', run: a.id }, 'aria-expanded': String(open), 'aria-label': `Details of ${KIND_LABEL[a.kind] ?? str(a.kind)} run ${a.id}` }, icon('chevron', open ? 'rot' : ''), 'Details'),
       ),
     ),
     h('div', { class: 'agent-task', text: truncate(str(a.task), 400), title: str(a.task) }),
@@ -2274,7 +2279,7 @@ function renderAgents() {
   const footSig = JSON.stringify(info ?? null);
   if (info && foot.dataset.sig !== footSig) {
     foot.dataset.sig = footSig;
-    const item = (label, value) => h('span', null, `${label} `, h('b', { text: value }));
+    const item = (label, value) => h('span', null, `${label} `, h('b', { text: value, title: value }));
     foot.replaceChildren(
       ...[
         item('Agents', info.enabled ? 'on' : 'off'),
@@ -2313,6 +2318,10 @@ function applySplit(pct) {
   const layout = $('layout');
   layout.style.setProperty('--top-fr', `${ui.split}fr`);
   layout.style.setProperty('--bottom-fr', `${100 - ui.split}fr`);
+  const v = Math.round(ui.split);
+  const splitter = $('splitter');
+  splitter.setAttribute('aria-valuenow', String(v));
+  splitter.setAttribute('aria-valuetext', `Live view ${v}%, inspector ${100 - v}%`);
 }
 
 function initSplitter() {

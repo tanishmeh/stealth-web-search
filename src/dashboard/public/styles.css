@@ -81,7 +81,7 @@
   --fg: #d4d4d4;
   --fg-muted: #a0a0a0;
   --fg-placeholder: #8a8a8a;
-  --fg-faint: #6e6e6e;
+  --fg-faint: #828282;
 
   /* accent (the only non-state hue) */
   --accent: #4daafc;
@@ -131,8 +131,8 @@
   --fg-strong: #0f0f0f;
   --fg: #1f1f1f;
   --fg-muted: #616161;
-  --fg-placeholder: #767676;
-  --fg-faint: #9e9e9e;
+  --fg-placeholder: #6b6b6b;
+  --fg-faint: #808080;
   --accent: #0b57d0;
   --accent-fill: #0b57d0;
   --accent-fill-hover: #0842a0;
@@ -174,8 +174,8 @@
     --fg-strong: #0f0f0f;
     --fg: #1f1f1f;
     --fg-muted: #616161;
-    --fg-placeholder: #767676;
-    --fg-faint: #9e9e9e;
+    --fg-placeholder: #6b6b6b;
+    --fg-faint: #808080;
     --accent: #0b57d0;
     --accent-fill: #0b57d0;
     --accent-fill-hover: #0842a0;
@@ -514,7 +514,13 @@ body.resizing {
 }
 
 .toggle[aria-pressed="true"] {
+  background: var(--bg-selected);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--accent);
+}
+
+.toggle[aria-pressed="true"]:hover {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-selected));
 }
 
 /* check: a button with a checkbox look for boolean filters (Errors only, Failed only) */
@@ -539,13 +545,17 @@ body.resizing {
   width: 13px;
   height: 13px;
   flex: none;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--fg-placeholder);
   border-radius: var(--r-tag);
   background: var(--bg-sunken) center / 11px 11px no-repeat;
 }
 
 .check[aria-pressed="true"] {
   color: var(--fg);
+}
+
+.check:not([aria-pressed="true"]):hover .check-box {
+  border-color: var(--fg-muted);
 }
 
 .check[aria-pressed="true"] .check-box {
@@ -652,6 +662,7 @@ body.resizing {
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
+  min-height: calc(var(--h-topbar) + 350px + var(--h-status));
   min-width: 0;
 }
 
@@ -825,6 +836,25 @@ body.resizing {
   background: var(--err);
 }
 
+/* while the event stream is down, the status bar shows the last known (stale) values */
+.app:is([data-conn="connecting"], [data-conn="reconnecting"]) .statusbar .status-item {
+  opacity: 0.55;
+}
+
+.app:is([data-conn="connecting"], [data-conn="reconnecting"]) .statusbar .status-item .dot {
+  background: var(--fg-faint);
+}
+
+/* neutral facts (viewers, uptime, no clients) carry no dot; "off" states show a ring */
+.status-item:not([data-tone]) .dot {
+  display: none;
+}
+
+.status-item[data-tone="muted"] .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--fg-faint);
+}
+
 /* status bar */
 .statusbar {
   display: flex;
@@ -982,6 +1012,7 @@ body.resizing {
   flex: 1;
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 
@@ -992,8 +1023,8 @@ body.resizing {
 .btab {
   position: relative;
   display: flex;
-  flex: 0 1 auto;
-  max-width: 340px;
+  flex: 1 1 0;
+  max-width: 240px;
   align-items: center;
   gap: var(--s-3);
   min-width: 120px;
@@ -1004,6 +1035,8 @@ body.resizing {
 }
 
 .btab[aria-selected="true"] {
+  flex-shrink: 0;
+  max-width: min(340px, calc(100% - 16px));
   margin-bottom: -1px;
   background: var(--bg-panel);
   color: var(--fg);
@@ -1186,6 +1219,7 @@ body.resizing {
 .screen {
   position: relative;
   overflow: hidden;
+  container-type: inline-size; /* marker labels are sized to the page */
   border-radius: 2px;
   background: #ffffff;
   box-shadow: 0 0 0 1px var(--line);
@@ -1355,7 +1389,7 @@ body.resizing {
   position: absolute;
   top: 10px;
   left: 12px;
-  max-width: 260px;
+  max-width: min(260px, calc(34cqw - 16px));
   padding: 1px 5px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1498,6 +1532,35 @@ body.resizing {
   white-space: nowrap;
 }
 
+.act-summary:empty {
+  display: none;
+}
+
+.timeline {
+  container-type: inline-size;
+}
+
+@container (max-width: 400px) {
+  .act-tool {
+    grid-column: 1 / 3;
+  }
+
+  .act-summary {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+}
+
+.act.fresh {
+  animation: act-fresh 0.9s ease-out;
+}
+
+@keyframes act-fresh {
+  from {
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel));
+  }
+}
+
 .act-error {
   grid-column: 1 / -1;
   min-width: 0;
@@ -1599,6 +1662,10 @@ body.resizing {
   transform: scale(0.85);
 }
 
+.act.from-agent > .act-body {
+  padding-left: 48px;
+}
+
 /* expanded details */
 .act-body {
   display: grid;
@@ -1622,6 +1689,15 @@ body.resizing {
   color: var(--fg-muted);
   font: var(--fs-meta) / var(--lh-tight) var(--mono);
   overflow-wrap: anywhere;
+}
+
+/* a long page URL is cut after three lines (the full URL is in the title) */
+.act-body > .act-foot {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 /* empty list: a sentence, no illustration */
@@ -1673,7 +1749,8 @@ body.resizing {
 .itab {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
+  line-height: calc(var(--h-bar) - 1px);
   gap: var(--s-3);
   height: 100%;
   padding: 0 var(--s-5);
@@ -1788,9 +1865,12 @@ body.resizing {
   padding-left: var(--s-2);
 }
 
-/* Sessions and Agents have no filters: their lists get the room */
-.inspector:has(.itab[data-view="sessions"][aria-selected="true"], .itab[data-view="agents"][aria-selected="true"]) .inspector-tools {
-  display: none;
+/* scroll boxes that Chrome makes keyboard-focusable draw their focus ring inside */
+.tabstrip:focus-visible,
+.rows:focus-visible,
+.timeline:focus-visible,
+.view-foot:focus-visible {
+  outline-offset: -2px;
 }
 
 /* keyboard hint inside a button */
@@ -1853,56 +1933,56 @@ kbd {
   transform: none;
 }
 
-/* footer summary bar */
+/* footer summary bar: wraps onto a second line rather than cutting facts off */
 .view-foot {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   align-items: center;
-  height: var(--h-foot);
-  padding: 0 var(--s-5);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
+  min-height: var(--h-foot);
+  padding: 2px var(--s-5) 3px 0;
+  overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--bg-panel);
   color: var(--fg-muted);
   font-size: var(--fs-meta);
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.view-foot::-webkit-scrollbar {
-  display: none;
 }
 
 .view-foot:empty {
   display: none;
 }
 
+/* each item draws a leading divider; the -1px margin hides the divider that starts a row */
 .view-foot > span {
   display: inline-flex;
   flex: none;
   align-items: center;
+  margin: 0 12px 0 -1px;
 }
 
-/* the last value (a path, an endpoint) gives way with an ellipsis instead of clipping */
+.view-foot > span::before {
+  content: "";
+  width: 1px;
+  height: 12px;
+  flex: none;
+  margin: 0 12px 0 0;
+  background: var(--line);
+}
+
 .view-foot > span:last-child {
   flex: 0 1 auto;
   min-width: 0;
+  margin-right: 0;
 }
 
 .view-foot > span:last-child b {
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.view-foot > span + span::before {
-  content: "";
-  width: 1px;
-  height: 12px;
-  flex: none;
-  margin: 0 10px;
-  background: var(--line);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .view-foot b {
@@ -2024,6 +2104,58 @@ kbd {
   grid-template-columns: 60px 64px 92px minmax(0, 1fr) 72px 68px 100px;
   align-items: center;
   height: var(--h-row);
+}
+
+/* the table follows the inspector's width, not the window's */
+#view-network {
+  container-type: inline-size;
+}
+
+@container (max-width: 699px) {
+  .net-row {
+    grid-template-columns: 60px 64px 92px minmax(0, 1fr) 72px 68px;
+  }
+
+  .net-row .c-start {
+    display: none;
+  }
+}
+
+@container (max-width: 520px) {
+  .net-row {
+    grid-template-columns: 58px minmax(0, 1fr) 60px 52px;
+  }
+
+  .net-row .c-method,
+  .net-row .c-type,
+  .net-row .c-start {
+    display: none;
+  }
+
+  /* host under the path, so the end of the path stays visible */
+  .net-row:not(.rows-head) {
+    height: auto;
+    min-height: var(--h-row);
+    padding-block: 3px;
+  }
+
+  .net-row:not(.rows-head) .net-url {
+    display: flex;
+    flex-direction: column-reverse;
+    line-height: 1.35;
+  }
+
+  .net-url .u-host,
+  .net-url .u-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .net-url .u-host {
+    color: var(--fg-muted);
+    font-size: 11px;
+  }
 }
 
 .net-row > span {
@@ -2680,9 +2812,10 @@ kbd {
 
 .script-row {
   display: grid;
-  grid-template-columns: minmax(150px, max-content) 150px 56px minmax(140px, 220px) minmax(0, 1fr);
+  grid-template-columns: minmax(150px, max-content) 150px 56px minmax(0, 1fr);
   align-items: center;
   column-gap: var(--s-5);
+  row-gap: 2px;
   min-height: 26px;
   padding: 3px var(--s-5);
   border-bottom: 1px solid var(--line-subtle);
@@ -2733,6 +2866,13 @@ kbd {
   color: var(--fg-muted);
 }
 
+.script-row > .script-desc {
+  grid-column: 1 / -1;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
 /* 15. Code and JSON blocks ================================================ */
 
 .code {
@@ -2774,19 +2914,7 @@ kbd {
 
 /* medium: same shell, narrower rail, fewer secondary columns */
 @media (max-width: 1199px) {
-  :root {
-    --rail-w: 280px;
-  }
-
   .omnibox-title {
-    display: none;
-  }
-
-  .net-row {
-    grid-template-columns: 58px 60px 88px minmax(0, 1fr) 68px 64px;
-  }
-
-  .net-row .c-start {
     display: none;
   }
 
@@ -2794,7 +2922,12 @@ kbd {
     grid-template-columns: minmax(130px, max-content) 150px 56px minmax(0, 1fr);
   }
 
-  .script-desc {
+  /* sessions: the protocol column gives way first */
+  .sess-row {
+    grid-template-columns: minmax(180px, 1.6fr) 100px 110px 84px minmax(110px, 1fr);
+  }
+
+  .sess-row .c-proto {
     display: none;
   }
 }
@@ -2928,49 +3061,9 @@ kbd {
     margin-right: var(--s-5);
   }
 
-  .view-foot {
-    height: auto;
-    min-height: var(--h-foot);
-    flex-wrap: wrap;
-    padding: 3px var(--s-5);
-    line-height: 18px;
-    white-space: normal;
-  }
-
-  .view-foot > span {
-    margin-right: var(--s-5);
-  }
-
-  .view-foot > span + span::before {
-    display: none;
-  }
-
-  .con-row {
-    grid-template-columns: 64px minmax(0, 1fr);
-  }
-
-  .con-row .lvl,
-  .con-row .con-src {
-    display: none;
-  }
-
-  .net-row {
-    grid-template-columns: 58px minmax(0, 1fr) 60px 52px;
-  }
-
-  .net-row .c-method,
-  .net-row .c-type,
-  .net-row .c-start {
-    display: none;
-  }
-
   .log-row {
-    grid-template-columns: 10px 84px 40px 0 minmax(0, 1fr);
+    grid-template-columns: 10px calc(12ch + 4px) 40px 96px minmax(0, 1fr);
     column-gap: 6px;
-  }
-
-  .log-row .log-comp {
-    visibility: hidden;
   }
 
   .log-row .log-details {
@@ -3015,9 +3108,15 @@ kbd {
     row-gap: 0;
   }
 
-  .script-row .muted,
-  .script-params {
-    display: none;
+  .script-row > .script-params {
+    grid-row: 2;
+    grid-column: 1;
+  }
+
+  .script-row > .muted {
+    grid-row: 2;
+    grid-column: 2;
+    justify-self: end;
   }
 }
 
@@ -3058,6 +3157,10 @@ kbd {
     transition-duration: 0.01ms !important;
   }
 
+  .act.fresh {
+    animation: none;
+  }
+
   .busybar::after {
     width: 100%;
     opacity: 0.6;
@@ -3084,8 +3187,31 @@ kbd {
 
 /* small screens: the path matters more than the host; healthy details give way to problems */
 @media (max-width: 639px) {
-  .net-url .u-host {
+  .con-row {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .con-row .c-time {
     display: none;
+  }
+
+  .con-row .con-src {
+    grid-column: 2;
+    max-width: none;
+    text-align: left;
+  }
+
+  .log-row {
+    grid-template-columns: 10px calc(12ch + 4px) 40px minmax(0, 1fr);
+  }
+
+  .log-row > .log-msg {
+    grid-row: 2;
+    grid-column: 2 / -1;
+  }
+
+  .log-row .log-details {
+    grid-row: 3;
   }
 
   #pill-viewers,
@@ -3095,5 +3221,97 @@ kbd {
 
   .btn kbd {
     display: none;
+  }
+}
+
+/* phones: tab counts collapse to their dot or spinner (the text stays in the accessible name) */
+@media (max-width: 479px) {
+  .itab .count {
+    font-size: 0;
+  }
+
+  .itab .count.err::after,
+  .itab .count.warn::after {
+    margin-left: 0;
+  }
+}
+
+/* touch screens: controls large enough to tap */
+@media (pointer: coarse) {
+  :root {
+    --h-control: 32px;
+    --h-toolbar: 40px;
+    --h-bar: 36px;
+    --h-topbar: 40px;
+  }
+
+  .browser-pick .select,
+  .agent-actions .chip {
+    height: 32px;
+  }
+
+  .endpoint-copy {
+    width: 36px;
+  }
+}
+
+/* log rows with details open from the keyboard through their caret button */
+.log-toggle {
+  display: flex;
+  align-items: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.log-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+.log-row:has(.log-toggle:focus-visible) {
+  background: var(--bg-hover);
+}
+
+/* Windows high contrast: selection and on-states keep a visible system colour */
+@media (forced-colors: active) {
+  .itab[aria-selected="true"]::after,
+  .splitter:hover::after,
+  .splitter:focus-visible::after,
+  .splitter.dragging::after {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+
+  .btab[aria-selected="true"] {
+    box-shadow: none;
+    border-top: 2px solid Highlight;
+  }
+
+  .toggle[aria-pressed="true"] {
+    forced-color-adjust: none;
+    color: Highlight;
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+  }
+
+  .check[aria-pressed="true"] .check-box {
+    position: relative;
+    forced-color-adjust: none;
+    border-color: Highlight;
+    background: Highlight;
+  }
+
+  .check[aria-pressed="true"] .check-box::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    forced-color-adjust: none;
+    background: HighlightText;
+    -webkit-mask: var(--checkmark) center / 11px 11px no-repeat;
+    mask: var(--checkmark) center / 11px 11px no-repeat;
   }
 }
