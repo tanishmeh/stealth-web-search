@@ -484,6 +484,17 @@ pre {
   color: var(--border-strong);
 }
 
+/* The line wraps on phones: space the items instead, so no row starts with a dot. */
+@media (max-width: 560px) {
+  .hero-badges {
+    gap: 4px 16px;
+  }
+
+  .hero-badges li + li::before {
+    content: none;
+  }
+}
+
 .shot {
   position: relative;
   margin: 0;
