@@ -399,7 +399,7 @@ _changes page state, local to the browser_
 
 ### browser_clear_cookies
 
-**Clear cookies**. Delete every cookie from the browser cookie jar (all domains, all tabs). Page localStorage is not affected.
+**Clear cookies**. Delete every cookie from the browser cookie jar (all domains, all tabs), and unload the snapshots (saved sign-ins) loaded in this browser, so their site storage is no longer restored on page loads. The open page's localStorage is not changed.
 
 _changes page state, local to the browser_
 
@@ -497,7 +497,7 @@ _changes page state, local to the browser_
 
 ### agent_run
 
-**Run a browser agent (agentic mode)**. Hand a browser task to a sub-agent. It works in its own isolated browser (own tabs and cookies; your browser is not touched), completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. If your user already approved an order, say so in the TASK (e.g. "approved up to $30; do not ask"). For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.
+**Run a browser agent (agentic mode)**. Hand a browser task to a sub-agent. It works in its own isolated browser (own tabs and cookies; your browser is not touched), completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. The agent always asks before placing an order or paying, and the server enforces it. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK. For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.
 
 _changes page state, interacts with websites_
 
@@ -509,7 +509,8 @@ _changes page state, interacts with websites_
 | `start_url` | string | no | Page to begin at, if known |
 | `context` | string | no | Extra context: constraints, preferences, what is already known |
 | `max_steps` | integer | no | Step budget (model turns). Default: server setting (AGENT_MAX_STEPS) |
-| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you |
+| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK) |
+| `confirm_purchases` | boolean | no | true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question. Set false only when your user already approved the purchase; then put the limits (item, quantity, maximum total) in the TASK. |
 | `snapshot` | string | no | Name of a snapshot (see snapshot_list) to start the agent's private browser with, so it is already signed in to those sites. An unknown name returns the list of saved names |
 | `update_snapshot` | boolean | no | When the run completes successfully, refresh that snapshot from the agent's browser (keeps a renewed sign-in). Default true |
 | `allow_evaluate` | boolean | no | Runs started with a snapshot do not get browser_evaluate (page scripts could read the signed-in cookies and storage) unless this is true. Default false |
@@ -532,7 +533,7 @@ _changes page state, interacts with websites_
 | `start_url` | string | no | Page to begin at, if known |
 | `context` | string | no | Extra context: constraints, preferences, what is already known |
 | `max_steps` | integer | no | Step budget (model turns). Default: server setting (AGENT_MAX_STEPS) |
-| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you |
+| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK) |
 | `wait_seconds` | number | no | Seconds to wait for the result before returning "still running" (the run continues; collect it with agent_wait). Default: server setting (AGENT_WAIT_SECONDS) |
 
 ### agent_find
@@ -592,8 +593,8 @@ _changes page state, interacts with websites_
 |---|---|---|---|
 | `run_id` | string | yes | The run id, e.g. "r1a2b3c4" |
 | `question_id` | string | yes | The id of the question you answer, e.g. "q1a2b3" (from the waiting result) |
-| `answer` | string | yes | Your answer, e.g. "Yes, place the order." To refuse, say so plainly: "No, do not place the order." |
-| `secret` | boolean | no | true if the answer is a code or other secret (a question marked secret is treated so anyway) |
+| `answer` | string | yes | Your answer, e.g. "Yes, place the order." To refuse, say so plainly: "No, do not place the order." For a code or other secret, send only the value itself, e.g. "482913" |
+| `secret` | boolean | no | true if the answer is a code or other secret: send only the value, with secret: true (a question marked secret is treated so anyway) |
 | `wait_seconds` | number | no | Seconds to wait for the result before returning "still running" (the run continues; collect it with agent_wait). Default: server setting (AGENT_WAIT_SECONDS) |
 
 ## Group `scripts`
@@ -674,7 +675,7 @@ _changes page state, local to the browser_
 
 ### snapshot_load
 
-**Load a snapshot**. Load (activate) a snapshot in this browser: replaces this browser's cookies for the snapshot's sites with the saved ones (other sites' sign-ins stay) and restores its site storage on every page load of those sites. Only affects your own browser: to start a sub-agent signed in, pass the name to agent_run as snapshot.
+**Load a snapshot**. Load (activate) a snapshot in this browser: replaces this browser's cookies for the snapshot's sites with the saved ones (other sites' sign-ins stay, except for a snapshot saved with domains ["*"], which replaces every cookie) and restores its site storage on every page load of those sites. Only affects your own browser: to start a sub-agent signed in, pass the name to agent_run as snapshot.
 
 _changes page state, local to the browser_
 

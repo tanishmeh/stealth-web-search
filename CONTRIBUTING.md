@@ -94,7 +94,7 @@ docker compose up -d --build   # afterwards: back to the normal settings (privat
 MCP_URL=http://127.0.0.1:<port>/mcp AUTH_TOKEN=<token> npm run test:docker
 ```
 
-Some tests need a server that the suite starts itself (for example to read its log files or configure a scripted model). They are skipped against the container and run in `npm run test:integration`.
+Some tests need a server that the suite starts itself (for example to read its log files or configure a scripted model). They are skipped against the container and run in `npm run test:integration`. The tests that save snapshots in the container (its real `snapshots` volume) use unique names and delete them afterwards, also when an assertion fails.
 
 On Linux, the container runs as uid 1000 and writes to `./logs`. If your user id is not 1000, run `sudo chown -R 1000:1000 logs` once.
 

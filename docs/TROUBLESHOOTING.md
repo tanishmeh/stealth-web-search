@@ -102,11 +102,15 @@ On macOS, programs on the host itself may be blocked from LAN addresses by the L
 
 **`still running` results.** Normal for long jobs: call `agent_wait` with the `run_id`. Raise `AGENT_WAIT_SECONDS` if your MCP client allows long tool calls (LM Studio's timeout is set to 180 s by `npm run lmstudio:setup`).
 
-**A run is `waiting`** (`Run r… is waiting for your answer`). The sub-agent asked the host a question, for example before placing an order. Answer it with `agent_reply` and the `run_id` and `question_id` from the result; `agent_status` without a `run_id` lists every waiting run with its question. Unanswered, the run continues without an answer after `AGENT_REPLY_TIMEOUT_MS` (30 minutes), and `agent_cancel` stops it. To get fewer questions, write what your user already approved into the TASK (`approved up to $30; do not ask`); `allow_questions: false` in the call, or `AGENT_MAX_QUESTIONS=0`, turns them off. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents).
+**A run is `waiting`** (`Run r… is waiting for your answer`). The sub-agent asked the host a question, for example before placing an order. Answer it with `agent_reply` and the `run_id` and `question_id` from the result; `agent_status` without a `run_id` lists every waiting run with its question. Unanswered, the run continues without an answer after `AGENT_REPLY_TIMEOUT_MS` (30 minutes), and `agent_cancel` stops it. To get fewer questions, tell the agent what your user already approved: a purchase with `confirm_purchases: false` and its limits in the TASK, other steps in the TASK. `allow_questions: false` in the call, or `AGENT_MAX_QUESTIONS=0`, turns questions off, but the agent still does not order or pay without your approval. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents).
+
+**A run ends with `success: false` at the checkout, or its steps show `Blocked: "Place your order" looks like the final step of an order or payment`.** The server refuses the final order or payment button of an `agent_run` job until the host has answered a `confirm` question of the run. The agent should ask first; with questions off it finishes and says the order is ready instead. If your user approved the purchase, pass `confirm_purchases: false` and put the limits (item, quantity, maximum total) in the TASK. The log has a warning `blocked the final step of an order or payment` with the button's label. See [Orders and payments](AGENTS.md#orders-and-payments).
 
 **`agent_reply` returns `Question q… is closed; run r… now asks q…`**, `… expired at … without an answer`, `… was already answered`, or `… is not waiting for an answer`. The answer was meant for a question that is no longer open, so it was not delivered. Answer the question the error names, with its id, or collect the result with `agent_wait`.
 
-**The chat model ends its turn while a run waits** (common with small models in LM Studio). The run keeps waiting until `AGENT_REPLY_TIMEOUT_MS`. Tell the model in the chat what to answer, for example *"Answer the waiting question: yes"*, and it calls `agent_reply`.
+**The chat model ends its turn while a run waits** (common with small models in LM Studio, and expected when it asks you). The run keeps waiting until `AGENT_REPLY_TIMEOUT_MS`. Tell the model in the chat what to answer, for example *"Answer the waiting question: yes"*, and it calls `agent_reply`.
+
+**`Also waiting for your answer` does not list a waiting run.** It lists only the runs your MCP client started. `agent_status` without a `run_id` lists every waiting run, and marks the ones another client started `(started by …: theirs to answer)`.
 
 **The result says a site needs a sign-in.** Sub-agent browsers start signed out, and agents never type a password the TASK did not give them. Sign in once in your own browser, save it with `snapshot_save`, and pass `snapshot` to `agent_run`. See [Snapshots](SNAPSHOTS.md).
 
@@ -124,13 +128,18 @@ On macOS, programs on the host itself may be blocked from LAN addresses by the L
 
 **`This browser has no sign-in cookies for …; snapshot not changed.`** The browser has no unexpired cookies for the snapshot's sites: sign in first. When creating, open a page of the site you signed in to, or pass `domains`.
 
-**`Snapshot "…" is not loaded in this browser`** or **`… changed after this browser loaded it`**. A refresh saves only into the snapshot this browser loaded, at the version it loaded, so it never overwrites a sign-in another browser renewed. Load it with `snapshot_load` first, or, if you signed in again by hand to the same account, save with `replace: true`.
+**`Snapshot "…" is not loaded in this browser`** or **`… changed after this browser loaded it`**. A refresh saves only into the snapshot this browser loaded, at the version it loaded, so it never overwrites a sign-in another browser renewed. Loading or saving another snapshot for an overlapping site, and `browser_clear_cookies`, also unload it (their results say `Snapshot "…" is no longer loaded in this browser`). Load it with `snapshot_load` first, or, if you signed in again by hand to the same account, save with `replace: true`.
+
+**`This browser lost N of the sign-in cookies saved in snapshot "…" (signed out?); snapshot not changed.`** (or, at the end of a sub-agent run, `was not refreshed: the agent's browser lost N saved sign-in cookie(s) (signed out?)`). The browser no longer has sign-in cookies the snapshot holds, usually because the site or a page signed it out, so the refresh would have replaced a working sign-in. If this browser is signed in to the snapshot's account, save with `replace: true`; otherwise load the snapshot again.
+
+**`Snapshot "…" is loaded in this browser and writes its saved site storage into … on every page load`**. You signed in to another account while a snapshot of that site was loaded, so the page's storage still comes from the loaded snapshot. Call `browser_clear_cookies` (it also unloads the snapshots), sign in again, then save.
 
 **A loaded snapshot does not sign the browser in.**
 - The cookies expired: `snapshot_list` and the dashboard count expired cookies, and `snapshot_load` reports the ones it skipped. Sign in again and save with `replace: true`.
 - The site keeps its sign-in on a domain the snapshot does not cover, such as a separate login domain. Save it again with `replace: true` and `domains` listing every domain involved.
 - The site ended the session on its side, or asks again because it sees a new device or address. Snapshots cannot help there.
 - The site keeps its sign-in in IndexedDB, which snapshots do not save.
+- Another snapshot for the same site, a subdomain or a parent domain was loaded or saved later and replaced its cookies (that result said `Snapshot "…" is no longer loaded in this browser`). Load it again.
 
 **`The snapshot "…" loaded in this browser was lost; load it again with snapshot_load.`** The engine restarted (a page crashed it) and the browser lost its cookies. Load the snapshot again. A sub-agent's browser gets its snapshot back by itself.
 
@@ -138,7 +147,7 @@ On macOS, programs on the host itself may be blocked from LAN addresses by the L
 
 **`Snapshot limit (500) reached.`** Ask your user which snapshots they no longer need, and delete those.
 
-**The dashboard's Delete button fails with `403`.** The delete request must come from the dashboard's own origin. Behind a reverse proxy, add the proxy's host name to `ALLOWED_HOSTS` or set `PUBLIC_URL` to the address you open the dashboard at. The log line `refused a dashboard snapshot delete` gives the reason.
+**The dashboard's Delete button fails with `403`.** The delete request must come from the dashboard's own origin. Behind a reverse proxy, add the proxy's host name to `ALLOWED_HOSTS` (a name without a port matches the dashboard on any port, such as `https://mcp.example.com:8443`), or set `PUBLIC_URL` to the exact address you open the dashboard at (scheme, host and port). The log line `refused a dashboard snapshot delete` gives the reason.
 
 ## Models file (`config/models.json`)
 

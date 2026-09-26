@@ -360,7 +360,7 @@ Ask your client something like *"Use agent_find to find out which year Python wa
 
 The dashboard's **Agents** tab shows each run's steps, the model's reasoning as it streams, the sources and the result. **Watch** switches the live view to that run's private browser.
 
-A sub-agent may pause and ask your client a question, for example before it places an order. Your client relays it to you and answers with `agent_reply` ([Questions from sub-agents](AGENTS.md#questions-from-sub-agents)). For sites that need a sign-in, sign in once in your client's browser and save it as a snapshot, then start jobs with it ([Snapshots](SNAPSHOTS.md)).
+A sub-agent may pause and ask your client a question, for example before it places an order (the server blocks the order button until then). Your client relays it to you and answers with `agent_reply` ([Questions from sub-agents](AGENTS.md#questions-from-sub-agents)). For sites that need a sign-in, sign in once in your client's browser and save it as a snapshot, then start jobs with it ([Snapshots](SNAPSHOTS.md)).
 
 You can also configure the model with `AGENT_LLM_*` variables in `.env` instead of the file. When both are present, the variables you set (`AGENT_LLM_URL`, `AGENT_LLM_API_KEY`, `AGENT_LLM_TEMPERATURE`, `AGENT_LLM_TOP_P`, `AGENT_LLM_REASONING_EFFORT`, `AGENT_LLM_STREAMING`) override the file field by field. `AGENT_LLM_MODEL` picks a model in the file, and `AGENT_LLM_EXTRA_BODY` is merged over its `modelOptions`. `AGENT_MODELS_FILE` points the server at a different file, and `AGENT_MODELS_FILE=none` ignores the file. See [Models](MODELS.md) and [Sub-agents](AGENTS.md).
 

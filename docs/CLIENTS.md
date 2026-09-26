@@ -535,7 +535,7 @@ ssh -N -L 8931:127.0.0.1:8931 you@192.168.1.50
 **A TLS reverse proxy.** Run a reverse proxy (nginx, Caddy, Traefik and others) on the server machine. It terminates TLS and forwards to `127.0.0.1:8931`. Then:
 
 - Set `AUTH_TOKEN`.
-- Add the proxy's host name to `ALLOWED_HOSTS` (comma-separated host names, without ports). The server checks the `Host` header of every request except `/healthz` against this list. On `/mcp` it also checks the `Origin` header when a client sends one. Unknown names get `403 Invalid Host` or `403 Invalid Origin`. `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` are always accepted.
+- Add the proxy's host name to `ALLOWED_HOSTS` (comma-separated host names, without ports). The server checks the `Host` header of every request except `/healthz` against this list. On `/mcp` it also checks the `Origin` header when a client sends one. Unknown names get `403 Invalid Host` or `403 Invalid Origin`. `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` are always accepted. The dashboard's snapshot **Delete** accepts a listed name on any port, so a proxy on a port such as 8443 works.
 - Set `PUBLIC_URL` to the proxy's URL, so logs and the dashboard show the right address.
 - Turn off response buffering. `/mcp` and the dashboard's `/api/events` stream Server-Sent Events.
 - Allow long responses. A tool call can take several minutes (see [Long tool calls](#long-tool-calls-and-client-timeouts)).

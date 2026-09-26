@@ -101,7 +101,7 @@ See [AGENTS.md](AGENTS.md). A models file (`config/models.json`, see [MODELS.md]
 | `AGENT_MAX_RESULT_CHARS` | `12000` | Tool results longer than this are shortened before they reach the model |
 | `AGENT_SEARCH_ENGINE` | `duckduckgo` | `web_search` engine: `duckduckgo` (Bing as fallback) or `bing` |
 | `AGENT_TRANSCRIPTS` | `true` | Write a JSON transcript of every run to `LOG_DIR/agent-runs/` (the newest 300 are kept) |
-| `AGENT_MAX_QUESTIONS` | `5` | Questions one run may ask the host with `ask_host` (0 to 50). `0` means sub-agents never ask and decide on their own. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents) |
+| `AGENT_MAX_QUESTIONS` | `5` | Questions one run may ask the host with `ask_host` (0 to 50). `0` means sub-agents never ask and decide on their own; they still never place an order or pay unless `agent_run` gets `confirm_purchases: false`. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents) |
 | `AGENT_REPLY_TIMEOUT_MS` | `1800000` | How long a run paused on a question waits for `agent_reply` before it continues without an answer (at least `10000`) |
 | `AGENT_SNAPSHOT_SAVE` | `true` | Offer `agent_run` agents the `save_sign_in` tool, which saves a sign-in they made as a [snapshot](SNAPSHOTS.md#save_sign_in-a-sub-agent-saves-its-sign-in). Only when `TOOLSETS` includes `snapshots` (the default `all` does) |
 
@@ -137,5 +137,5 @@ See [LOGGING.md](LOGGING.md) for what is logged.
 | `LOG_FILE_MAX_SIZE` | `20m` | Rotate when a file reaches this size |
 | `LOG_FILE_MAX_FILES` | `14` | Rotated files to keep |
 | `LOG_MAX_STRING_LENGTH` | `2000` | Truncate long strings in logged payloads (images are replaced by size and hash) |
-| `LOG_REDACT_SECRETS` | `true` | Keep secrets out of logs and the dashboard: values typed into password- or OTP-like fields, cookie values, session state, and `Cookie`/`Set-Cookie`/`Authorization` headers. The agent still receives everything. Some values are masked whatever this says: the answers sent with `agent_reply`, secret answers wherever a sub-agent repeats them, and the cookies and storage of snapshots |
+| `LOG_REDACT_SECRETS` | `true` | Keep secrets out of logs and the dashboard: values typed into password- or OTP-like fields, cookie values, session state, and `Cookie`/`Set-Cookie`/`Authorization` headers. The agent still receives everything. Some values are masked whatever this says: the `answer` argument of `agent_reply` (answers that are not secret still appear in the run's questions and result), secret answers wherever a sub-agent repeats them, and the cookies and storage of snapshots |
 | `LOG_CDP_EVENTS` | `true` | Log every CDP event (network, lifecycle, console) |

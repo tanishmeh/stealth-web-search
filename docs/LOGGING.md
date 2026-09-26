@@ -31,7 +31,7 @@ Every entry has `time`, `level`/`levelName`, `component` and `msg`. Components:
 | `obscura-engine` | per line | Obscura's own log output, parsed into levels (`target` = Rust module) |
 | `live-view` | info/debug | Viewers connecting and leaving, screencast start and stop |
 | `dashboard` | debug | Dashboard event streams opened and closed |
-| `agent` | info/warn | Sub-agent runs: created (input), started (browser, snapshot), finished (status, steps, duration, token usage, compactions, questions and time waited, outcome, sources, script tests, snapshot refresh). Every question to the host: answered (question id, whether it is secret, answer length and the answering client, never the answer), expired or cancelled |
+| `agent` | info/warn | Sub-agent runs: created (input), started (browser, snapshot), finished (status, steps, duration, token usage, compactions, questions and time waited, outcome, sources, script tests, snapshot refresh). Every question to the host: answered (question id, whether it is secret, answer length and the answering client, never the answer), expired or cancelled. A warning for every order or payment button an `agent_run` agent was kept from pressing before the host answered (`blocked the final step of an order or payment`, with its label) |
 | `agent-llm` | debug/info | Every model request (messages, tools, prompt size) and response (duration, finish reason, token usage, tool calls, answer text), retries |
 | `script` | info | Script runs (parameters, result, duration, browser calls) and each `log()` line of the script |
 | `snapshots` | info/warn/error | Snapshots created, refreshed, replaced, loaded (into which browser, cookies restored, expired and refused counts), described and deleted (by which client, where it was loaded); startup checks of `SNAPSHOTS_DIR` and encryption of older files. Names, versions, domains and counts only |
@@ -55,7 +55,7 @@ Logs stay readable and bounded without dropping information silently:
   - `Cookie`, `Set-Cookie`, `Authorization`, `Proxy-Authorization` and `X-API-Key` headers in CDP network events.
 - Some values are masked whatever `LOG_REDACT_SECRETS` says:
   - the `answer` of every `agent_reply` call, in the `tool` and `mcp` logs and the activity feed. Answers that are not secret stay readable in the run's own question record (its result, transcript and dashboard details).
-  - secret answers (one-time codes, see [Secret answers](AGENTS.md#secret-answers)): every value of 4 characters or more is replaced by `[REDACTED]` wherever the run shows it: its tool calls and results (including values it types into the page), its steps, the `agent-llm` log, the transcript, the result and the dashboard. They are never stored with the question. The model endpoint still receives them, and the page itself can show or send a typed code: the live view, and the page's console and network entries (a form sent with GET puts it in the URL).
+  - secret answers (one-time codes, see [Secret answers](AGENTS.md#secret-answers)): the answer and its code-like parts (words with a digit, digit groups), each of 4 characters or more, are replaced by `[REDACTED]` wherever the run shows it: its tool calls and results (including values it types into the page), later questions that quote them, its steps, the `agent-llm` log, the transcript, the result and the dashboard. They are never stored with the question. The model endpoint still receives them, and the page itself can show or send a typed code: the live view, and the page's console and network entries (a form sent with GET puts it in the URL).
   - the cookies and site storage of [snapshots](SNAPSHOTS.md). The browser commands that read and write them are never logged, and snapshot tool results, the dashboard and the `snapshots` log carry names, domains and counts only.
 - `LOG_CDP_EVENTS=false` stops logging CDP events (network and lifecycle noise) and keeps commands and responses.
 
@@ -85,6 +85,9 @@ jq -c 'select(.component=="agent-llm" and .usage) | {runId, step, durationMs, us
 
 # Questions sub-agents asked the host, and what became of them
 jq -c 'select(.component=="agent" and .questionId) | {time, runId, questionId, msg}' logs/current.log
+
+# Order or payment buttons the purchase guard blocked
+jq -c 'select(.component=="agent" and ((.msg // "") | startswith("blocked the final step"))) | {time, runId, label}' logs/current.log
 
 # Snapshots saved, loaded and deleted
 jq -c 'select(.component=="snapshots") | {time, msg, snapshot, version, browserId, client}' logs/current.log
