@@ -10,11 +10,16 @@
  * call still goes through the server, so it shows up in the server logs and
  * on the live dashboard.
  *
+ * In a terminal it is interactive: when the model ends its turn while a sub-agent run it started waits
+ * for an answer (a purchase the task did not approve), it asks you and hands your reply back to the
+ * model (--no-interactive turns this off).
+ *
  * `runAgent()` is exported for scripts/lmstudio-e2e.ts.
  */
 import { realpathSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import { createInterface, type Interface } from 'node:readline/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs, styleText } from 'node:util';
 import { Client, StreamableHTTPClientTransport, type CallToolResult, type Tool } from '@modelcontextprotocol/client';
@@ -57,6 +62,12 @@ export interface AgentOptions {
   clientName?: string;
   /** Print only the final answer. */
   quiet?: boolean;
+  /**
+   * Ask the user and return their reply (null or "" when there is none). Makes the run interactive:
+   * when the model ends its turn while a sub-agent run it started waits for an answer (a purchase to
+   * approve), the waiting question is printed and the reply goes back to the model as a user message.
+   */
+  ask?: (prompt: string) => Promise<string | null>;
   /** Where transcript text goes (default: stdout). */
   write?: (text: string) => void;
   color?: boolean;
@@ -89,6 +100,26 @@ export interface StepRecord {
   toolCalls: string[];
 }
 
+/** A question of a sub-agent run this agent started, waiting for an answer. */
+export interface WaitingQuestion {
+  runId: string;
+  questionId: string;
+  text: string;
+  reason: string | null;
+  origin: string | null;
+  expiresAt: string | null;
+}
+
+/** The model ended its turn while sub-agent runs waited, and the user was asked (interactive runs). */
+export interface UserTurnRecord {
+  step: number;
+  /** What the model asked the user. */
+  question: string;
+  waiting: WaitingQuestion[];
+  /** The user's reply; null when there was none (the run then ended). */
+  reply: string | null;
+}
+
 export interface AgentResult {
   ok: boolean;
   stopReason: 'final_answer' | 'max_steps' | 'error' | 'aborted';
@@ -99,6 +130,10 @@ export interface AgentResult {
   steps: number;
   toolCalls: ToolCallRecord[];
   stepsDetail: StepRecord[];
+  /** Questions put to the user during the run (interactive runs only). */
+  userTurns: UserTurnRecord[];
+  /** Sub-agent runs this agent started that were still waiting for an answer when it stopped. */
+  waitingRuns: WaitingQuestion[];
   usage: { promptTokens: number; completionTokens: number; reasoningTokens: number };
   tools: string[];
   startedAt: string;
@@ -440,17 +475,49 @@ export async function selectTools(tools: Tool[], names?: string[], toolsets?: st
 // ---------------------------------------------------------------------------
 // Conversation helpers
 
-/** What this host does when a sub-agent run pauses with a question: nobody is there to ask, so it answers itself. */
-const SUB_AGENT_QUESTIONS = `Sub-agent questions: a sub-agent run (agent_run, agent_automate) can pause with status "waiting" and ask you a question. Answer it with agent_reply (run_id and question_id from the result) before you give your final answer, and never end with a final answer while a run you started is waiting.
-- Answer from the user's task when it decides the question.
-- The user cannot answer: reply "No" to a confirm question (placing an order, paying, sending a message, deleting) that the task did not explicitly approve, and say so in your final answer.
-- Never send a password. Give a one-time code only if the task contains it; otherwise reply that you do not have it.
-- Answer only the questions of runs you started in this task; runs other clients started are theirs to answer.
-- If you cannot answer at all, call agent_cancel for that run.`;
+/** A purchase the task approves: the host approves the matching question itself (both modes). */
+const PURCHASE_RULE =
+  '- Orders and payments: the sub-agent always asks you (reason confirm) before it places an order or pays. When the user\'s task explicitly approves the purchase (for example "I approve", "go ahead and pay", "no need to ask me", or a maximum price such as "up to $20"), pass the user\'s words as purchase_approval to agent_run (or agent_automate), and answer the matching confirm question "Yes" yourself when the checkout matches that approval (item, quantity, total within the limit, address, payment method). A task that only asks you to order or buy something ("order X and give me the order number") does not approve the purchase: it says what to buy, not what it may cost.';
 
-export function buildSystemPrompt(serverInstructions: string | undefined, vision: boolean, extra?: string, subAgents = false): string {
+/**
+ * What this host does when a sub-agent run pauses with a question. One-shot (not interactive): nobody
+ * is there to ask, so it answers itself and refuses what the task did not approve. Interactive: it ends
+ * its turn to ask the user, and the CLI brings the user's reply back to it.
+ */
+function subAgentQuestions(interactive: boolean): string {
+  const lines = interactive
+    ? [
+        'Sub-agent questions: a sub-agent run (agent_run, agent_automate) can pause with status "waiting" and ask you a question. Answer it with agent_reply (run_id and question_id from the result) before you give your final answer. While a run you started is waiting, end your turn only to ask the user a question below; their reply comes back to you.',
+        '- Answer from the user\'s task when it decides the question.',
+        `${PURCHASE_RULE} Then do not pass purchase_approval. When the task does not explicitly approve the purchase, do not approve it yourself: end your turn by asking the user (item, total, delivery address, payment method, the site); their reply comes back to you, then answer the waiting question with agent_reply ("Yes" only if they approve; "No" otherwise). Do the same when the checkout differs from the approval or goes beyond it.`,
+        '- Other confirm questions (sending a message, deleting) that the task did not explicitly approve: ask the user the same way, and answer with their decision.',
+      ]
+    : [
+        'Sub-agent questions: a sub-agent run (agent_run, agent_automate) can pause with status "waiting" and ask you a question. Answer it with agent_reply (run_id and question_id from the result) before you give your final answer, and never end with a final answer while a run you started is waiting.',
+        '- Answer from the user\'s task when it decides the question.',
+        `${PURCHASE_RULE} Then do not pass purchase_approval, reply "No" to the confirm question, and say in your final answer that the order is ready and needs the user's approval, with the item and the total. Also reply "No" when the checkout differs from the approval or goes beyond it.`,
+        '- The user cannot answer: reply "No" to any other confirm question (sending a message, deleting) that the task did not explicitly approve, and say so in your final answer.',
+      ];
+  return [
+    ...lines,
+    '- Never send a password. Give a one-time code only if the task contains it; otherwise reply that you do not have it.',
+    '- Answer only the questions of runs you started in this task; runs other clients started are theirs to answer.',
+    '- If you cannot answer at all, call agent_cancel for that run.',
+  ].join('\n');
+}
+
+/**
+ * `subAgents`: the model has agent_reply. `interactive`: the CLI asks the user when the model ends its
+ * turn while a sub-agent run it started waits for an answer (only meaningful with sub-agents).
+ */
+export function buildSystemPrompt(serverInstructions: string | undefined, vision: boolean, extra?: string, subAgents = false, interactive = false): string {
+  const asksUser = interactive && subAgents;
   const parts = [
-    `You are a browser automation agent. You control a real web browser (headless, JavaScript enabled) through the provided tools and complete the user's task on your own. The user cannot answer questions while you work.
+    `You are a browser automation agent. You control a real web browser (headless, JavaScript enabled) through the provided tools and complete the user's task on your own. ${
+      asksUser
+        ? 'Ask the user only to decide a sub-agent question as described below; any other reply without tool calls ends the task as your final answer.'
+        : 'The user cannot answer questions while you work.'
+    }
 
 How to work:
 - Open pages with browser_navigate, then read them with browser_snapshot before anything else; do not guess CSS selectors for a page you have not read. Snapshots list interactive elements with refs such as "e12"; pass a ref to the interaction tools. Refs change when the page changes: take a new snapshot before reusing them.
@@ -461,7 +528,7 @@ How to work:
       ? 'Screenshots from browser_screenshot are attached as images right after the tool result.'
       : 'You cannot see images: rely on browser_snapshot and other text tools to understand pages.',
   ];
-  if (subAgents) parts.push(SUB_AGENT_QUESTIONS);
+  if (subAgents) parts.push(subAgentQuestions(asksUser));
   if (serverInstructions?.trim()) parts.push(`Notes from the browser server:\n${serverInstructions.trim()}`);
   if (extra?.trim()) parts.push(extra.trim());
   return parts.join('\n\n');
@@ -651,6 +718,11 @@ function seconds(ms: number): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
+function clipLine(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 3)}...` : flat;
+}
+
 function preview(text: string, maxLines = 3, width = 160): string[] {
   const lines = text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
   const shown = lines.slice(0, maxLines).map((l) => (l.length > width ? `${l.slice(0, width - 3)}...` : l));
@@ -660,6 +732,11 @@ function preview(text: string, maxLines = 3, width = 160): string[] {
 
 // ---------------------------------------------------------------------------
 // Agent loop
+
+/** Tools whose result starts a sub-agent run (its run_id), and tools whose result reports a run's new status. */
+const RUN_STARTERS = new Set(['agent_run', 'agent_automate', 'agent_find']);
+const RUN_FOLLOWERS = new Set(['agent_reply', 'agent_wait', 'agent_status']);
+const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
 
 function isTransient(err: unknown): boolean {
   if ((err as any)?.transient) return true;
@@ -679,6 +756,10 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const toolCalls: ToolCallRecord[] = [];
   const stepsDetail: StepRecord[] = [];
   const usage = { promptTokens: 0, completionTokens: 0, reasoningTokens: 0 };
+  const userTurns: UserTurnRecord[] = [];
+  let stillWaiting: WaitingQuestion[] = [];
+  /** Sub-agent runs this agent started, with their last known status. */
+  const startedRuns = new Map<string, string>();
   let toolNames: string[] = [];
   let modelId = options.model ?? '(unresolved)';
 
@@ -692,6 +773,8 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
     steps: stepsDetail.length,
     toolCalls,
     stepsDetail,
+    userTurns,
+    waitingRuns: stillWaiting,
     usage,
     tools: toolNames,
     startedAt: new Date(started).toISOString(),
@@ -717,7 +800,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
 
     messages.push({
       role: 'system',
-      content: buildSystemPrompt(mcp.client.getInstructions(), vision, options.instructions, tools.some((t) => t.name === 'agent_reply')),
+      content: buildSystemPrompt(mcp.client.getInstructions(), vision, options.instructions, tools.some((t) => t.name === 'agent_reply'), Boolean(options.ask)),
     });
     messages.push({ role: 'user', content: options.task });
 
@@ -838,6 +921,58 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       }
     };
 
+    /** Remember the sub-agent runs this agent starts, and their status as later results report it. */
+    const trackRun = (name: string, res: CallToolResult) => {
+      const s = res.structuredContent as { run_id?: unknown; status?: unknown } | undefined;
+      if (typeof s?.run_id !== 'string' || typeof s.status !== 'string') return;
+      if (RUN_STARTERS.has(name) || (RUN_FOLLOWERS.has(name) && startedRuns.has(s.run_id))) startedRuns.set(s.run_id, s.status);
+    };
+
+    /**
+     * The questions that sub-agent runs this agent started are waiting on (agent_status on each run not
+     * yet done). Best effort: a lost MCP connection does not replace the reason the agent stops.
+     */
+    const waitingQuestions = async (): Promise<WaitingQuestion[]> => {
+      const waiting: WaitingQuestion[] = [];
+      for (const [runId, status] of startedRuns) {
+        if (RUN_DONE.has(status)) continue;
+        const res = await callTool('agent_status', { run_id: runId }).catch((): CallToolResult => ({ content: [], isError: true }));
+        const s = res.structuredContent as { status?: unknown; question?: Record<string, unknown> } | undefined;
+        if (res.isError || typeof s?.status !== 'string') continue;
+        startedRuns.set(runId, s.status);
+        const q = s.question;
+        if (s.status !== 'waiting' || typeof q?.id !== 'string') continue;
+        const str = (v: unknown) => (typeof v === 'string' ? v : null);
+        waiting.push({ runId, questionId: q.id, text: str(q.text) ?? '', reason: str(q.reason), origin: str(q.origin), expiresAt: str(q.expires_at) });
+      }
+      return waiting;
+    };
+
+    /** Tell the user which runs still wait: unanswered, each goes on without the step it asked about. */
+    const reportWaiting = (waiting: WaitingQuestion[]) => {
+      stillWaiting = waiting;
+      for (const w of waiting) {
+        const left = w.expiresAt ? Date.parse(w.expiresAt) - Date.now() : Number.NaN;
+        const after = Number.isFinite(left) ? ` (in about ${left >= 60_000 ? `${Math.round(left / 60_000)} min` : `${Math.max(1, Math.ceil(left / 1000))} s`})` : '';
+        out.line(
+          out.style(
+            'yellow',
+            `Run ${w.runId} is still waiting for an answer to question ${w.questionId}. Unanswered, it continues without it after its timeout${after} ` +
+              `and does not take the step it asked about${w.reason === 'confirm' ? ', so nothing is ordered' : ''}.`,
+          ),
+        );
+      }
+    };
+
+    /**
+     * Stop without a final answer, saying which sub-agent runs this agent started still wait. Return it
+     * with `await`: the `finally` below closes the MCP session, and agent_status needs it.
+     */
+    const stopWithout = async (stopReason: 'error' | 'max_steps', answer: string | null, error: string): Promise<AgentResult> => {
+      if (startedRuns.size) reportWaiting(await waitingQuestions());
+      return finalize(result(stopReason, answer, error));
+    };
+
     for (let step = 1; step <= maxSteps; step++) {
       const completion = await callModel(step, true);
       lastCompletion = completion;
@@ -859,22 +994,45 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           messages.push({ role: 'user', content: problem });
           continue;
         }
-        if (!content) return finalize(result('error', null, 'The model returned an empty response.'));
+        if (!content) return await stopWithout('error', null, 'The model returned an empty response.');
         if (textToolCall) {
           messages.push({ role: 'assistant', content });
-          return finalize(
-            result(
-              'error',
-              null,
-              `The model keeps writing tool calls as text instead of calling tools (last reply: ${content.slice(0, 200)}). Use a model trained for tool use, or try --reasoning none / --toolsets core.`,
-            ),
+          return await stopWithout(
+            'error',
+            null,
+            `The model keeps writing tool calls as text instead of calling tools (last reply: ${content.slice(0, 200)}). Use a model trained for tool use, or try --reasoning none / --toolsets core.`,
           );
         }
-        out.line('');
-        out.line(out.style(['bold', 'green'], `Final answer`) + out.style('dim', ` (${stepsDetail.length} steps, ${toolCalls.length} tool calls, ${seconds(Date.now() - started)})`));
-        if (options.quiet) out.always(content);
-        else out.line(content);
         messages.push({ role: 'assistant', content });
+        const waiting = startedRuns.size ? await waitingQuestions() : [];
+        const show = (text: string) => (options.quiet ? out.always(text) : out.line(text));
+        let asked = false;
+        if (waiting.length && options.ask && step < maxSteps) {
+          // the model ended its turn to ask the user (a purchase to approve): ask, and hand the reply back to it
+          out.line('');
+          show(out.style(['bold', 'yellow'], 'Question for you') + out.style('dim', ` (${waiting.length === 1 ? 'a sub-agent run waits' : `${waiting.length} sub-agent runs wait`} for your answer)`));
+          show(content);
+          for (const w of waiting) show(out.style('dim', `  run ${w.runId} asks${w.origin ? ` on ${w.origin}` : ''}: ${clipLine(w.text, 300)}`));
+          const reply = (await options.ask('Your answer (Enter to leave it unanswered): '))?.trim() || null;
+          if (options.signal?.aborted) throw new AgentError('aborted');
+          userTurns.push({ step, question: content, waiting, reply });
+          if (reply) {
+            messages.push({ role: 'user', content: reply });
+            continue;
+          }
+          asked = true;
+        }
+        out.line('');
+        const summary = `${stepsDetail.length} steps, ${toolCalls.length} tool calls, ${seconds(Date.now() - started)}`;
+        if (asked) {
+          // the question above stays the final answer; it was just printed
+          out.line(out.style(['bold', 'yellow'], 'No answer; stopping') + out.style('dim', ` (${summary})`));
+        } else {
+          out.line(out.style(['bold', 'green'], `Final answer`) + out.style('dim', ` (${summary})`));
+          show(content);
+        }
+        if (waiting.length && options.ask && step >= maxSteps) out.line(out.style('yellow', `No steps left to ask you and pass on your answer (--max-steps ${maxSteps}).`));
+        reportWaiting(waiting);
         return finalize(result('final_answer', content, null));
       }
 
@@ -904,6 +1062,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           args = parsed.value;
           executed = true;
           const res = await callTool(call.function.name, parsed.value);
+          trackRun(call.function.name, res);
           const formatted = formatToolResult(res, maxResultChars, vision);
           text = formatted.text;
           images = formatted.images;
@@ -946,7 +1105,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       else out.line(summary);
       messages.push({ role: 'assistant', content: summary });
     }
-    return finalize(result('max_steps', summary, `Stopped after ${maxSteps} steps without a final answer.`));
+    return await stopWithout('max_steps', summary, `Stopped after ${maxSteps} steps without a final answer.`);
   } catch (err) {
     const aborted = options.signal?.aborted;
     const message = err instanceof AgentError ? err.message : ((err as Error)?.stack ?? String(err));
@@ -978,6 +1137,9 @@ Options:
   --tools <a,b,...>        only offer these tools
   --toolsets <g,...>       only offer tools from these groups (or tool names): core, content, forms, tabs, state, debug, capture, agents, scripts, snapshots, or all
   --no-vision              never send screenshots to the model as images
+  --interactive            ask you when a sub-agent run waits for your answer, e.g. to approve a purchase
+                           (default: on when stdin and stdout are a terminal and --quiet is not set)
+  --no-interactive         never ask: an order the task did not approve is refused and left for you to place
   --json <file>            write the full transcript as JSON
   --quiet                  print only the final answer
   --temperature <t>        sampling temperature (default 0.2)
@@ -1003,10 +1165,30 @@ function numberOption(name: string, value: string | undefined, min: number): num
   return n;
 }
 
-async function main(): Promise<void> {
+/** A command-line mistake (exit code 2); `showUsage` adds the usage text. */
+export class UsageError extends AgentError {
+  readonly showUsage: boolean;
+  constructor(message: string, showUsage: boolean) {
+    super(message);
+    this.showUsage = showUsage;
+  }
+}
+
+export interface CliArgs {
+  help: boolean;
+  /** Ask the user when a sub-agent run waits for an answer (the ask callback is added by main). */
+  interactive: boolean;
+  /** Where to write the JSON transcript. */
+  json?: string;
+  options: AgentOptions;
+}
+
+/** Parse the command line. `terminal` (stdin and stdout are both a terminal) decides the default of --interactive. */
+export function parseCli(argv: string[], env: NodeJS.ProcessEnv = process.env, terminal = isTerminal()): CliArgs {
   let parsed;
   try {
     parsed = parseArgs({
+      args: argv,
       allowPositionals: true,
       options: {
         model: { type: 'string' },
@@ -1016,6 +1198,8 @@ async function main(): Promise<void> {
         toolsets: { type: 'string' },
         'no-vision': { type: 'boolean' },
         vision: { type: 'boolean' },
+        interactive: { type: 'boolean' },
+        'no-interactive': { type: 'boolean' },
         json: { type: 'string' },
         quiet: { type: 'boolean', short: 'q' },
         temperature: { type: 'string' },
@@ -1028,27 +1212,18 @@ async function main(): Promise<void> {
       },
     });
   } catch (err) {
-    process.stderr.write(`${(err as Error).message}\n\n${USAGE}\n`);
-    process.exit(2);
+    throw new UsageError((err as Error).message, true);
   }
   const { values, positionals } = parsed;
-  if (values.help) {
-    process.stdout.write(`${USAGE}\n`);
-    return;
-  }
   const task = positionals.join(' ').trim();
-  if (!task) {
-    process.stderr.write(`Missing task.\n\n${USAGE}\n`);
-    process.exit(2);
-  }
-
-  let options: AgentOptions;
+  if (values.help) return { help: true, interactive: false, options: { task } };
+  if (!task) throw new UsageError('Missing task.', true);
+  const reasoning = values.reasoning as ReasoningMode | undefined;
   try {
-    const reasoning = values.reasoning as ReasoningMode | undefined;
     if (reasoning && !REASONING_MODES.includes(reasoning)) throw new AgentError(`--reasoning must be one of ${REASONING_MODES.join(', ')}`);
-    options = {
+    const options: AgentOptions = {
       task,
-      model: values.model ?? process.env.LMSTUDIO_MODEL,
+      model: values.model ?? env.LMSTUDIO_MODEL,
       maxSteps: numberOption('max-steps', values['max-steps'], 1),
       reasoning,
       tools: csv(values.tools),
@@ -1059,15 +1234,84 @@ async function main(): Promise<void> {
       maxTokens: numberOption('max-tokens', values['max-tokens'], 64),
       maxResultChars: numberOption('max-result-chars', values['max-result-chars'], 500),
       instructions: values.instructions,
-      mcpUrl: values['mcp-url'] ?? process.env.MCP_URL,
-      lmstudioUrl: values['lmstudio-url'] ?? process.env.LMSTUDIO_URL,
-      authToken: process.env.AUTH_TOKEN,
-      lmApiToken: process.env.LM_API_TOKEN,
+      mcpUrl: values['mcp-url'] ?? env.MCP_URL,
+      lmstudioUrl: values['lmstudio-url'] ?? env.LMSTUDIO_URL,
+      authToken: env.AUTH_TOKEN,
+      lmApiToken: env.LM_API_TOKEN,
     };
+    // nobody to answer a prompt when stdin is not a terminal, nobody sees it when stdout goes to a file
+    // or a pipe, and --quiet wants only the final answer
+    const interactive = values['no-interactive'] ? false : values.interactive ? true : terminal && !values.quiet;
+    return { help: false, interactive, json: values.json, options };
   } catch (err) {
-    process.stderr.write(`${(err as Error).message}\n`);
+    throw new UsageError((err as Error).message, false);
+  }
+}
+
+/** Someone at a terminal: stdin to answer a question, stdout to see it. */
+function isTerminal(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+/**
+ * Read the user's answers from stdin. A terminal gets a fresh readline prompt per question, so Ctrl+C
+ * works as usual while the agent runs; piped input (or output) is read line by line through one
+ * interface, so no buffered line is lost. Resolves null at the end of input or when `signal` aborts.
+ */
+export function stdinAsker(signal: AbortSignal): { ask: (prompt: string) => Promise<string | null>; close: () => void } {
+  const aborted = () =>
+    new Promise<null>((resolve) => {
+      if (signal.aborted) resolve(null);
+      else signal.addEventListener('abort', () => resolve(null), { once: true });
+    });
+  let piped: { rl: Interface; lines: AsyncIterator<string> } | null = null;
+  return {
+    ask: async (prompt) => {
+      if (signal.aborted) return null;
+      if (!isTerminal()) {
+        if (!piped) {
+          const rl = createInterface({ input: process.stdin, terminal: false });
+          piped = { rl, lines: rl[Symbol.asyncIterator]() };
+        }
+        process.stdout.write(prompt);
+        const next = await Promise.race([piped.lines.next(), aborted()]);
+        // end the prompt line, as the Enter key does in a terminal (a piped answer is not echoed)
+        process.stdout.write('\n');
+        return next && !next.done ? next.value : null;
+      }
+      const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+      // in raw mode Ctrl+C reaches readline, not the process: run the SIGINT handler now, so the run
+      // is aborted before the question resolves
+      rl.once('SIGINT', () => {
+        if (!process.emit('SIGINT', 'SIGINT')) process.kill(process.pid, 'SIGINT');
+        rl.close();
+      });
+      try {
+        return await new Promise<string | null>((resolve) => {
+          rl.once('close', () => resolve(null));
+          rl.question(prompt, { signal }).then(resolve, () => resolve(null));
+        });
+      } finally {
+        rl.close();
+      }
+    },
+    close: () => piped?.rl.close(),
+  };
+}
+
+async function main(): Promise<void> {
+  let cli: CliArgs;
+  try {
+    cli = parseCli(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(err instanceof UsageError && err.showUsage ? `${err.message}\n\n${USAGE}\n` : `${(err as Error).message}\n`);
     process.exit(2);
   }
+  if (cli.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
+  const { options, interactive } = cli;
 
   const controller = new AbortController();
   process.once('SIGINT', () => {
@@ -1075,11 +1319,17 @@ async function main(): Promise<void> {
     controller.abort();
     process.once('SIGINT', () => process.exit(130));
   });
-  const result = await runAgent({ ...options, signal: controller.signal });
+  const asker = interactive ? stdinAsker(controller.signal) : null;
+  let result: AgentResult;
+  try {
+    result = await runAgent({ ...options, ask: asker?.ask, signal: controller.signal });
+  } finally {
+    asker?.close();
+  }
 
-  if (values.json) {
-    writeFileSync(values.json, `${JSON.stringify({ task, options: { ...options, authToken: undefined, lmApiToken: undefined, signal: undefined }, ...result }, null, 2)}\n`);
-    if (!options.quiet) process.stdout.write(`Transcript written to ${values.json}\n`);
+  if (cli.json) {
+    writeFileSync(cli.json, `${JSON.stringify({ task: options.task, options: { ...options, interactive, authToken: undefined, lmApiToken: undefined, signal: undefined }, ...result }, null, 2)}\n`);
+    if (!options.quiet) process.stdout.write(`Transcript written to ${cli.json}\n`);
   }
   process.exitCode = result.ok ? 0 : result.stopReason === 'max_steps' ? 3 : result.stopReason === 'aborted' ? 130 : 1;
 }
