@@ -497,7 +497,7 @@ _changes page state, local to the browser_
 
 ### agent_run
 
-**Run a browser agent (agentic mode)**. Hand a browser task to a sub-agent. It works in its own isolated browser (own tabs and cookies; your browser is not touched), completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. The agent always asks before placing an order or paying, and the server enforces it. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK. For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.
+**Run a browser agent (agentic mode)**. Hand a browser task to a sub-agent. It works in its own isolated browser (own tabs and cookies; your browser is not touched), completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. The agent always asks you before it places an order or pays, and the server enforces it. If your user explicitly approved the purchase (not just asked for it), pass their words as purchase_approval: the question then shows it, and you approve a matching checkout yourself without asking your user again. For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.
 
 _changes page state, interacts with websites_
 
@@ -509,8 +509,8 @@ _changes page state, interacts with websites_
 | `start_url` | string | no | Page to begin at, if known |
 | `context` | string | no | Extra context: constraints, preferences, what is already known |
 | `max_steps` | integer | no | Step budget (model turns). Default: server setting (AGENT_MAX_STEPS) |
-| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK) |
-| `confirm_purchases` | boolean | no | true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question asked on that page. Set false only when your user already approved the purchase; then put the limits (item, quantity, maximum total) in the TASK. |
+| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, and it then never places an order or pays (that needs your answer to its question) |
+| `purchase_approval` | string | no | Only when your user explicitly approved the purchase: their words that approve it, e.g. "I approve one Blue Mug, total up to $20, to my default address". A request to buy something ("order X and give me the order number") is not an approval: it says what to buy, not what it may cost; then leave this out and ask your user when the agent asks. The agent still asks you before it places the order (the server blocks the final button until you answer); its question then shows this approval, so you can approve it yourself when the checkout matches, without asking your user again. |
 | `snapshot` | string | no | Name of a snapshot (see snapshot_list) to start the agent's private browser with, so it is already signed in to those sites. An unknown name returns the list of saved names |
 | `update_snapshot` | boolean | no | When the run completes successfully, refresh that snapshot from the agent's browser (keeps a renewed sign-in). Default true |
 | `allow_evaluate` | boolean | no | Runs started with a snapshot do not get browser_evaluate (page scripts could read the signed-in cookies and storage) unless this is true. Default false |
@@ -518,7 +518,7 @@ _changes page state, interacts with websites_
 
 ### agent_automate
 
-**Automate a browser task as a reusable script**. Hand a browser task to an automation agent. It does the TASK once in its own isolated browser to learn how, then writes a reusable script that repeats it for new parameter values, verifies the script in a fresh browser, and stores it. Returns the script name, its parameters (types, meaning, examples), how to run it, the verification result, and the OUTPUT of the task itself. Run the script later with script_run — no model needed, much faster. The agent may pause with status "waiting" and ask you a question (e.g. for a sign-in code): answer it with agent_reply.
+**Automate a browser task as a reusable script**. Hand a browser task to an automation agent. It does the TASK once in its own isolated browser to learn how, then writes a reusable script that repeats it for new parameter values, verifies the script in a fresh browser, and stores it. Returns the script name, its parameters (types, meaning, examples), how to run it, the verification result, and the OUTPUT of the task itself. Run the script later with script_run — no model needed, much faster. The agent may pause with status "waiting" and ask you a question (e.g. for a sign-in code, or before placing an order): answer it with agent_reply. Like agent_run, it always asks you before it places an order or pays, and the server enforces it; pass what your user explicitly approved (not just asked for) as purchase_approval.
 
 _changes page state, interacts with websites_
 
@@ -533,7 +533,8 @@ _changes page state, interacts with websites_
 | `start_url` | string | no | Page to begin at, if known |
 | `context` | string | no | Extra context: constraints, preferences, what is already known |
 | `max_steps` | integer | no | Step budget (model turns). Default: server setting (AGENT_MAX_STEPS) |
-| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK) |
+| `allow_questions` | boolean | no | Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). false: it decides on its own and never waits for you, and it then never places an order or pays (that needs your answer to its question) |
+| `purchase_approval` | string | no | Only when your user explicitly approved the purchase: their words that approve it, e.g. "I approve one Blue Mug, total up to $20, to my default address". A request to buy something ("order X and give me the order number") is not an approval: it says what to buy, not what it may cost; then leave this out and ask your user when the agent asks. The agent still asks you before it places the order (the server blocks the final button until you answer); its question then shows this approval, so you can approve it yourself when the checkout matches, without asking your user again. |
 | `wait_seconds` | number | no | Seconds to wait for the result before returning "still running" (the run continues; collect it with agent_wait). Default: server setting (AGENT_WAIT_SECONDS) |
 
 ### agent_find
@@ -585,7 +586,7 @@ _changes page state, local to the browser_
 
 ### agent_reply
 
-**Answer a sub-agent question**. Answer the question of a sub-agent run that waits for you (status "waiting"; agent_run, agent_wait and agent_status show the question and its id). The run continues with the same browser; returns its next question, its result, or "still running". Relay questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, to your user unless they already approved exactly that. Never send a password.
+**Answer a sub-agent question**. Answer the question of a sub-agent run that waits for you (status "waiting"; agent_run, agent_wait and agent_status show the question and its id). The run continues with the same browser; returns its next question, its result, or "still running". Relay questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, to your user unless they already approved exactly that (for a purchase: a checkout that matches what they approved, such as the job's purchase_approval). Never send a password.
 
 _changes page state, interacts with websites_
 

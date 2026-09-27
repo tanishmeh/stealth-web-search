@@ -211,15 +211,15 @@ Place the order for "USB-C to USB-C cable, 2 m, 100 W" at $11.99, total $12.87 w
 
 Options: Yes, place the order | No
 
-This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this. The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.
+This asks you to approve a step that cannot be undone. Ask your user to approve it, then answer with agent_reply. If your user already approved exactly this earlier in your conversation, approve it yourself.
 
 The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r5b8e21f", "question_id": "q3c9a01", "answer": "..."}
-Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase or send a code on your own.
+Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase your user did not approve, and never send a code on your own.
 ```
 
 `asked on` is the page the agent's browser had open, read by the server, not text the model wrote.
 
-**4. The host relays it.** Your user has not approved this exact order yet, so the host asks them (a chat host ends its turn to do that; the run waits). They say yes, and the host answers:
+**4. The host relays it.** Your user has not approved this order yet (the job came without a `purchase_approval`), so the host asks them (a chat host ends its turn to do that; the run waits). They say yes, and the host answers:
 
 ```json
 { "run_id": "r5b8e21f", "question_id": "q3c9a01", "answer": "Yes, place the order." }
@@ -244,7 +244,7 @@ Had your user said no, the host would answer `"No, do not place the order."` and
 
 **Variations:**
 
-- **Approved ahead of time.** If your user already said *"go ahead if it is under $15"*, the host passes `confirm_purchases: false` and writes the limits into the TASK (`Approved: 1 cable, total at most $15.`). The agent then orders without asking when the checkout is within them, and asks if anything differs from what was approved. Writing the approval into the TASK alone is not enough: the server keeps the order button blocked until the host answers a question.
+- **Approved ahead of time.** If your user already said *"go ahead if it is under $15"*, the host passes their words with the job: `"purchase_approval": "Approved: 1 cable, total at most $15, to the default address"`. The agent still asks at the checkout, and the question shows the approval. The checkout matches it ($12.87 for one cable), so the host answers `"Yes, place the order."` at once, without asking your user again. Had the total been $18, the host would ask your user first. Writing the approval into the TASK alone skips nothing: the server keeps the order button blocked until the host answers a question.
 - **A one-time code.** When the saved sign-in is old, the site may send a code to your user's phone. The agent asks with reason `sign_in`; a question that asks for a code is secret by default, so the reply arguments include `"secret": true`. The host tells your user which site asks, and relays only the code (`"482913"`, not a sentence). The code is masked in logs, transcripts, results and on the dashboard, the agent types it, and the refresh at the end keeps the renewed sign-in.
 - **No snapshot at all.** Without `snapshot`, the agent starts signed out. It never types a password the TASK did not give it, so it finishes with `success: false` and says which site needs a sign-in. The host then signs in in its own browser, saves a snapshot, and starts the job again with it.
 

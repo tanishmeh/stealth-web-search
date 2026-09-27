@@ -218,7 +218,8 @@ The first step is the slowest because LM Studio processes the tool definitions o
 | `--tools a,b` | all | Offer only these tools to the model |
 | `--toolsets core,...` | all | Offer only tools from these groups (client-side counterpart of `TOOLSETS`, same group names). Unknown group names are an error |
 | `--no-vision` | vision on if the model supports it | Never send screenshots as images. `--vision` forces them on |
-| `--json <file>` | | Write the full transcript: messages, reasoning, every tool call with arguments, result and timing, token usage |
+| `--interactive`, `--no-interactive` | on when stdin and stdout are a terminal and `--quiet` is not set | Ask you when a sub-agent run it started waits for your answer, for example to approve a purchase ([below](#approving-a-sub-agents-purchase)). `--no-interactive` never asks. `--interactive` also asks with `--quiet`, piped input (one answer per line of stdin) or redirected output |
+| `--json <file>` | | Write the full transcript: messages, reasoning, every tool call with arguments, result and timing, token usage, the questions put to you and your answers (`userTurns`), and the sub-agent runs still waiting at the end (`waitingRuns`) |
 | `--quiet`, `-q` | | Print only the final answer, which suits shell scripts |
 | `--temperature`, `--max-tokens`, `--max-result-chars` | 0.2, 8192, 12000 | Sampling, output limit per response (reasoning included), and tool result truncation |
 | `--instructions <text>` | | Extra system prompt text |
@@ -235,7 +236,34 @@ How the loop behaves:
 - Invalid tool-call JSON, unknown tool names, empty replies and tool calls written as plain text are reported back to the model so it can correct itself. It gets at most two nudges for empty replies and text tool calls. If it still writes tool calls as text, the run ends with an error (exit code 1) rather than printing that text as the answer.
 - Transient LM Studio errors are retried. If the MCP session is lost (idle timeout or server restart), the agent reconnects once.
 - The model's reasoning is printed in dim text. It streams as it arrives when LM Studio sends it as `reasoning_content`. `<think>` blocks in the reply are printed when the response ends.
-- When the server offers `agent_reply`, the system prompt tells the model how to handle [sub-agent questions](AGENTS.md#questions-from-sub-agents), because nobody can answer them while the agent runs. It is told to answer from the task, to reply "No" to confirm questions (orders, payments, messages, deletions) the task did not explicitly approve and say so in its final answer, never to send a password, to give a one-time code only when the task contains it, to answer only the questions of runs it started (runs of other clients are theirs to answer), to cancel a run it cannot answer, and never to end with a final answer while a run it started is waiting. To let a sub-agent order something, approve it in the task, for example *"… order it; approved up to $15"*: the sub-agent still asks before it orders (the server blocks the order button until then), and the command-line agent answers yes when the checkout matches the approval, or no.
+- When the server offers `agent_reply`, the system prompt tells the model how to handle [sub-agent questions](AGENTS.md#questions-from-sub-agents). It is told to answer from the task. When the task approves a purchase, it passes those words to `agent_run` (or `agent_automate`) as `purchase_approval` and answers the matching confirm question "Yes" itself. It is also told never to send a password, to give a one-time code only when the task contains it, to answer only the questions of runs it started (runs of other clients are theirs to answer), and to cancel a run it cannot answer. A purchase the task did not approve is put to you, or refused when the agent cannot ask you: see the next section.
+
+### Approving a sub-agent's purchase
+
+A sub-agent always asks before it places an order or pays, and the server keeps the order button blocked until the host has answered ([Orders and payments](AGENTS.md#orders-and-payments)). Here the command-line agent is the host:
+
+- **You approved the purchase in the task**, for example *"… order it; approved up to $15"*: the model passes your words as `purchase_approval` and answers the matching question "Yes" itself, without asking you. A task that only says what to buy (*"order one Blue Mug"*) does not approve the purchase.
+- **Interactive** (the default in a terminal): for a purchase the task did not approve, the model ends its turn by asking you, with the item, the total, the delivery address, the payment method and the site. The agent prints that question and the sub-agent's own, and waits for your answer. Your answer goes back to the model, which answers the sub-agent with `agent_reply` ("Yes" only if you approve, "No" otherwise) and carries on. It asks the same way when the checkout differs from the approval or goes beyond it, and for other confirm questions (sending a message, deleting) the task did not approve. Press Enter without an answer to stop: the sub-agent run stays waiting and continues without an answer after `AGENT_REPLY_TIMEOUT_MS` (30 minutes), without the step it asked about, so nothing is ordered. The questions and your answers count toward `--max-steps`.
+- **Not interactive** (`--no-interactive`, `--quiet`, or stdin or stdout is not a terminal): nobody can answer while the agent runs. The model replies "No" to a purchase the task did not approve, or one that goes beyond the approval, and says in its final answer that the order is ready and needs your approval, with the item and the total. It also replies "No" to other confirm questions the task did not approve.
+
+In both modes the model is told never to end with a final answer while a run it started is waiting. If it does, or the agent stops at the step limit or on an error, the agent says which run still waits and that it continues without an answer after its timeout.
+
+```text
+$ npm run lmstudio:agent -- "Order one Blue Mug from https://shop.example/checkout"
+...
+[step 2] +9.8 s waiting for the model...
+  model 3.1 s | 9214 prompt + 61 output tokens
+
+Question for you (a sub-agent run waits for your answer)
+The shop is ready to order one Blue Mug for $17.49, delivered to 1 Example Street and paid with the card ending 4242. Would you like me to place this order? (Yes/No)
+  run r1a2b3c4 asks on https://shop.example: Place the order for one Blue Mug, total $17.49, delivered to 1 Example Street, paid with the card ending 4242?
+Your answer (Enter to leave it unanswered): yes
+
+[step 3] +31.4 s waiting for the model...
+  model 2.6 s | 9390 prompt + 58 output tokens
+  -> agent_reply {"run_id":"r1a2b3c4","question_id":"q1a2b3","answer":"Yes"}
+...
+```
 
 ## 8. End-to-end checks with the real model
 
@@ -433,7 +461,7 @@ An LM Studio chat can use the sub-agent tools like any other tool. The chat mode
 - **One context length applies to both.** The model is loaded once, with one context length. The chat (about 12k tokens of tool definitions plus the conversation) and each sub-agent request must fit in it. Keep `contextWindow` at or below the loaded context length.
 - **Settings are per request.** The chat uses the settings of the LM Studio chat. The sub-agents send their own `reasoning_effort`, `temperature` and `top_p` from the file.
 - **Long runs return early.** The `agent_*` tools answer "still running" after 170 s (`AGENT_WAIT_SECONDS`), which fits under the 180 s timeout in `mcp.json` (stored scripts are the exception: see the `--timeout` option above). The chat model then calls `agent_wait` to collect the result.
-- **Questions come back at once.** When a sub-agent asks something, for example before it places an order, the tool returns the question right away, well within the timeout. The chat model shows it to you; answer in the chat, and it calls `agent_reply`, which again waits at most 170 s. If the model ends its turn instead, the run keeps waiting for 30 minutes (`AGENT_REPLY_TIMEOUT_MS`): tell the model what to answer. Small models may answer questions on their own. When you want no questions, say so up front: for a purchase you approve, ask the model to pass `confirm_purchases: false` with the limits in the task, or ask for `allow_questions: false`. See [Questions from sub-agents](AGENTS.md#short-tool-timeouts-and-lm-studio).
+- **Questions come back at once.** When a sub-agent asks something, for example before it places an order, the tool returns the question right away, well within the timeout. The chat model shows it to you; answer in the chat, and it calls `agent_reply`, which again waits at most 170 s. If the model ends its turn instead, the run keeps waiting for 30 minutes (`AGENT_REPLY_TIMEOUT_MS`): tell the model what to answer. Small models may answer questions on their own. To approve a purchase up front, say so with its limits (*"order it, up to $15, go ahead"*): the model passes your words as `purchase_approval` and approves the matching question itself. For no questions at all, ask for `allow_questions: false` (the agent then does not order). See [Questions from sub-agents](AGENTS.md#short-tool-timeouts-and-lm-studio).
 
 ## 10. Troubleshooting
 

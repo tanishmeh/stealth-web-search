@@ -101,7 +101,7 @@ See [AGENTS.md](AGENTS.md). A models file (`config/models.json`, see [MODELS.md]
 | `AGENT_MAX_RESULT_CHARS` | `12000` | Tool results longer than this are shortened before they reach the model |
 | `AGENT_SEARCH_ENGINE` | `duckduckgo` | `web_search` engine: `duckduckgo` (Bing as fallback) or `bing` |
 | `AGENT_TRANSCRIPTS` | `true` | Write a JSON transcript of every run to `LOG_DIR/agent-runs/` (the newest 300 are kept) |
-| `AGENT_MAX_QUESTIONS` | `5` | Questions one run may ask the host with `ask_host` (0 to 50). `0` means sub-agents never ask and decide on their own; they still never place an order or pay unless `agent_run` gets `confirm_purchases: false`. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents) |
+| `AGENT_MAX_QUESTIONS` | `5` | Questions one run may ask the host with `ask_host` (0 to 50). `0` means sub-agents never ask and decide on their own; `agent_run` and `agent_automate` agents then never place an order or pay, because nobody can approve it. See [Questions from sub-agents](AGENTS.md#questions-from-sub-agents) |
 | `AGENT_REPLY_TIMEOUT_MS` | `1800000` | How long a run paused on a question waits for `agent_reply` before it continues without an answer (at least `10000`) |
 | `AGENT_SNAPSHOT_SAVE` | `true` | Offer `agent_run` agents the `save_sign_in` tool, which saves a sign-in they made as a [snapshot](SNAPSHOTS.md#save_sign_in-a-sub-agent-saves-its-sign-in). Only when `TOOLSETS` includes `snapshots` (the default `all` does) |
 

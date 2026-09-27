@@ -10,7 +10,7 @@ Besides the `browser_*` tools, which let your agent (the **host agent**) drive t
 
 The regular `browser_*` tools stay available: the host can keep driving its own browser while sub-agents work.
 
-Sub-agents work on their own, but a run can pause and ask the host a question when it cannot continue correctly without one, for example before it places an order: see [Questions from sub-agents](#questions-from-sub-agents). An `agent_run` agent never places an order or pays before the host has answered such a question: the server blocks the final button ([Orders and payments](#orders-and-payments)). `agent_run` can also start signed in to a site with a saved sign-in: see [Snapshots](SNAPSHOTS.md).
+Sub-agents work on their own, but a run can pause and ask the host a question when it cannot continue correctly without one, for example before it places an order: see [Questions from sub-agents](#questions-from-sub-agents). An `agent_run` or `agent_automate` agent never places an order or pays before the host has answered such a question: the server blocks the final button ([Orders and payments](#orders-and-payments)). `agent_run` can also start signed in to a site with a saved sign-in: see [Snapshots](SNAPSHOTS.md).
 
 ## How it works
 
@@ -145,7 +145,7 @@ Some steps need a decision that only you or your user can make. An `agent_run` o
 
 | Reason | When the agent asks |
 |---|---|
-| `confirm` | Before it places an order, pays or sends money, always, with the item, the total price, the delivery address and the payment method, even when the TASK tells it to buy something. In `agent_run` jobs the server enforces this ([Orders and payments](#orders-and-payments)). Also before other steps that cannot be undone and that the TASK does not clearly authorize: sending a message or a form for someone, deleting or changing account data. It asks again when what it is about to do differs from what was approved (another price, item or address) |
+| `confirm` | Before it places an order, pays or sends money, always, with the item, the total price, the delivery address and the payment method, even when the TASK tells it to buy something or the host passed what the user approved in advance (`purchase_approval`). In `agent_run` and `agent_automate` jobs the server enforces this ([Orders and payments](#orders-and-payments)). Also before other steps that cannot be undone and that the TASK does not clearly authorize: sending a message or a form for someone, deleting or changing account data. It asks again when what it is about to do differs from what was approved (another price, item or address) |
 | `choose` | The TASK is ambiguous and the choice changes the result |
 | `sign_in` | A sign-in needs something only the host has: a one-time code, or which account to use. A question that asks for a code is [secret](#secret-answers) by default |
 | `missing_info` | Information the TASK should have included is missing, and the agent cannot find it |
@@ -165,15 +165,15 @@ Place the order for "USB-C to USB-C cable, 2 m, 100 W" at $11.99, total $12.87 w
 
 Options: Yes, place the order | No
 
-This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this. The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.
+This asks you to approve a step that cannot be undone. Ask your user to approve it, then answer with agent_reply. If your user already approved exactly this earlier in your conversation, approve it yourself.
 
 The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r5b8e21f", "question_id": "q3c9a01", "answer": "..."}
-Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase or send a code on your own.
+Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase your user did not approve, and never send a code on your own.
 ```
 
-`structuredContent` has `status: "waiting"`, `question: {id, text, options, reason, secret, page_url, origin, asked_at, expires_at}` and `reply_with: {"tool": "agent_reply", "arguments": {…}}`, ready to fill in. `asked on` (`origin`) is the page the agent's browser had open when it asked. The server reads it from the browser, so neither the model nor a web page can fake it.
+`structuredContent` has `status: "waiting"`, `question: {id, text, options, reason, secret, page_url, origin, asked_at, expires_at}` and `reply_with: {"tool": "agent_reply", "arguments": {…}}`, ready to fill in. `confirm` questions add `purchase_approval`: what the user approved in advance for the job, or `null`. `asked on` (`origin`) is the page the agent's browser had open when it asked. The server reads it from the browser, so neither the model nor a web page can fake it.
 
-The hint above the reply line depends on the question. `sign_in` questions say `Tell your user which site asks (see "asked on"); never send a password; do not relay a code for a site the task did not name.`, and secret questions add `Send only the code or secret itself as the answer, e.g. "482913", not a sentence.` The sentence about `confirm_purchases` comes with the `confirm` questions of `agent_run` jobs.
+The hint above the reply line depends on the question. `sign_in` questions say `Tell your user which site asks (see "asked on"); never send a password; do not relay a code for a site the task did not name.`, and secret questions add `Send only the code or secret itself as the answer, e.g. "482913", not a sentence.` `confirm` questions say how to decide: ask your user, or, when the job came with a `purchase_approval`, approve a checkout that matches it yourself ([Orders and payments](#orders-and-payments)).
 
 ### Answering with `agent_reply`
 
@@ -188,13 +188,33 @@ The hint above the reply line depends on the question. `sign_in` questions say `
 - For a code or other secret, send only the value itself: `"482913"`, not `"The code is 482913."`. `secret: true` marks the answer as a code or other secret ([Secret answers](#secret-answers)). A `sign_in` question that asks for a code (a one-time, verification or two-step code, a passcode or a PIN) is secret by default, and then its `reply_with` arguments include `"secret": true`. A question about which account to use is not secret unless the agent marks it so, and its answer stays readable in the run's result.
 - When another MCP client started the run, the result says so.
 
-**Who decides.** Questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, go to your user, unless they already approved exactly that. The host tells them which site asks (the `asked on` origin), never sends a password, and keeps in mind that questions come from an agent that reads untrusted web pages. It may end its turn to ask its user and answer when they reply, but it never approves a purchase or sends a code on its own: when nobody approved the step, it replies "No". The server instructions tell host agents all of this.
+**Who decides.** Questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, go to your user, unless they already approved exactly that. For a purchase, that is the case when the checkout matches the `purchase_approval` the host passed with the job: the host then approves it itself. The host tells your user which site asks (the `asked on` origin), never sends a password, and keeps in mind that questions come from an agent that reads untrusted web pages. It may end its turn to ask its user and answer when they reply, but it never approves a purchase your user did not approve, and never sends a code on its own: when nobody approved the step, it replies "No". The server instructions tell host agents all of this.
 
-**Approving in advance.** A purchase your user already approved is passed as `confirm_purchases: false` with the limits in the TASK ([Orders and payments](#orders-and-payments)). Other approvals, such as sending a message, go into the TASK, and the agent then does not ask about them. To keep a run from ever asking, pass `allow_questions: false` to `agent_run` or `agent_automate`: the agent then decides on its own, and finishes with `success: false` when it cannot. It still does not order or pay without your approval.
+**Approving in advance.** A purchase your user already approved goes into `purchase_approval`, in their words. The agent still asks before it orders, and the host approves the question itself when the checkout matches ([Orders and payments](#orders-and-payments)). Other approvals, such as sending a message, go into the TASK, and the agent then does not ask about them. To keep a run from ever asking, pass `allow_questions: false` to `agent_run` or `agent_automate`: the agent then decides on its own, and finishes with `success: false` when it cannot. It then never orders or pays.
 
 ### Orders and payments
 
-An `agent_run` agent always asks (reason `confirm`) before it places an order or pays, also when the TASK tells it to buy something: the TASK says what to buy, and the question gets your approval for this checkout, with the item, the total price, the delivery address and the payment method. Models do not always follow that rule (to some, a TASK that says "order" looks like an approval), so the server enforces it. Until the host has answered a `confirm` question of the run, the agent's browser tools refuse, before they act, anything that would press the final button of an order or payment:
+An `agent_run` or `agent_automate` agent always asks (reason `confirm`) before it places an order or pays, also when the TASK tells it to buy something or your user approved the purchase in advance: the TASK says what to buy, and the question gets the approval for this checkout, with the item, the total price, the delivery address and the payment method. The question goes to the host agent, and the host either asks its user or, when the user already approved this purchase, approves it itself:
+
+```mermaid
+sequenceDiagram
+    participant A as Sub-agent
+    participant S as Server
+    participant H as Host agent
+    participant U as Your user
+    A->>H: ask_host (confirm) on the checkout page, with the item, total, address and payment method
+    alt the job has a purchase_approval and the checkout matches it
+        H->>H: approves it itself, without asking again
+    else no approval, or the checkout differs from it
+        H->>U: asks
+        U-->>H: yes or no
+    end
+    H->>A: agent_reply with the answer
+    A->>S: click Place your order (after a yes)
+    S-->>A: allowed, a confirm question was answered on this page
+```
+
+Models do not always follow the rule to ask (to some, a TASK that says "order" looks like an approval), so the server enforces it. Until the host has answered a `confirm` question the agent asked on that page, the agent's browser tools refuse, before they act, anything that would press the final button of an order or payment:
 
 | Tool | Refused when |
 |---|---|
@@ -211,17 +231,30 @@ Blocked: "Place your order" looks like the final step of an order or payment. As
 
 Each refusal also logs a warning, `blocked the final step of an order or payment: the host has not approved it`, with the label (component `agent`). An answered `confirm` question unblocks the button only on the page it was asked on (same address; the `?query` and `#fragment` may differ), whatever the answer: the agent is told not to take a step you refused. An approval the agent got on another page, for example the cart before the total was shown, does not count: the refusal then says so, and the agent asks again on the checkout page, where the total, the address and the payment method are visible. A question that expired or was cancelled without an answer does not unblock it.
 
-**Approved in advance.** When your user already approved the purchase, pass `confirm_purchases: false` and put the limits into the TASK:
+**Approved in advance.** When your user explicitly approved the purchase, in their request (*"order a Blue Mug, I approve up to $20"*) or earlier in the conversation, the host passes their words as `purchase_approval` (`agent_run` and `agent_automate` take it). An approval is the user's explicit yes: *"I approve"*, *"go ahead and pay"*, *"no need to ask me"*, or a maximum price. A request to buy something (*"order a Blue Mug and give me the order number"*) is not one: it says what to buy, not what it may cost, so the host leaves `purchase_approval` out and asks its user when the agent's question comes.
 
 ```json
 {
-  "task": "On https://shop.example.com, order one Blue Mug to the default address, paid with the saved card. Approved: 1 item, total at most $20.",
+  "task": "On https://shop.example.com, order one Blue Mug to the default address, paid with the saved card.",
   "output": "The order number and the total.",
-  "confirm_purchases": false
+  "purchase_approval": "Approved: one Blue Mug, total up to $20, to my default address, with the saved card"
 }
 ```
 
-The agent then orders without asking while the checkout stays within the TASK's limits (item, quantity, maximum total), and asks when it differs from them or exceeds them. Writing "approved up to $30; do not ask" into the TASK does not skip the question on its own: the button stays blocked until the host answers.
+The agent still asks on the checkout page, and the button stays blocked until the host answers. The approval reaches the agent as quoted data after the TASK (*"Still ask the host (reason confirm) on the checkout page before you place the order, and stay within this approval."*), and the question the host gets shows it:
+
+```text
+Run r2c7d9e1 is waiting for your answer (question q8a41f0, asked on https://shop.example.com):
+
+Place the order for one Blue Mug, total $17.49, delivered to the default address, paid with the saved card ending 4242?
+
+Options: Yes, place the order | No
+
+This asks you to approve a step that cannot be undone. Your user approved in advance (purchase_approval): "Approved: one Blue Mug, total up to $20, to my default address, with the saved card". Approve it yourself now with agent_reply, without asking your user, only if those words are your user's explicit approval ("I approve", "go ahead", a maximum price), not just their request to buy, and this checkout matches them (item, quantity, total within the limit, address, payment method). Otherwise ask your user and answer with their decision.
+…
+```
+
+`structuredContent.question.purchase_approval` carries the same text. The checkout matches, so the host answers `"Yes, place the order."` at once, without asking its user again. Had the total been $24, or the item another one, it would ask its user first. The approval is up to 500 characters, is not a secret (logs, `/api/agents/<id>` and the run's card on the dashboard show it, the card as **Approved in advance**), and changes nothing without a question: writing "approved up to $30; do not ask" into the TASK or the approval does not skip it.
 
 **Without questions.** With `allow_questions: false` (or `AGENT_MAX_QUESTIONS=0`), nobody can approve a purchase during the run, so the button stays blocked. The agent is told to finish with `success: false` when the order is ready, with the item, the total, the address and the payment method, and the refusal says so:
 
@@ -229,20 +262,20 @@ The agent then orders without asking while the checkout stays within the TASK's 
 Blocked: "Place your order" looks like the final step of an order or payment, and this job needs the host's approval for it but questions are off. Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).
 ```
 
-Pass `confirm_purchases: false` as well to let such a run order within the TASK's limits.
+Such a run never orders, also with a `purchase_approval`: nobody can answer its question. Leave questions on for jobs that should place an order.
 
-**Automation and finder runs.** `agent_automate` agents follow the same rule from their instructions: they ask first unless the TASK explicitly approves the purchase and says not to ask (a price limit such as "under $15" is not an approval), but the server does not block buttons in their browsers, and the scripts they save replay without asking. Finder runs are not guarded either: their job is research.
+**Automation and finder runs.** `agent_automate` agents follow the same rule while they explore: they always ask, a TASK that approves the purchase or says not to ask skips nothing, and the server blocks the same buttons in their browsers. The scripts they save are not guarded: `script_test`, which the agent runs in a fresh browser, and `script_run` replay them without asking, so do not have a script place an order you would not place unattended. Finder runs are not guarded either: their job is research.
 
-**What the guard does not cover.** It is a second line of defense behind the agent's instructions, not a guarantee, and it applies to `agent_run` agents only (your own browser tools are never blocked). It looks at the label of the control that the tools above would activate. It does not see clicks made by page scripts or `browser_evaluate` (runs started with a snapshot get `browser_evaluate` only with `allow_evaluate: true`), a checkout URL opened with `browser_navigate`, a page's own key handlers, Enter in a form without a submit button, or a control whose label says something else (an unlabelled icon, or wording not listed above). Relay `confirm` questions to your user all the same.
+**What the guard does not cover.** It is a second line of defense behind the agent's instructions, not a guarantee, and it applies to the browser tools of `agent_run` and `agent_automate` agents only (your own browser tools and stored scripts are never blocked). It looks at the label of the control that the tools above would activate. It does not see clicks made by page scripts or `browser_evaluate` (runs started with a snapshot get `browser_evaluate` only with `allow_evaluate: true`), a checkout URL opened with `browser_navigate`, a page's own key handlers, Enter in a form without a submit button, or a control whose label says something else (an unlabelled icon, or wording not listed above). Relay `confirm` questions to your user all the same, unless the checkout matches what they approved.
 
 ### While a run waits
 
 - It keeps its browser, with the page it asked about still open, but gives up its slot: it does not count against `AGENT_MAX_CONCURRENT`, so queued runs can start. When the answer comes, it resumes ahead of queued runs.
 - The time it waits does not count against `AGENT_MAX_RUNTIME_MS`, and the turn in which it asked does not count against `max_steps`.
-- It waits up to `AGENT_REPLY_TIMEOUT_MS` (30 minutes). After that it continues without an answer: it is told not to take the step it asked about, and to do what it can without it or finish with `success: false`. An `agent_run` order button stays blocked.
+- It waits up to `AGENT_REPLY_TIMEOUT_MS` (30 minutes). After that it continues without an answer: it is told not to take the step it asked about, and to do what it can without it or finish with `success: false`. An order button stays blocked.
 - `agent_cancel` stops it and closes its browser.
 - Every `agent_*` result also lists the other waiting runs that the same MCP client started (`Also waiting for your answer: run r7d2c4a0 (question q1f0e9b: …)`), so no question goes unseen. `agent_status` without a `run_id` lists every waiting run with its question, and marks the ones another client started `(started by <client>: theirs to answer)`. Clients are told apart by the name and version they report, so two sessions of the same client share their runs.
-- The host answers a run it started now, or asks its user and answers when they reply. It never approves a purchase or sends a code on its own: it replies "No" to a `confirm` question nobody approved, or cancels the run.
+- The host answers a run it started now (a purchase that matches the job's `purchase_approval`, for example), or asks its user and answers when they reply. It never approves a purchase its user did not approve, and never sends a code on its own: it replies "No" to a `confirm` question nobody approved, or cancels the run.
 
 A run asks at most `AGENT_MAX_QUESTIONS` questions (5 by default; `0` turns questions off for all runs), at most 10 runs wait at the same time, and a run with fewer than 3 steps or about 2 minutes left cannot ask, because it could not act on the answer. A model turn pauses on at most one question: when a turn holds several `ask_host` calls, only the first one that can really ask runs, and the turn's other calls are skipped. The agent gets refusals as tool errors that say what to do instead:
 
@@ -269,9 +302,9 @@ One-time codes are secrets. When the question is secret (a `sign_in` question th
 
 A waiting result comes back at once, so it fits any client's tool timeout, including LM Studio's 180 s. `agent_reply` then waits like `agent_wait`: up to `AGENT_WAIT_SECONDS` (170 s), then "still running".
 
-In an LM Studio chat, the chat model is the host. It shows you the question and should ask you before it answers a `confirm` or `sign_in` question. If it ends its turn while a run waits, the run keeps waiting (30 minutes by default): answer in the chat, for example *"Answer the waiting question: yes, place the order"*, and the model calls `agent_reply`. Small chat models may answer on their own instead of asking you. When you want no questions, say so up front: for a purchase you approve, have the model pass `confirm_purchases: false` with the limits in the TASK, or ask for `allow_questions: false`.
+In an LM Studio chat, the chat model is the host. It shows you the question and should ask you before it answers a `confirm` or `sign_in` question. If it ends its turn while a run waits, the run keeps waiting (30 minutes by default): answer in the chat, for example *"Answer the waiting question: yes, place the order"*, and the model calls `agent_reply`. Small chat models may answer on their own instead of asking you. To approve a purchase up front, say so with its limits (*"order the cable, up to $15, go ahead"*): the model passes your words as `purchase_approval` and approves the matching question itself. For no questions at all, ask for `allow_questions: false` (the agent then does not order).
 
-The command-line agent (`npm run lmstudio:agent`) has nobody to ask while it runs. Its system prompt tells it to answer from its task, to reply "No" to confirm questions the task did not approve (and say so in its final answer), never to send a password, to give a one-time code only when the task contains it, to answer only the questions of runs it started, and to cancel a run it cannot answer ([details](LM_STUDIO.md#7-the-command-line-agent)).
+The command-line agent (`npm run lmstudio:agent`) is a host too. Its system prompt tells it to answer from its task: when the task approves a purchase, to pass those words as `purchase_approval` and answer the matching `confirm` question "Yes" itself. Run in a terminal, it asks you about a purchase the task did not approve (or one that goes beyond the approval): the model ends its turn with the item, the total, the address, the payment method and the site, the agent prints that question with the sub-agent's own and waits for your answer, and the model then answers with `agent_reply` ("Yes" only if you approve). Press Enter without an answer to stop and leave the run waiting, so nothing is ordered. With `--no-interactive`, with `--quiet` or with piped input or output (unless `--interactive` is given), nobody can answer while it runs: it replies "No" to a purchase the task did not approve, or one that goes beyond the approval, and says in its final answer that the order is ready and needs your approval, with the item and the total, and it replies "No" to other confirm questions the task did not approve. In both modes it is told never to send a password, to give a one-time code only when the task contains it, to answer only the questions of runs it started, and to cancel a run it cannot answer ([details](LM_STUDIO.md#approving-a-sub-agents-purchase)).
 
 ## Agentic mode: `agent_run`
 
@@ -290,7 +323,7 @@ OUTPUT:
 [{"title": "A Light in the Attic", "price": "£51.77"}, {"title": "The Black Maria", "price": "£52.15"}, {"title": "Shakespeare's Sonnets", "price": "£20.66"}]
 ```
 
-The agent has the core, content, forms and tabs browser tools, `browser_evaluate`, `web_search`, `note`, `ask_host` ([questions](#questions-from-sub-agents)), `save_sign_in` (when the `snapshots` tools are enabled, see below), and `finish(output, success, notes)`. With `output_format: "json"`, `finish` only accepts valid JSON, and `structuredContent.output` is the parsed value. If the task cannot be done (site down, data not available), the agent reports `success: false` with notes on what it tried. Before it places an order or pays, it asks you, and the server blocks the final button until you answered, unless you pass `confirm_purchases: false` ([Orders and payments](#orders-and-payments)).
+The agent has the core, content, forms and tabs browser tools, `browser_evaluate`, `web_search`, `note`, `ask_host` ([questions](#questions-from-sub-agents)), `save_sign_in` (when the `snapshots` tools are enabled, see below), and `finish(output, success, notes)`. With `output_format: "json"`, `finish` only accepts valid JSON, and `structuredContent.output` is the parsed value. If the task cannot be done (site down, data not available), the agent reports `success: false` with notes on what it tried. Before it places an order or pays, it asks you, and the server blocks the final button until you answered. A purchase your user approved in advance goes into `purchase_approval`, so you can approve the matching question yourself ([Orders and payments](#orders-and-payments)).
 
 ### Sites that need a sign-in
 
@@ -317,7 +350,7 @@ The automation agent works in three phases:
 2. **Script.** It writes a JavaScript script that repeats the job for any parameter values, and saves it (`script_save`). The syntax is checked on save.
 3. **Verify.** It runs the script in a **fresh, empty browser** (`script_test`) with the example parameters, compares the output with what it saw while exploring, and fixes and re-tests until it is right. If the agent never tested the final version, the server runs it once before reporting.
 
-The automation agent can [ask questions](#questions-from-sub-agents) too, for example for a sign-in code while it explores. Scripts are plain files that anyone with `script_get` can read, so `script_save` refuses a script whose code or example parameters contain a secret answer.
+The automation agent can [ask questions](#questions-from-sub-agents) too, for example for a sign-in code while it explores, and it asks before it places an order or pays, like `agent_run` ([Orders and payments](#orders-and-payments)). Scripts are plain files that anyone with `script_get` can read, so `script_save` refuses a script whose code or example parameters contain a secret answer.
 
 ```json
 {
@@ -461,13 +494,13 @@ Logs: component `agent` (run lifecycle, one line per run with steps, tokens, que
 - Small models do better with smaller jobs. Split big jobs into several `agent_run` calls; each can run in parallel with the others.
 - Obscura v0.2.2 quirk: a page that declares a global variable with the same name as an element id (`var q` next to `id="q"`) sees the element instead of its variable. This rarely matters, but it can break a site's own search script.
 - For sites behind a sign-in, pass a snapshot to `agent_run` ([Sites that need a sign-in](#sites-that-need-a-sign-in)) rather than a password in the TASK.
-- Tell the agent what your user already approved, so it asks only about what is left open: a purchase with `confirm_purchases: false` and its limits in the TASK (`Approved: 1 item, total at most $30.`), other steps in the TASK.
+- Pass on what your user already approved: a purchase as `purchase_approval` (`Approved: 1 item, total at most $30.`), so you can answer the agent's question without asking again, and other steps in the TASK, so the agent does not ask about them.
 
 ## Security notes
 
 - **Task texts are logged.** Task texts, the agent's notes and its transcript are logged as they are. Values the agent types into password-like fields are masked in logs (`LOG_REDACT_SECRETS`), but free text is not, so do not put secrets into a TASK. If you must, set `AGENT_TRANSCRIPTS=false`, `LOG_FILE_LEVEL=warn` and `LOG_LEVEL=warn`; the dashboard still shows the task while the server runs.
 - **Questions come from an agent that reads untrusted pages.** A page can try to make the agent ask for something it should not get. Relay `confirm` and `sign_in` questions to your user unless they approved exactly that, check the `asked on` origin (read by the server, not written by the model), never send a password, and do not relay a code for a site the TASK did not name.
-- **The purchase guard is a second line of defense.** In `agent_run` jobs the server refuses the final order or payment button until the host has answered a `confirm` question asked on that page (unless `confirm_purchases: false`). It recognizes the button by its label, and covers clicks, form submits and Enter or Space from the browser tools, but not page scripts, `browser_evaluate`, a checkout URL opened directly, or automation runs ([what it does not cover](#orders-and-payments)).
+- **The purchase guard is a second line of defense.** In `agent_run` and `agent_automate` jobs the server refuses the final order or payment button until the host has answered a `confirm` question asked on that page, also when the job came with a `purchase_approval`. It recognizes the button by its label, and covers clicks, form submits and Enter or Space from the browser tools, but not page scripts, `browser_evaluate`, a checkout URL opened directly, or stored scripts ([what it does not cover](#orders-and-payments)).
 - **Your model endpoint sees secret answers.** A one-time code the host sends with `agent_reply` is masked in logs, transcripts and on the dashboard, but the sub-agent's model receives it so the agent can type it. A code the agent types can also appear in what the page itself shows or sends: the live view, and the page's console and network entries (for example a form sent with GET puts it in the URL).
 - **A snapshot hands over an account.** A sub-agent started with a snapshot, and every page it opens, can act as that account: Obscura v0.2.2 sends cookies on cross-site requests, so a page the agent visits can make signed-in requests to the site. Pass a snapshot only for jobs on that site. The agent gets no `browser_evaluate` in such runs unless you pass `allow_evaluate: true`. See [Snapshots](SNAPSHOTS.md#security-notes).
 - **Sub-agents save sign-ins only when allowed.** `save_sign_in` is offered only when the `snapshots` tools are enabled and `AGENT_SNAPSHOT_SAVE` is on, and the agent is told to save only after signing in to the account the TASK or the host named. A job started with a snapshot also refreshes it at the end without `save_sign_in`, from whatever account its browser holds then (it is skipped when the browser lost the saved sign-in cookies). Pass `update_snapshot: false` for jobs that open pages you do not trust.
