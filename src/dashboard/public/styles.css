@@ -2608,8 +2608,9 @@ kbd {
   height: 12px;
 }
 
-/* the saved sign-in a run started with, and whether it was refreshed at the end */
-.agent-snapshot {
+/* the saved sign-in a run started with, and whether it was refreshed at the end; a purchase approved in advance */
+.agent-snapshot,
+.agent-approval {
   display: flex;
   align-items: center;
   gap: var(--s-3);
@@ -2618,7 +2619,8 @@ kbd {
   overflow-wrap: anywhere;
 }
 
-.agent-snapshot .icon {
+.agent-snapshot .icon,
+.agent-approval .icon {
   width: 12px;
   height: 12px;
 }

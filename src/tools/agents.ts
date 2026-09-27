@@ -29,8 +29,25 @@ const allowQuestions = z
   .optional()
   .describe(
     'Let the agent pause and ask you a question (answer with agent_reply), e.g. before placing an order or for a sign-in code (default true). ' +
-      'false: it decides on its own and never waits for you, but it still does not place an order or pay without your approval (agent_run: confirm_purchases false; agent_automate: an explicit approval in the TASK)',
+      'false: it decides on its own and never waits for you, and it then never places an order or pays (that needs your answer to its question)',
   );
+const purchaseApproval = z
+  .string()
+  .trim()
+  .min(1)
+  .max(500)
+  .optional()
+  .describe(
+    'Only when your user explicitly approved the purchase: their words that approve it, e.g. "I approve one Blue Mug, total up to $20, to my default address". ' +
+      'A request to buy something ("order X and give me the order number") is not an approval: it says what to buy, not what it may cost; then leave this out and ask your user when the agent asks. ' +
+      'The agent still asks you before it places the order (the server blocks the final button until you answer); its question then shows this approval, ' +
+      'so you can approve it yourself when the checkout matches, without asking your user again.',
+  );
+
+/** purchase_approval for AgentInput, on one line: it is quoted in the agent's prompt and in the question the host gets. */
+function approvalInput(text: string | undefined): Pick<AgentInput, 'purchaseApproval'> {
+  return text ? { purchaseApproval: text.replace(/\s+/g, ' ') } : {};
+}
 
 function manager(ctx: ToolContext): AgentManager {
   if (!ctx.agents) throw new ToolError('Sub-agents are not configured on this server: set AGENT_LLM_URL (see docs/AGENTS.md).');
@@ -129,7 +146,8 @@ export const agentRun = defineTool({
     'completes the TASK on its own (navigating, clicking, filling forms, reading pages, searching the web) and returns the OUTPUT you describe. ' +
     'Use it for multi-step jobs you do not need to drive step by step. Runs can take minutes; if the result is not ready in time you get a run_id for agent_wait. ' +
     'The agent may pause with status "waiting" and ask you a question (e.g. before placing an order or paying, or for a sign-in code): answer it with agent_reply. ' +
-    'The agent always asks before placing an order or paying, and the server enforces it. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK. ' +
+    'The agent always asks you before it places an order or pays, and the server enforces it. If your user explicitly approved the purchase (not just asked for it), pass their words as purchase_approval: ' +
+    'the question then shows it, and you approve a matching checkout yourself without asking your user again. ' +
     'For a site that needs a sign-in, pass snapshot (a saved sign-in, see snapshot_list): the agent starts signed in.',
   inputSchema: z.object({
     task: z.string().min(1).describe('TASK: what the agent must do, with all details it needs (sites, values, criteria)'),
@@ -139,13 +157,7 @@ export const agentRun = defineTool({
     context,
     max_steps: maxSteps,
     allow_questions: allowQuestions,
-    confirm_purchases: z
-      .boolean()
-      .optional()
-      .describe(
-        'true (default): the agent asks you (ask_host, reason confirm) before it places an order or pays, and the server blocks the final order/payment button until you have answered such a question asked on that page. ' +
-          'Set false only when your user already approved the purchase; then put the limits (item, quantity, maximum total) in the TASK.',
-      ),
+    purchase_approval: purchaseApproval,
     snapshot: z
       .string()
       .min(1)
@@ -178,7 +190,7 @@ export const agentRun = defineTool({
         context: args.context,
         maxSteps: args.max_steps,
         allowQuestions: args.allow_questions ?? true,
-        confirmPurchases: args.confirm_purchases ?? true,
+        ...approvalInput(args.purchase_approval),
         ...(snapshot ? { snapshot, updateSnapshot: args.update_snapshot ?? true, allowEvaluate: args.allow_evaluate ?? false } : {}),
       }),
     );
@@ -194,7 +206,8 @@ export const agentAutomate = defineTool({
     'Hand a browser task to an automation agent. It does the TASK once in its own isolated browser to learn how, then writes a reusable script that repeats it ' +
     'for new parameter values, verifies the script in a fresh browser, and stores it. Returns the script name, its parameters (types, meaning, examples), ' +
     'how to run it, the verification result, and the OUTPUT of the task itself. Run the script later with script_run — no model needed, much faster. ' +
-    'The agent may pause with status "waiting" and ask you a question (e.g. for a sign-in code): answer it with agent_reply.',
+    'The agent may pause with status "waiting" and ask you a question (e.g. for a sign-in code, or before placing an order): answer it with agent_reply. ' +
+    'Like agent_run, it always asks you before it places an order or pays, and the server enforces it; pass what your user explicitly approved (not just asked for) as purchase_approval.',
   inputSchema: z.object({
     task: z.string().min(1).describe('TASK: the job to automate, with concrete example values (they become the script parameters\' examples)'),
     output: z.string().min(1).describe('OUTPUT: what the task (and the script) must return, e.g. "JSON array of {title, url} for the top N results"'),
@@ -209,6 +222,7 @@ export const agentAutomate = defineTool({
     context,
     max_steps: maxSteps,
     allow_questions: allowQuestions,
+    purchase_approval: purchaseApproval,
     wait_seconds: waitSeconds,
   }),
   annotations: { ...AGENT, title: 'Automate a browser task' },
@@ -234,6 +248,7 @@ export const agentAutomate = defineTool({
         scriptName,
         overwrite: args.overwrite,
         allowQuestions: args.allow_questions ?? true,
+        ...approvalInput(args.purchase_approval),
       }),
     );
     return awaitRun(ctx, run, args.wait_seconds);
@@ -372,7 +387,8 @@ export const agentReply = defineTool({
   description:
     'Answer the question of a sub-agent run that waits for you (status "waiting"; agent_run, agent_wait and agent_status show the question and its id). ' +
     'The run continues with the same browser; returns its next question, its result, or "still running". ' +
-    'Relay questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, to your user unless they already approved exactly that. Never send a password.',
+    'Relay questions that approve a purchase, payment, message or deletion, and requests for sign-in codes, to your user unless they already approved exactly that ' +
+    "(for a purchase: a checkout that matches what they approved, such as the job's purchase_approval). Never send a password.",
   inputSchema: z.object({
     run_id: z.string().min(1).describe('The run id, e.g. "r1a2b3c4"'),
     question_id: z.string().min(1).describe('The id of the question you answer, e.g. "q1a2b3" (from the waiting result)'),

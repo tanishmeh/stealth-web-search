@@ -737,15 +737,27 @@ describe('sub-agent questions (scripted model)', { skip: SKIP }, () => {
       res.text,
       new RegExp(
         `^Run ${runId} is waiting for your answer \\(question ${q.id}, asked on ${esc(fixtureOrigin)}\\):\\n\\nSubmit the sign-up form for ada@example\\.com\\?\\n\\nOptions: Yes, submit it \\| No\\n\\n` +
-          'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this\\. ' +
-          'The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK\\.\\n\\n' +
+          'This asks you to approve a step that cannot be undone\\. Ask your user to approve it, then answer with agent_reply\\. ' +
+          'If your user already approved exactly this earlier in your conversation, approve it yourself\\.\\n\\n' +
           `The run is paused and keeps its browser\\. Answer with agent_reply \\{"run_id": "${runId}", "question_id": "${q.id}", "answer": "\\.\\.\\."\\}\\n` +
-          'Answer it now, or ask your user and answer when they reply \\(the run waits up to \\d+ s, then continues without an answer; agent_cancel stops it\\)\\. Never approve a purchase or send a code on your own\\.$',
+          'Answer it now, or ask your user and answer when they reply \\(the run waits up to \\d+ s, then continues without an answer; agent_cancel stops it\\)\\. ' +
+          'Never approve a purchase your user did not approve, and never send a code on your own\\.$',
       ),
     );
     assert.deepEqual(
       { ...q, asked_at: undefined, expires_at: undefined },
-      { id: q.id, text: 'Submit the sign-up form for ada@example.com?', options: ['Yes, submit it', 'No'], reason: 'confirm', secret: false, page_url: `${site.baseUrl}/form.html`, origin: fixtureOrigin, asked_at: undefined, expires_at: undefined },
+      {
+        id: q.id,
+        text: 'Submit the sign-up form for ada@example.com?',
+        options: ['Yes, submit it', 'No'],
+        reason: 'confirm',
+        secret: false,
+        page_url: `${site.baseUrl}/form.html`,
+        origin: fixtureOrigin,
+        asked_at: undefined,
+        expires_at: undefined,
+        purchase_approval: null,
+      },
     );
     assert.deepEqual(s.reply_with, { tool: 'agent_reply', arguments: { run_id: runId, question_id: q.id, answer: '<your answer>' } });
     assert.equal(s.steps, 1, 'the question turn is not charged');
@@ -1224,24 +1236,175 @@ describe('sub-agent questions (scripted model)', { skip: SKIP }, () => {
     assert.equal(orders().length, before + 1, 'ordered once, after the approval on the checkout page');
   });
 
-  test('confirm_purchases: false lets the agent order without asking; with questions off the button stays blocked and the agent is told to finish', async () => {
+  test('with a purchase approval the agent still asks on the checkout page; the question carries the approval and the host approves it itself', async () => {
+    const marker = 'MARKER-GUARD-APPROVAL';
+    const approval = 'Approved: one Blue Mug, total up to $20, to 1 Example Street, with the card ending 4242';
+    let blocked = '';
+    policies.set(marker, (req) => {
+      switch (req.step) {
+        case 1:
+          return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });
+        case 2:
+          // the approval came with the job, so this model tries to order without asking: the server refuses
+          return call('browser_click', { selector: '#place' }, 'The user approved this purchase. Placing the order.');
+        case 3:
+          blocked = req.lastToolResult ?? '';
+          return call('ask_host', {
+            question: 'Place the order for one Blue Mug, total $17.49, delivered to 1 Example Street, paid with the card ending 4242?',
+            options: ['Yes, place the order', 'No'],
+            reason: 'confirm',
+          });
+        case 4:
+          return call('browser_click', { selector: '#place' });
+        default:
+          return call('finish', { output: `ordered: ${req.lastToolResult}` });
+      }
+    });
+    const before = orders().length;
+    // whitespace in the approval is folded to one line
+    const res = await srv.call('agent_run', { task: `${marker}: order one Blue Mug from the shop`, output: 'the order', purchase_approval: `  ${approval.replace(', to', ',\n  to')}  `, wait_seconds: 60 });
+    const s = res.raw.structuredContent;
+    assert.equal(s.status, 'waiting', res.text);
+    assert.equal(blocked, blockedText, 'the approval does not unlock the button before the host answered');
+    assert.equal(orders().length, before, 'nothing was ordered before the host answered');
+
+    // the approval reached the agent as quoted data in the USER prompt, next to the unchanged rule to ask first
+    const first = requestsOf(marker)[0]!;
+    assert.match(
+      String(first.messages[1].content),
+      new RegExp(`\\n\\nPurchase approval from the user \\(the host checks your question against it\\): "${esc(approval)}"\\. Still ask the host \\(reason confirm\\) on the checkout page before you place the order, and stay within this approval\\.$`),
+    );
+    assert.match(String(first.messages[0].content), /\(1\) Before placing an order or paying, always ask first \(reason confirm\)/);
+    assert.doesNotMatch(String(first.messages[0].content), new RegExp(esc(approval)));
+
+    // the host sees the approval and is told to approve a matching checkout itself
+    assert.equal(s.question.reason, 'confirm');
+    assert.equal(s.question.purchase_approval, approval);
+    assert.match(s.question.page_url, /\/checkout\.html$/);
+    assert.match(
+      res.text,
+      new RegExp(
+        '\\n\\nThis asks you to approve a step that cannot be undone\\. ' +
+          `Your user approved in advance \\(purchase_approval\\): "${esc(approval)}"\\. ` +
+          'Approve it yourself now with agent_reply, without asking your user, only if those words are your user\'s explicit approval \\("I approve", "go ahead", a maximum price\\), not just their request to buy, ' +
+          'and this checkout matches them \\(item, quantity, total within the limit, address, payment method\\)\\. Otherwise ask your user and answer with their decision\\.\\n\\n',
+      ),
+    );
+    assert.match(res.text, /Never approve a purchase your user did not approve, and never send a code on your own\.$/);
+    // the dashboard shows it on the run's card and in its details (it is not a secret)
+    const state = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+    assert.equal(state.history.agents.find((a: any) => a.id === s.run_id).purchaseApproval, approval);
+    const details = await (await fetch(`${srv.baseUrl}/api/agents/${s.run_id}`)).json();
+    assert.equal(details.input.purchaseApproval, approval);
+
+    const done = await srv.call('agent_reply', { run_id: s.run_id, question_id: s.question.id, answer: 'Yes, place the order', wait_seconds: 60 });
+    const d = done.raw.structuredContent;
+    assert.equal(d.status, 'completed', done.text);
+    assert.equal(d.success, true);
+    assert.match(d.output, /^ordered: Clicked button\[submit\] "Place your order"/);
+    assert.equal(orders().length, before + 1, 'ordered exactly once, after the answer');
+    assert.deepEqual(d.questions.map((q: any) => [q.reason, q.status, q.answer]), [['confirm', 'answered', 'Yes, place the order']]);
+  });
+
+  test('an agent_automate agent asks before it orders too: a TASK that approves the purchase unlocks nothing, the question carries the approval', async () => {
+    const marker = 'MARKER-GUARD-AUTO';
+    const approval = 'Approved: one Blue Mug, total up to $20';
+    let blocked = '';
+    policies.set(marker, (req) => {
+      switch (req.step) {
+        case 1:
+          return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });
+        case 2:
+          return call('browser_click', { selector: '#place' }, 'The TASK approves this purchase and says not to ask. Placing the order.');
+        case 3:
+          blocked = req.lastToolResult ?? '';
+          return call('ask_host', { question: 'Place the order for one Blue Mug, total $17.49, to 1 Example Street, card ending 4242?', options: ['Yes, place the order', 'No'], reason: 'confirm' });
+        case 4:
+          return call('browser_click', { selector: '#place' });
+        case 5:
+          // the script only reads the page: it must not order again
+          return call('script_save', {
+            name: 'mug-checkout-title',
+            description: 'Read the title of the checkout page.',
+            params: [],
+            output_description: 'The page title',
+            code: `async function run() { await browser.goto(${JSON.stringify(`${site.baseUrl}/checkout.html`)}); return await browser.evaluate(() => document.title); }`,
+          });
+        case 6:
+          return call('script_test', {});
+        default:
+          return call('finish', { output: 'ordered', verified: true });
+      }
+    });
+    const before = orders().length;
+    const res = await srv.call('agent_automate', {
+      task: `${marker}: order one Blue Mug from the shop; approved up to $20, do not ask`,
+      output: 'the order',
+      purchase_approval: approval,
+      wait_seconds: 60,
+    });
+    const s = res.raw.structuredContent;
+    assert.equal(s.status, 'waiting', res.text);
+    assert.equal(blocked, blockedText, 'the guard covers automation runs');
+    assert.equal(orders().length, before, 'nothing was ordered before the host answered');
+    const first = requestsOf(marker)[0]!;
+    assert.match(String(first.messages[0].content), /\(1\) Before placing an order or paying, always ask first \(reason confirm\)/);
+    assert.doesNotMatch(String(first.messages[0].content), /explicitly approves the purchase/);
+    assert.match(String(first.messages[1].content), new RegExp(`Purchase approval from the user \\(the host checks your question against it\\): "${esc(approval)}"\\. Still ask the host`));
+    assert.equal(s.question.purchase_approval, approval);
+    assert.match(res.text, new RegExp(`Your user approved in advance \\(purchase_approval\\): "${esc(approval)}"\\. Approve it yourself now with agent_reply, without asking your user, only if`));
+
+    const done = await srv.call('agent_reply', { run_id: s.run_id, question_id: s.question.id, answer: 'Yes, place the order', wait_seconds: 60 });
+    const d = done.raw.structuredContent;
+    assert.equal(d.status, 'completed', done.text);
+    assert.equal(orders().length, before + 1, 'ordered exactly once, after the answer');
+
+    // questions off: it never orders, whatever the TASK or the approval says
+    policies.set('MARKER-QUIET-AUTO', (req) => {
+      if (req.step === 1) return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });
+      if (req.step === 2) return call('browser_click', { selector: '#place' });
+      return { status: 400, error: 'enough for this test' };
+    });
+    await srv.call('agent_automate', {
+      task: 'MARKER-QUIET-AUTO: order one Blue Mug; approved up to $20, do not ask',
+      output: 'x',
+      allow_questions: false,
+      purchase_approval: approval,
+    });
+    const quiet = requestsOf('MARKER-QUIET-AUTO');
+    assert.match(String(quiet[0]!.messages[0].content), /Never place an order or pay: that needs the host's approval/);
+    assert.match(toolResults(quiet.at(-1)!).at(-1)!, /^Error: Blocked: "Place your order" looks like the final step of an order or payment, and this job needs the host's approval for it but questions are off\./);
+    assert.equal(orders().length, before + 1, 'not ordered');
+  });
+
+  test('confirm_purchases from an old client is ignored: the button stays blocked; with questions off the agent is told to finish', async () => {
     const policy: Policy = (req) => {
       if (req.step === 1) return call('browser_navigate', { url: `${site.baseUrl}/checkout.html` });
       if (req.step === 2) return call('browser_click', { selector: '#place' });
       return call('finish', { output: String(req.lastToolResult), success: !String(req.lastToolResult).startsWith('Error') });
     };
-    policies.set('MARKER-GUARD-APPROVED', policy);
+    policies.set('MARKER-GUARD-OLD', policy);
     policies.set('MARKER-GUARD-QUIET', policy);
     const before = orders().length;
-    const approved = await srv.call('agent_run', { task: 'MARKER-GUARD-APPROVED: order one Blue Mug, approved up to $20', output: 'x', confirm_purchases: false });
-    const a = approved.raw.structuredContent;
-    assert.equal(a.status, 'completed', approved.text);
-    assert.match(a.output, /^Clicked button\[submit\] "Place your order"/);
-    assert.equal(a.questions, undefined, 'no question was asked');
-    assert.equal(orders().length, before + 1);
-    assert.match(String(requestsOf('MARKER-GUARD-APPROVED')[0]!.messages[0].content), /The host already approved purchases for this job/);
 
-    const quiet = await srv.call('agent_run', { task: 'MARKER-GUARD-QUIET: order one Blue Mug', output: 'x', allow_questions: false });
+    // the parameter is gone from the schema, and a call that still sends it is not refused
+    const { tools } = await srv.client.listTools();
+    const props = tools.find((t) => t.name === 'agent_run')!.inputSchema.properties as Record<string, any>;
+    assert.equal('confirm_purchases' in props, false);
+    assert.equal(props.purchase_approval.type, 'string');
+    assert.equal(props.purchase_approval.maxLength, 500);
+    const old = await srv.call('agent_run', { task: 'MARKER-GUARD-OLD: order one Blue Mug, approved up to $20', output: 'x', confirm_purchases: false });
+    assert.equal(old.isError, false, old.text);
+    const o = old.raw.structuredContent;
+    assert.equal(o.status, 'completed', old.text);
+    assert.equal(o.success, false);
+    assert.equal(o.output, blockedText, 'the agent is told to ask first');
+    assert.equal(orders().length, before, 'confirm_purchases: false no longer turns the guard off');
+    const oldDetails = await (await fetch(`${srv.baseUrl}/api/agents/${o.run_id}`)).json();
+    assert.equal('confirmPurchases' in oldDetails.input, false);
+    assert.equal('purchaseApproval' in oldDetails.input, false);
+
+    const quiet = await srv.call('agent_run', { task: 'MARKER-GUARD-QUIET: order one Blue Mug', output: 'x', allow_questions: false, purchase_approval: 'Approved: one Blue Mug, up to $20' });
     const q = quiet.raw.structuredContent;
     assert.equal(q.status, 'completed', quiet.text);
     assert.equal(q.success, false);
@@ -1250,8 +1413,13 @@ describe('sub-agent questions (scripted model)', { skip: SKIP }, () => {
       'Error: Blocked: "Place your order" looks like the final step of an order or payment, and this job needs the host\'s approval for it but questions are off. ' +
         'Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).',
     );
-    assert.equal(orders().length, before + 1, 'not ordered');
-    assert.match(String(requestsOf('MARKER-GUARD-QUIET')[0]!.messages[0].content), /Never place an order or pay unless the host approved purchases for this job/);
+    assert.equal(orders().length, before, 'not ordered');
+    const request = requestsOf('MARKER-GUARD-QUIET')[0]!;
+    assert.match(String(request.messages[0].content), /Never place an order or pay: that needs the host's approval, nobody can give it while you work, and the server blocks the final order or payment button\./);
+    assert.match(
+      String(request.messages[1].content),
+      /Purchase approval from the user: "Approved: one Blue Mug, up to \$20"\. You cannot ask the host in this job, so do not place the order: when it is ready and within this approval, call finish with success=false and say so\.$/,
+    );
   });
 
   test('a secret answer (a sign-in code) reaches the agent only: never the logs, the dashboard, the run details or the transcript', async () => {

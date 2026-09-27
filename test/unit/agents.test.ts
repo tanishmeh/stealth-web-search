@@ -7,6 +7,7 @@ import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars } fr
 import { runResult } from '../../src/agents/format.ts';
 import { KINDS, isSearchResultsPage, quoteFound, quoteMatch, siteOf } from '../../src/agents/kinds.ts';
 import { redactParams, serverInstructions } from '../../src/mcp/server.ts';
+import { agentAutomate, agentReply, agentRun } from '../../src/tools/agents.ts';
 import { evaluationSource, isExpression } from '../../src/scripts/api.ts';
 import { ChatClient, LlmError, splitThinking, type ChatMessage } from '../../src/agents/llm.ts';
 import { AgentRun, looksLikeFinalPurchase, purchaseGuardFor, questionRefusal, questionsAllowed, type AgentInput, type AgentKind } from '../../src/agents/run.ts';
@@ -147,11 +148,12 @@ describe('sub-agent questions to the host', () => {
           '',
           'Options: Yes | No',
           '',
-          'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this. ' +
-            'The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.',
+          'This asks you to approve a step that cannot be undone. Ask your user to approve it, then answer with agent_reply. ' +
+            'If your user already approved exactly this earlier in your conversation, approve it yourself.',
           '',
           `The run is paused and keeps its browser. Answer with agent_reply {"run_id": "r1a2b3c4", "question_id": "${q.id}", "answer": "..."}`,
-          'Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). Never approve a purchase or send a code on your own.',
+          'Answer it now, or ask your user and answer when they reply (the run waits up to 30 min, then continues without an answer; agent_cancel stops it). ' +
+            'Never approve a purchase your user did not approve, and never send a code on your own.',
         ].join('\n'),
       );
       assert.doesNotMatch(r.text, /Do not end your turn/, 'a chat host asks its user by ending its turn');
@@ -167,16 +169,68 @@ describe('sub-agent questions to the host', () => {
         origin: 'https://shop.example',
         asked_at: q.askedAt,
         expires_at: q.expiresAt,
+        purchase_approval: null,
       });
       assert.deepEqual(r.structured.reply_with, { tool: 'agent_reply', arguments: { run_id: 'r1a2b3c4', question_id: q.id, answer: '<your answer>' } });
       const summary = run.summary() as any;
       assert.equal(summary.status, 'waiting');
       assert.equal(summary.question?.id, q.id);
       assert.equal(summary.questions, 1);
+      assert.equal(summary.purchaseApproval, null);
     } finally {
       run.closeQuestion('cancelled');
     }
     assert.equal((await closed).status, 'cancelled');
+  });
+
+  test('a confirm question of a job with a purchase approval shows it, so the host approves a matching checkout itself (agent_run and agent_automate)', async () => {
+    const approval = 'Approved: one USB-C cable, total up to $15, to my default address, with the saved card';
+    const hint =
+      'This asks you to approve a step that cannot be undone. ' +
+      `Your user approved in advance (purchase_approval): "${approval}". ` +
+      'Approve it yourself now with agent_reply, without asking your user, only if those words are your user\'s explicit approval ("I approve", "go ahead", a maximum price), not just their request to buy, ' +
+      'and this checkout matches them (item, quantity, total within the limit, address, payment method). Otherwise ask your user and answer with their decision.';
+    const run = newRun('task', { purchaseApproval: approval });
+    run.step = 3;
+    const closed = run.ask({ text: 'Place the order for the USB-C cable, total $12.99?', options: ['Yes', 'No'], reason: 'confirm', secret: false, pageUrl: 'https://shop.example/checkout' }, 1_800_000);
+    try {
+      const r = runResult(run);
+      assert.equal(r.text.split('\n\n')[3], hint);
+      assert.match(r.text, /Never approve a purchase your user did not approve, and never send a code on your own\.$/);
+      assert.doesNotMatch(r.text, /confirm_purchases|Ask your user to approve it/);
+      assert.equal((r.structured.question as any).purchase_approval, approval);
+      assert.equal((run.summary() as any).purchaseApproval, approval, 'the dashboard card shows it');
+    } finally {
+      run.closeQuestion('cancelled');
+    }
+    await closed;
+
+    // other questions carry no approval
+    const choose = run.ask({ text: 'Which colour?', options: [], reason: 'choose', secret: false, pageUrl: null }, 60_000);
+    assert.equal('purchase_approval' in (runResult(run).structured.question as any), false);
+    run.closeQuestion('cancelled');
+    await choose;
+
+    // an automation agent asks before it orders too, and its confirm questions get the same hints
+    const automation = newRun('automation', { purchaseApproval: approval });
+    automation.step = 3;
+    const pending = automation.ask({ text: 'Place the order for the USB-C cable, total $12.99?', options: [], reason: 'confirm', secret: false, pageUrl: 'https://shop.example/checkout' }, 60_000);
+    const auto = runResult(automation);
+    assert.equal(auto.text.split('\n\n')[2], hint);
+    assert.equal((auto.structured.question as any).purchase_approval, approval);
+    assert.equal((automation.summary() as any).purchaseApproval, approval);
+    automation.closeQuestion('cancelled');
+    await pending;
+    const plain = newRun('automation');
+    const asked = plain.ask({ text: 'Send the message?', options: [], reason: 'confirm', secret: false, pageUrl: null }, 60_000);
+    const text = runResult(plain).text;
+    assert.match(
+      text,
+      /\n\nThis asks you to approve a step that cannot be undone\. Ask your user to approve it, then answer with agent_reply\. If your user already approved exactly this earlier in your conversation, approve it yourself\.\n\n/,
+    );
+    assert.equal((runResult(plain).structured.question as any).purchase_approval, null);
+    plain.closeQuestion('cancelled');
+    await asked;
   });
 
   test('closing a question changes the run at once; the answer is recorded and reported with the result', async () => {
@@ -400,15 +454,15 @@ describe('sub-agent purchases need the host', () => {
     for (const label of before) assert.equal(looksLikeFinalPurchase(label), false, label);
   });
 
-  test('the purchase guard blocks the final step until the host answered a confirm question on that page; confirm_purchases false turns it off', async () => {
+  test('the purchase guard blocks the final step until the host answered a confirm question on that page, also with a purchase approval', async () => {
     const CHECKOUT = 'https://shop.example/checkout';
     const warned: unknown[] = [];
     const env = { config, log: { warn: (obj: unknown) => warned.push(obj) }, waitingCount: () => 0 } as any;
     const run = newRun();
     assert.equal(KINDS.task.purchaseGuard, purchaseGuardFor);
-    assert.equal(KINDS.automation.purchaseGuard, undefined, 'task runs only');
-    assert.equal(KINDS.finder.purchaseGuard, undefined);
-    const guard = purchaseGuardFor(run, env)!;
+    assert.equal(KINDS.automation.purchaseGuard, purchaseGuardFor, 'an automation agent explores the checkout like a task agent');
+    assert.equal(KINDS.finder.purchaseGuard, undefined, 'research only');
+    const guard = purchaseGuardFor(run, env);
     assert.equal(guard('Proceed to checkout', CHECKOUT), null);
     const blocked =
       'Blocked: "Place your order" looks like the final step of an order or payment. Ask the host first: call ask_host with reason "confirm", ' +
@@ -440,36 +494,93 @@ describe('sub-agent purchases need the host', () => {
     assert.equal(guard('Place your order', `${CHECKOUT}/#pay`), null);
     assert.notEqual(guard('Place your order', 'https://other.example/checkout'), null, 'another site');
 
-    assert.equal(purchaseGuardFor(newRun('task', { confirmPurchases: false }), env), null, 'the host approved purchases');
-    const quiet = purchaseGuardFor(newRun('task', { allowQuestions: false }), env)!;
-    assert.equal(
-      quiet('Pay $17.49', CHECKOUT),
+    // approved in advance: the agent still asks, and the button stays blocked until the host answers
+    assert.equal(purchaseGuardFor(newRun('task', { purchaseApproval: 'Approved: one Blue Mug, up to $20' }), env)('Place your order', CHECKOUT), blocked);
+    // confirm_purchases (replaced by purchase_approval) no longer turns the guard off, even if it reached the input
+    assert.equal(purchaseGuardFor(newRun('task', { confirmPurchases: false } as Partial<AgentInput>), env)('Place your order', CHECKOUT), blocked);
+    const quietBlocked =
       'Blocked: "Pay $17.49" looks like the final step of an order or payment, and this job needs the host\'s approval for it but questions are off. ' +
-        'Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).',
+      'Call finish with success=false and say the order is ready to be placed (item, total, address, payment method).';
+    assert.equal(purchaseGuardFor(newRun('task', { allowQuestions: false }), env)('Pay $17.49', CHECKOUT), quietBlocked);
+    assert.equal(purchaseGuardFor(newRun('automation', { allowQuestions: false, purchaseApproval: 'Approved: up to $20' }), env)('Pay $17.49', CHECKOUT), quietBlocked);
+  });
+
+  test('agent_run and agent_automate: purchase_approval is trimmed text of at most 500 characters; confirm_purchases from an old client is dropped, not refused', () => {
+    const parsed = agentRun.inputSchema.safeParse({ task: 'x', output: 'y', confirm_purchases: false, purchase_approval: '  Approved: one Blue Mug, up to $20  ' });
+    assert.equal(parsed.success, true);
+    assert.deepEqual(parsed.data, { task: 'x', output: 'y', purchase_approval: 'Approved: one Blue Mug, up to $20' });
+    for (const tool of [agentRun, agentAutomate]) {
+      const schema = tool.inputSchema;
+      assert.equal(schema.safeParse({ task: 'x', output: 'y', purchase_approval: '   ' }).success, false, tool.name);
+      assert.equal(schema.safeParse({ task: 'x', output: 'y', purchase_approval: 'x'.repeat(501) }).success, false, tool.name);
+      assert.equal(schema.safeParse({ task: 'x', output: 'y', purchase_approval: 'x'.repeat(500) }).success, true, tool.name);
+      assert.doesNotMatch(tool.description, /confirm_purchases/);
+      assert.doesNotMatch(tool.inputSchema.shape.allow_questions.description ?? '', /explicit approval in the TASK/, 'questions off: no agent orders');
+    }
+    assert.equal((agentAutomate.inputSchema.safeParse({ task: 'x', output: 'y', purchase_approval: ' Approved: 1 mug ' }).data as any).purchase_approval, 'Approved: 1 mug');
+    assert.match(agentRun.description, /The agent always asks you before it places an order or pays, and the server enforces it\. If your user explicitly approved the purchase \(not just asked for it\), pass their words as purchase_approval/);
+    assert.match(agentAutomate.description, /Like agent_run, it always asks you before it places an order or pays, and the server enforces it; pass what your user explicitly approved \(not just asked for\) as purchase_approval\./);
+    // agent_reply says the same as the server instructions: a checkout that matches the approval needs no second question to the user
+    assert.match(
+      agentReply.description,
+      /to your user unless they already approved exactly that \(for a purchase: a checkout that matches what they approved, such as the job's purchase_approval\)\. Never send a password\./,
     );
   });
 
-  test('the prompt: a TASK that orders something still needs the confirmation; confirm_purchases false and questions off change rule (1)', () => {
+  test('the prompt: task and automation agents always ask before they order, also with a TASK that orders or a purchase approval; questions off never order', () => {
     const task = (extra: Partial<AgentInput> = {}) => KINDS.task.systemPrompt(newRun('task', extra), config);
+    const user = (extra: Partial<AgentInput> = {}, cfg = config) => KINDS.task.userPrompt(newRun('task', extra), cfg);
+    const rule =
+      /\(1\) Before placing an order or paying, always ask first \(reason confirm\) with the item, the total price, the delivery address and the payment method\. A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy\. Ask on the page that has the final order or payment button \(for example the order review page\), once it shows the total, the address and the payment method\. The server blocks that button until the host has answered a confirm question you asked on that same page\. If what you are about to do differs from what the host approved, ask again\./;
     const asks = task();
-    assert.match(
-      asks,
-      /\(1\) Before placing an order or paying, always ask first \(reason confirm\) with the item, the total price, the delivery address and the payment method\. A TASK that tells you to order or buy something still needs this confirmation: it only says what to buy\. Ask on the page that has the final order or payment button \(for example the order review page\), once it shows the total, the address and the payment method\. The server blocks that button until the host has answered a confirm question you asked on that same page\. If what you are about to do differs from what the host approved, ask again\./,
-    );
+    assert.match(asks, rule);
     assert.doesNotMatch(asks, /maximum total and the checkout|explicitly says not to ask/, 'a price limit in the TASK is not an approval');
-    assert.match(
-      task({ confirmPurchases: false }),
-      /\(1\) The host already approved purchases for this job: you do not need to ask before ordering, but stay within the TASK's limits \(item, quantity, maximum total\); if the checkout differs or exceeds them, ask \(reason confirm\)\./,
+    // a purchase approval leaves rule (1) as it is (there is no "do not ask" variant any more)
+    const approval = 'Approved: one Blue Mug, total up to $20, to my default address';
+    assert.equal(task({ purchaseApproval: approval }), asks);
+    assert.doesNotMatch(task({ confirmPurchases: false } as Partial<AgentInput>), /already approved purchases|do not need to ask/);
+    assert.equal(task({ confirmPurchases: false } as Partial<AgentInput>), asks, 'confirm_purchases is gone');
+    // the approval goes into the USER prompt as quoted data, after the TASK and before the saved sign-in
+    assert.doesNotMatch(user(), /Purchase approval/);
+    assert.equal(
+      user({ purchaseApproval: approval }),
+      'TASK:\nOrder one Blue Mug\n\nOUTPUT (exactly what to send back to the host):\nthe order number\n\n' +
+        `Purchase approval from the user (the host checks your question against it): "${approval}". ` +
+        'Still ask the host (reason confirm) on the checkout page before you place the order, and stay within this approval.',
     );
+    assert.doesNotMatch(task({ purchaseApproval: approval }), new RegExp(approval.replace(/[.*+?^${}()|[\]\\$]/g, '\\$&')), 'never in the system prompt');
+    const quoted = user({ purchaseApproval: `"Yes" ${'x'.repeat(600)}` });
+    assert.match(quoted, /Purchase approval from the user \(the host checks your question against it\): "\\"Yes\\" x+…"\. Still ask/, 'quoted and capped');
+    assert.ok(quoted.length < 800);
+
+    const quiet = task({ allowQuestions: false });
     assert.match(
-      task({ allowQuestions: false }),
-      /nobody can answer questions while you work\.\nNever place an order or pay unless the host approved purchases for this job: it has not, and the server blocks the final order or payment button\. When the order is ready to be placed, call finish with success=false and say so/,
+      quiet,
+      /nobody can answer questions while you work\.\nNever place an order or pay: that needs the host's approval, nobody can give it while you work, and the server blocks the final order or payment button\. When the order is ready to be placed, call finish with success=false and say so/,
     );
-    assert.match(task({ allowQuestions: false, confirmPurchases: false }), /The host already approved purchases for this job: stay within the TASK's limits/);
-    const automation = KINDS.automation.systemPrompt(newRun('automation'), config);
-    assert.match(automation, /unless the TASK explicitly approves the purchase and says not to ask \(a price limit for choosing the item, such as "under \$15", is not an approval\)/);
-    assert.doesNotMatch(automation, /server blocks/, 'automation runs have no purchase guard');
-    assert.match(KINDS.automation.systemPrompt(newRun('automation', { allowQuestions: false }), config), /Never place an order, pay or send money unless the TASK explicitly approves the purchase/);
+    assert.equal(task({ allowQuestions: false, purchaseApproval: approval }), quiet);
+    assert.match(
+      user({ allowQuestions: false, purchaseApproval: approval }),
+      /Purchase approval from the user: "Approved: one Blue Mug, total up to \$20, to my default address"\. You cannot ask the host in this job, so do not place the order: when it is ready and within this approval, call finish with success=false and say so\.$/,
+    );
+    // an automation agent follows the same rules: it always asks, a TASK that approves the purchase skips nothing,
+    // and it never orders with questions off; its approval goes into its USER prompt too
+    const auto = (extra: Partial<AgentInput> = {}) => KINDS.automation.systemPrompt(newRun('automation', extra), config);
+    assert.match(auto(), rule);
+    assert.doesNotMatch(auto(), /explicitly approves|says not to ask/);
+    assert.equal(auto({ purchaseApproval: approval }), auto());
+    assert.match(
+      auto({ allowQuestions: false }),
+      /nobody can answer questions while you work\.\nNever place an order or pay: that needs the host's approval, nobody can give it while you work, and the server blocks the final order or payment button\. When the order is ready to be placed, call finish with success=false and say so/,
+    );
+    assert.doesNotMatch(auto({ allowQuestions: false }), /explicitly approves/);
+    assert.equal(
+      KINDS.automation.userPrompt(newRun('automation', { purchaseApproval: approval, scriptName: 'mug-order' }), config),
+      'TASK:\nOrder one Blue Mug\n\nOUTPUT (exactly what to send back to the host):\nthe order number\n\nSave the script under the name: mug-order\n\n' +
+        `Purchase approval from the user (the host checks your question against it): "${approval}". ` +
+        'Still ask the host (reason confirm) on the checkout page before you place the order, and stay within this approval.',
+    );
+    assert.doesNotMatch(KINDS.automation.userPrompt(newRun('automation'), config), /Purchase approval/);
     assert.doesNotMatch(KINDS.finder.systemPrompt(newRun('finder'), config), /place an order/i);
   });
 
@@ -494,13 +605,18 @@ describe('sub-agent purchases need the host', () => {
     assert.equal(run.scrub('the personal account'), 'the personal account');
   });
 
-  test('server instructions: purchases are confirmed and enforced; without sub-agents the snapshot notes never point to agent_run', () => {
+  test('server instructions: purchases are always asked about; the host approves one its user approved in advance; without sub-agents the snapshot notes never point to agent_run', () => {
     const withAgents = serverInstructions(config);
-    assert.match(withAgents, /The agent always asks before placing an order or paying, and the server enforces it\. If your user already approved the purchase, pass confirm_purchases: false and put the limits in the TASK\./);
     assert.match(
       withAgents,
-      /answer it now, or ask your user and answer when they reply \(the run waits up to 30 min\); never approve a purchase or send a code on your own \(reply "No" when nobody approved it\)\./,
+      /\n- The agent always asks you before it places an order or pays, and the server enforces it\. When your user has explicitly approved the purchase \(in their request or earlier: "I approve", "go ahead and pay", "no need to ask me", or a maximum price\), pass their words as purchase_approval in agent_run or agent_automate, and approve the agent's matching confirm question yourself with agent_reply, without asking again\. A request to buy something \("order X and give me the order number"\) is not an approval: it says what to buy, not what it may cost\. Otherwise ask your user and answer with their decision\.\n/,
     );
+    assert.match(withAgents, /to your user unless they already approved exactly that \(for a purchase: a checkout that matches what they approved\);/);
+    assert.match(
+      withAgents,
+      /answer it now, or ask your user and answer when they reply \(the run waits up to 30 min\); never approve a purchase your user did not approve, and never send a code on your own \(reply "No" when nobody approved it\)\./,
+    );
+    assert.doesNotMatch(withAgents, /confirm_purchases|approve a purchase or send a code/);
     assert.doesNotMatch(withAgents, /Do not end your turn|approved up to \$30/);
     assert.match(withAgents, /pass its name to agent_run/);
     for (const env of [{}, { AGENT_LLM_URL: 'http://127.0.0.1:1/v1', TOOLSETS: 'core,snapshots' }]) {
@@ -510,7 +626,11 @@ describe('sub-agent purchases need the host', () => {
       assert.doesNotMatch(text, /agent_run|sub-agent/i, JSON.stringify(env));
     }
     const quiet = serverInstructions(loadConfig({ AGENT_LLM_URL: 'http://127.0.0.1:1/v1', AGENT_MAX_QUESTIONS: '0' }));
-    assert.match(quiet, /Sub-agents never place an order or pay unless you pass confirm_purchases: false to agent_run \(the server enforces it\)/);
+    assert.match(
+      quiet,
+      /- agent_run and agent_automate agents never place an order or pay on this server: they would have to ask you first, and questions are off \(the server blocks the final order or payment button\)\. Such a job stops when the order is ready and says so\.\n/,
+    );
+    assert.doesNotMatch(quiet, /confirm_purchases|purchase_approval/);
   });
 });
 

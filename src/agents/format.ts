@@ -18,15 +18,25 @@ export function durationText(ms: number): string {
 
 const KIND_NAME = { task: 'agentic', automation: 'automation', finder: 'finder' } as const;
 
-/** What the host must weigh before it answers, by the kind of question. */
+/** What the host must weigh before it answers, by the kind of question (confirm: confirmHint). */
 const REASON_HINT: Partial<Record<QuestionReason, string>> = {
-  confirm: 'This asks you to approve a step that cannot be undone: ask your user unless they already approved exactly this.',
   sign_in: 'Tell your user which site asks (see "asked on"); never send a password; do not relay a code for a site the task did not name.',
 };
 
-/** After a task agent's confirm question: how a purchase the user approves in advance skips it (agent_run's confirm_purchases). */
-const PURCHASE_HINT =
-  'The agent always asks before placing an order or paying, and the server enforces it; for a later job whose purchase your user already approved, pass confirm_purchases: false and put the limits in the TASK.';
+/**
+ * A confirm question of a task or automation agent (the purchase guard keeps the order button blocked
+ * until it is answered): the host approves it itself when it matches what the user approved in advance
+ * (purchase_approval), and asks its user otherwise.
+ */
+function confirmHint(run: AgentRun): string {
+  const approval = run.input.purchaseApproval;
+  const decide = approval
+    ? `Your user approved in advance (purchase_approval): ${JSON.stringify(approval)}. ` +
+      'Approve it yourself now with agent_reply, without asking your user, only if those words are your user\'s explicit approval ("I approve", "go ahead", a maximum price), not just their request to buy, ' +
+      'and this checkout matches them (item, quantity, total within the limit, address, payment method). Otherwise ask your user and answer with their decision.'
+    : 'Ask your user to approve it, then answer with agent_reply. If your user already approved exactly this earlier in your conversation, approve it yourself.';
+  return `This asks you to approve a step that cannot be undone. ${decide}`;
+}
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -48,8 +58,7 @@ function waitingResult(run: AgentRun, q: AgentQuestion, base: Record<string, unk
   const lines = [`Run ${run.id} is waiting for your answer (question ${q.id}, asked on ${q.origin ?? 'no web page'}):`, '', q.text];
   if (q.options.length) lines.push('', `Options: ${q.options.join(' | ')}`);
   const hint = [
-    REASON_HINT[q.reason],
-    q.reason === 'confirm' && run.kind === 'task' ? PURCHASE_HINT : '',
+    q.reason === 'confirm' ? confirmHint(run) : REASON_HINT[q.reason],
     q.secret ? 'Send only the code or secret itself as the answer, e.g. "482913", not a sentence.' : '',
   ]
     .filter(Boolean)
@@ -61,7 +70,7 @@ function waitingResult(run: AgentRun, q: AgentQuestion, base: Record<string, unk
     '',
     `The run is paused and keeps its browser. Answer with agent_reply ${inlineJson(replyArguments(run, q, '...'))}`,
     `Answer it now, or ask your user and answer when they reply (the run waits up to ${durationText(left)}, then continues without an answer; agent_cancel stops it). ` +
-      'Never approve a purchase or send a code on your own.',
+      'Never approve a purchase your user did not approve, and never send a code on your own.',
   );
   return {
     text: lines.join('\n'),
@@ -79,6 +88,8 @@ function waitingResult(run: AgentRun, q: AgentQuestion, base: Record<string, unk
         origin: q.origin,
         asked_at: q.askedAt,
         expires_at: q.expiresAt,
+        // what the user approved in advance, to check a purchase question against (null: nothing)
+        ...(q.reason === 'confirm' ? { purchase_approval: run.input.purchaseApproval ?? null } : {}),
       },
       reply_with: { tool: 'agent_reply', arguments: replyArguments(run, q, '<your answer>') },
     },

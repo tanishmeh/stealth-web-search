@@ -586,7 +586,13 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
 
   test('agents: a run waiting for an answer shows its question, the counter, and its snapshot in use', async () => {
     await openTab('agents');
-    const started = await srv.call('agent_run', { task: 'ASK-UI Order one Red Apple Phone from the fixture shop', output: 'the order number', snapshot: 'ui-shop', wait_seconds: 0 });
+    const started = await srv.call('agent_run', {
+      task: 'ASK-UI Order one Red Apple Phone from the fixture shop',
+      output: 'the order number',
+      snapshot: 'ui-shop',
+      purchase_approval: 'one Red Apple Phone, total up to $12, to the saved address',
+      wait_seconds: 0,
+    });
     assert.equal(started.isError, false, started.text);
     askRun = started.raw.structuredContent.run_id as string;
     const waiting = await srv.call('agent_wait', { run_id: askRun, wait_seconds: 60 });
@@ -600,6 +606,10 @@ describe('dashboard UI', { skip: CHROME ? false : 'no Chrome found (set CHROME_P
     assert.ok(block.includes('Yes, place it') && block.includes('agent_reply'), block);
     assert.match(await page.eval<string>(textOf(card())), /waiting for answer/);
     assert.ok((await page.eval<string>(textOf(card()))).includes('ui-shop'), 'the card names the snapshot the run started with');
+    assert.ok(
+      (await page.eval<string>(textOf(card()))).includes('Approved in advance: one Red Apple Phone, total up to $12, to the saved address'),
+      'the card shows what the user approved in advance',
+    );
     await page.waitFor('the tab counter', `/1 waiting/.test(document.getElementById('count-agents').textContent)`);
     assert.doesNotMatch(await text('count-agents'), /running|queued/);
     await page.waitFor('the footer', `/1 waiting/.test(document.getElementById('agents-foot').textContent)`);

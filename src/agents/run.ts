@@ -37,10 +37,11 @@ export interface AgentInput {
   /** Task and automation: the agent may pause and ask the host a question (default true; see questionsAllowed). */
   allowQuestions?: boolean;
   /**
-   * Task: the agent asks before it places an order or pays, and the final order or payment button is
-   * blocked until the host answered such a question (default true; false: the host approved purchases).
+   * Task and automation: what the user already approved for this job, in their words (purchase_approval).
+   * The agent still asks before it places an order or pays; the host checks the question against this
+   * and approves a matching checkout itself. Not a secret: logs and the dashboard show it.
    */
-  confirmPurchases?: boolean;
+  purchaseApproval?: string;
   /** Task: name of the snapshot (saved sign-in) the agent's browser starts with. Names only, never cookie data. */
   snapshot?: string;
   /** Refresh that snapshot from the agent's browser when the run completes successfully (default true). */
@@ -426,6 +427,7 @@ export class AgentRun {
       script: this.scriptName ? { name: this.scriptName, version: this.scriptVersion, lastTest: this.tests.at(-1)?.ok ?? null } : null,
       snapshot: this.snapshot ? { name: this.snapshot.name, version: this.snapshot.version } : null,
       snapshotSaved: this.snapshotSaved,
+      purchaseApproval: this.input.purchaseApproval ?? null,
       result: this.outcome
         ? summarize(this.scrub(this.outcome.answer ?? this.outcome.output ?? ''), { maxString: 400 })
         : null,
@@ -441,7 +443,7 @@ export interface KindSpec {
   /** Role name used in logs and the dashboard. */
   label: string;
   systemPrompt(run: AgentRun, config: Config): string;
-  userPrompt(run: AgentRun): string;
+  userPrompt(run: AgentRun, config: Config): string;
   /** Browser tools plus the kind's own tools (finish, note, …). */
   tools(run: AgentRun, env: RunEnv): ToolDefinition<any>[];
   /** Name of the tool that ends the run. */
@@ -449,7 +451,7 @@ export interface KindSpec {
   /** Work after the loop (e.g. verify the script); may set run.extra. */
   finalize?(run: AgentRun, env: RunEnv): Promise<void>;
   /** A check the browser tools run on the label of a control, and the page it is on, before they activate it (see ToolContext.purchaseGuard). */
-  purchaseGuard?(run: AgentRun, env: RunEnv): ((label: string, pageUrl: string) => string | null) | null;
+  purchaseGuard?(run: AgentRun, env: RunEnv): (label: string, pageUrl: string) => string | null;
 }
 
 export interface RunEnv {
@@ -527,13 +529,15 @@ export function looksLikeFinalPurchase(label: string): boolean {
 }
 
 /**
- * The purchase guard of a task run, defense in depth behind the prompt's rule to ask first: a click on
+ * The purchase guard of a task or automation run (the finder does research, the scripts an automation
+ * run saves and tests are not checked), defense in depth behind the prompt's rule to ask first: a click on
  * (or Enter/Space onto) a control that looks like the final step of an order or payment is refused until
- * the host answered a confirm question. An answer lifts it for the rest of the run: the agent is trusted
- * to respect a "No". Page scripts (browser_evaluate, offered with a snapshot only when allow_evaluate) are not checked.
+ * the host answered a confirm question asked on that page. It is always on: a purchase the user approved
+ * in advance (purchase_approval) is still asked about, and the host approves it. Any answer lifts it on
+ * that page: the agent is trusted to respect a "No". Page scripts (browser_evaluate, which a task run
+ * started with a snapshot gets only with allow_evaluate) are not checked.
  */
-export function purchaseGuardFor(run: AgentRun, env: RunEnv): ((label: string, pageUrl: string) => string | null) | null {
-  if (run.input.confirmPurchases === false) return null;
+export function purchaseGuardFor(run: AgentRun, env: RunEnv): (label: string, pageUrl: string) => string | null {
   return (label, pageUrl) => {
     if (!looksLikeFinalPurchase(label)) return null;
     const approved = run.questions.filter((q) => q.reason === 'confirm' && q.status === 'answered');
@@ -627,9 +631,9 @@ export async function runAgentLoop(run: AgentRun, spec: KindSpec, env: RunEnv): 
   let fnTools = tools.map(toFunctionTool);
   const fnToolsChars = JSON.stringify(fnTools).length;
   const canAsk = toolMap.has('ask_host');
-  const purchaseGuard = spec.purchaseGuard?.(run, env) ?? undefined;
+  const purchaseGuard = spec.purchaseGuard?.(run, env);
 
-  run.messages.push({ role: 'system', content: spec.systemPrompt(run, config) }, { role: 'user', content: spec.userPrompt(run) });
+  run.messages.push({ role: 'system', content: spec.systemPrompt(run, config) }, { role: 'user', content: spec.userPrompt(run, config) });
 
   let nudges = 0;
   let lastCalls: string[] = [];

@@ -2128,6 +2128,18 @@ function agentSnapshotLine(a) {
   return h('div', { class: `agent-snapshot${skipped ? ' warn' : ''}` }, icon('key'), h('span', { text: parts.join(' · ') }));
 }
 
+/** What the user approved in advance for an agent_run job (purchase_approval): the host checks its purchase questions against it. */
+function agentApprovalLine(a) {
+  const text = str(a.purchaseApproval).trim();
+  if (!text) return null;
+  return h(
+    'div',
+    { class: 'agent-approval', title: 'The agent still asks before it orders; the host approves a checkout that matches this' },
+    icon('check'),
+    h('span', { text: `Approved in advance: ${truncate(text, 300)}` }),
+  );
+}
+
 /** One question of a run in its details; secret answers never reach the page (the server masks them). */
 function agentQuestionItem(q) {
   const reason = QUESTION_REASON[q.reason]?.short ?? str(q.reason);
@@ -2306,6 +2318,7 @@ function buildAgentCard(a) {
       ? h('div', { class: 'agent-script' }, icon('script'), h('span', { text: `Script ${str(a.script.name)} v${a.script.version}${a.script.lastTest === true ? ' · last test passed' : a.script.lastTest === false ? ' · last test failed' : ''}` }))
       : null,
     agentSnapshotLine(a),
+    agentApprovalLine(a),
     a.result ? h('div', { class: 'agent-result', text: truncate(str(a.result), 500) }) : null,
     a.error ? h('div', { class: 'agent-error', text: str(a.error) }) : null,
     open ? agentDetailsBlock(a.id) : null,
@@ -2318,7 +2331,7 @@ function agentCardSig(a) {
   const q = isWaiting(a) ? a.question : null;
   return JSON.stringify([
     a.status, a.success, a.step, a.maxSteps, Boolean(a.thinking), a.result, a.error, a.script, a.task, a.client, a.kind,
-    q ? [q.id, q.text, q.options, q.reason, q.secret, q.origin, q.askedAt, q.expiresAt] : null, a.snapshot ?? null, a.snapshotSaved ?? null,
+    q ? [q.id, q.text, q.options, q.reason, q.secret, q.origin, q.askedAt, q.expiresAt] : null, a.snapshot ?? null, a.snapshotSaved ?? null, a.purchaseApproval ?? null,
     agentsUi.open.has(a.id), agentsUi.details.get(a.id)?.loadedAt ?? 0, agentsUi.details.get(a.id)?.loading ?? false, agentsUi.details.get(a.id)?.failed ?? false,
     ui.watch === a.browserId, Boolean(browser),
   ]);
