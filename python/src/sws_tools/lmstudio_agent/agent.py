@@ -8,6 +8,11 @@ server logs and on the live dashboard.
 With an `ask` callback the run is interactive: when the model ends its turn while a sub-agent run
 it started waits for an answer (a purchase the task did not approve), the waiting question is
 printed, the user is asked, and the reply goes back to the model as a user message.
+
+In both modes, a final answer given while a sub-agent run it started is still queued or running is
+not taken at once: the model is told to wait for that run with agent_wait (at most twice per run
+of the agent, with a step left and agent_wait among its tools), so it answers with the run's result
+or question.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import math
 import re
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -147,6 +152,17 @@ class WaitingQuestion:
 
 
 @dataclass
+class UnfinishedRun:
+    """A sub-agent run this agent started that was still queued or running (not waiting, not done)."""
+
+    run_id: str
+    status: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"runId": self.run_id, "status": self.status}
+
+
+@dataclass
 class UserTurnRecord:
     """The model ended its turn while sub-agent runs waited, and the user was asked."""
 
@@ -200,6 +216,8 @@ class AgentResult:
     started_at: str
     duration_ms: int
     messages: list[ChatMessage]
+    unfinished_runs: list[UnfinishedRun] = field(default_factory=list)
+    """Sub-agent runs this agent started that were still queued or running when it stopped."""
 
     def to_json(self) -> dict[str, Any]:
         """The transcript fields, with the keys of the TypeScript host (camelCase)."""
@@ -215,6 +233,7 @@ class AgentResult:
             "stepsDetail": [s.to_json() for s in self.steps_detail],
             "userTurns": [t.to_json() for t in self.user_turns],
             "waitingRuns": [w.to_json() for w in self.waiting_runs],
+            "unfinishedRuns": [u.to_json() for u in self.unfinished_runs],
             "usage": self.usage.to_json(),
             "tools": self.tools,
             "startedAt": self.started_at,
@@ -228,6 +247,9 @@ RUN_STARTERS = frozenset({"agent_run", "agent_automate", "agent_find"})
 RUN_FOLLOWERS = frozenset({"agent_reply", "agent_wait", "agent_status"})
 """Tools whose result reports a run's new status."""
 RUN_DONE = frozenset({"completed", "failed", "cancelled"})
+RUN_WORKING = frozenset({"queued", "running"})
+MAX_RUN_NUDGES = 2
+"""Final answers sent back per run of the agent because a sub-agent run it started was still working."""
 _CONTEXT_ERROR = re.compile(r"context|too long|exceed", re.I | re.A)
 _NEWLINES = re.compile(r"\n+")
 
@@ -279,6 +301,20 @@ def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def still_working_message(runs: list[UnfinishedRun]) -> str:
+    """What the model is told when it answers while sub-agent runs it started are still working."""
+    calls = [f'{{"run_id": "{r.run_id}"}}' for r in runs]
+    if len(runs) == 1:
+        return (
+            f"Run {runs[0].run_id} you started is still working. Call agent_wait with {calls[0]} and wait for its "
+            "result or its question before you answer."
+        )
+    return (
+        f"Runs {', '.join(r.run_id for r in runs)} you started are still working. Call agent_wait for each of them "
+        f"({', '.join(calls)}) and wait for its result or its question before you answer."
+    )
+
+
 def _add(total: Any, value: Any) -> Any:
     # `total += u?.x ?? 0`: only numbers add up
     return total + value if isinstance(value, (int, float)) and not isinstance(value, bool) else total
@@ -301,6 +337,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
     usage = Usage()
     user_turns: list[UserTurnRecord] = []
     still_waiting: list[WaitingQuestion] = []
+    still_working: list[UnfinishedRun] = []
     started_runs: dict[str, str] = {}
     """Sub-agent runs this agent started, with their last known status."""
     tool_names: list[str] = []
@@ -319,6 +356,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
             steps_detail=steps_detail,
             user_turns=user_turns,
             waiting_runs=still_waiting,
+            unfinished_runs=still_working,
             usage=usage,
             tools=tool_names,
             started_at=iso_time(started),
@@ -408,6 +446,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
             out.line(f"{out.style('bold', 'Task:')} {options.task}")
 
             nudges = 0
+            run_nudges = 0
             last_completion: Completion | None = None
             encoder = BodyEncoder()
 
@@ -542,10 +581,12 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                 if name in RUN_STARTERS or (name in RUN_FOLLOWERS and run_id in started_runs):
                     started_runs[run_id] = status
 
-            async def waiting_questions() -> list[WaitingQuestion]:
-                """The questions that sub-agent runs this agent started are waiting on (agent_status on each
-                run not yet done). Best effort: a lost MCP connection does not replace the reason the agent stops."""
+            async def check_runs() -> tuple[list[WaitingQuestion], list[UnfinishedRun]]:
+                """The questions that sub-agent runs this agent started are waiting on, and the runs still queued
+                or running (agent_status on each run not yet done). Best effort: a lost MCP connection does not
+                replace the reason the agent stops, and a run whose status could not be read is in neither list."""
                 waiting: list[WaitingQuestion] = []
+                working: list[UnfinishedRun] = []
                 for run_id, status in list(started_runs.items()):
                     if status in RUN_DONE:
                         continue
@@ -559,6 +600,9 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                         continue
                     assert isinstance(s, dict)
                     started_runs[run_id] = new_status
+                    if new_status in RUN_WORKING:
+                        working.append(UnfinishedRun(run_id=run_id, status=new_status))
+                        continue
                     q = s.get("question")
                     question_id = q.get("id") if isinstance(q, dict) else None
                     if new_status != "waiting" or not isinstance(question_id, str):
@@ -574,7 +618,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                             expires_at=_str_or_none(q.get("expires_at")),
                         )
                     )
-                return waiting
+                return waiting, working
 
             def report_waiting(waiting: list[WaitingQuestion]) -> None:
                 """Tell the user which runs still wait: unanswered, each goes on without the step it asked about."""
@@ -600,10 +644,25 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                         )
                     )
 
+            def report_working(working: list[UnfinishedRun]) -> None:
+                """Tell the user which runs are still working: the answer does not include their results."""
+                nonlocal still_working
+                still_working = working
+                for w in working:
+                    out.line(
+                        out.style(
+                            "yellow",
+                            f"Run {w.run_id} is still {w.status}, so this answer does not include its result. It goes "
+                            "on in the server, and the dashboard shows its result when it ends.",
+                        )
+                    )
+
             async def stop_without(stop_reason: StopReason, answer: str | None, error: str) -> AgentResult:
-                """Stop without a final answer, saying which sub-agent runs this agent started still wait."""
+                """Stop without a final answer, saying which sub-agent runs this agent started still wait or work."""
                 if started_runs:
-                    report_waiting(await waiting_questions())
+                    waiting, working = await check_runs()
+                    report_waiting(waiting)
+                    report_working(working)
                 return finalize(result(stop_reason, answer, error))
 
             step = 1
@@ -652,7 +711,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                             "--toolsets core.",
                         )
                     messages.append({"role": "assistant", "content": content})
-                    waiting = await waiting_questions() if started_runs else []
+                    waiting, working = await check_runs() if started_runs else ([], [])
 
                     def show(text: str) -> None:
                         if options.quiet:
@@ -687,6 +746,21 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                             step += 1
                             continue
                         asked = True
+                    elif working and "agent_wait" in known and run_nudges < MAX_RUN_NUDGES and step < max_steps:
+                        # an answer given while a run it started still works would lack that run's result or question
+                        # (only when the model can wait for it: --tools/--toolsets may leave agent_wait out)
+                        run_nudges += 1
+                        for unfinished in working:
+                            out.line(
+                                out.style(
+                                    "yellow",
+                                    f"  run {unfinished.run_id} is still {unfinished.status}; "
+                                    "asking the model to wait for it",
+                                )
+                            )
+                        messages.append({"role": "user", "content": still_working_message(working)})
+                        step += 1
+                        continue
                     out.line("")
                     summary = f"{len(steps_detail)} steps, {len(tool_calls)} tool calls, {seconds(_elapsed_ms(started_clock))}"
                     if asked:
@@ -705,6 +779,7 @@ async def run_agent(options: AgentOptions) -> AgentResult:
                             )
                         )
                     report_waiting(waiting)
+                    report_working(working)
                     return finalize(result("final_answer", content, None))
 
                 if js_trim(completion.content):

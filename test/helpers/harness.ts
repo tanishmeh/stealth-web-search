@@ -37,8 +37,13 @@ async function freePort(): Promise<number> {
   });
 }
 
-export async function connectClient(mcpUrl: string, name = 'integration-test'): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
-  const client = new Client({ name, version: '1.0.0' });
+/** `clientOptions` go to the SDK Client, e.g. `{ versionNegotiation: { mode: 'auto' } }` for the stateless 2026-07-28 protocol. */
+export async function connectClient(
+  mcpUrl: string,
+  name = 'integration-test',
+  clientOptions?: Record<string, unknown>,
+): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
+  const client = new Client({ name, version: '1.0.0' }, clientOptions as any);
   const headers: Record<string, string> = {};
   if (process.env.AUTH_TOKEN) headers.Authorization = `Bearer ${process.env.AUTH_TOKEN}`;
   const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), { requestInit: { headers } });

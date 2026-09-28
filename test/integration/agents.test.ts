@@ -881,6 +881,90 @@ describe('sub-agent questions (scripted model)', { skip: SKIP }, () => {
     assert.equal(done.raw.structuredContent.status, 'completed', done.text);
   });
 
+  test("two sessions of the same client (two runs of one CLI) do not take each other's waiting runs as their own", async () => {
+    const ask = (question: string, output: string) => (req: FakeRequest) => (req.step === 1 ? call('ask_host', { question, reason: 'choose' }) : call('finish', { output }));
+    policies.set('MARKER-SESSION-A', ask('Which colour for session A?', 'A done'));
+    policies.set('MARKER-SESSION-B', ask('Which colour for session B?', 'B done'));
+    policies.set('MARKER-SESSION-C', () => call('finish', { output: 'C done' }));
+    const a = await srv.call('agent_run', { task: 'MARKER-SESSION-A: pick a colour', output: 'the colour' });
+    const as = a.raw.structuredContent;
+    assert.equal(as.status, 'waiting', a.text);
+    // the same client name and version as srv.client, in a session of its own
+    const { client } = await connectClient(srv.mcpUrl);
+    try {
+      const b: any = await client.callTool({ name: 'agent_run', arguments: { task: 'MARKER-SESSION-B: pick a colour', output: 'the colour' } });
+      const bs = b.structuredContent;
+      assert.equal(bs.status, 'waiting', b.content[0].text);
+      assert.doesNotMatch(b.content[0].text, /Also waiting for your answer/);
+      assert.equal(bs.also_waiting, undefined);
+      // the session's own waiting run is still listed with its other results
+      const c: any = await client.callTool({ name: 'agent_run', arguments: { task: 'MARKER-SESSION-C: be quick', output: 'anything', wait_seconds: 30 } });
+      assert.equal(c.structuredContent.status, 'completed', c.content[0].text);
+      assert.match(c.content[0].text, new RegExp(`\\n\\nAlso waiting for your answer: run ${bs.run_id} \\(question ${bs.question.id}: Which colour for session B\\?\\)$`));
+      assert.deepEqual(c.structuredContent.also_waiting, [{ run_id: bs.run_id, question_id: bs.question.id, question: 'Which colour for session B?' }]);
+      const listing: any = await client.callTool({ name: 'agent_status', arguments: {} });
+      const text = String(listing.content[0].text);
+      assert.match(text, new RegExp(`asks ${as.question.id}: Which colour for session A\\? \\(started by another session of integration-test 1\\.0\\.0: theirs to answer\\)`));
+      assert.match(text, new RegExp(`asks ${bs.question.id}: Which colour for session B\\?(\\n|$)`));
+      assert.match(text, /Answer a waiting run you started with agent_reply/);
+      // and the first session does not see the second one's run as its own
+      const first = await srv.call('agent_status', { run_id: as.run_id });
+      assert.doesNotMatch(first.text, new RegExp(bs.run_id));
+      assert.ok(!(first.raw.structuredContent.also_waiting ?? []).some((w: any) => w.run_id === bs.run_id));
+      const firstListing = await srv.call('agent_status', {});
+      assert.match(firstListing.text, new RegExp(`asks ${bs.question.id}: Which colour for session B\\? \\(started by another session of integration-test 1\\.0\\.0: theirs to answer\\)`));
+      assert.match(firstListing.text, new RegExp(`asks ${as.question.id}: Which colour for session A\\?(\\n|$)`));
+
+      const doneB: any = await client.callTool({ name: 'agent_reply', arguments: { run_id: bs.run_id, question_id: bs.question.id, answer: 'blue' } });
+      assert.equal(doneB.structuredContent.status, 'completed', doneB.content[0].text);
+      assert.equal(doneB.structuredContent.also_waiting, undefined, "session A's waiting run is not listed");
+    } finally {
+      await client.close();
+    }
+    const doneA = await srv.call('agent_reply', { run_id: as.run_id, question_id: as.question.id, answer: 'red' });
+    assert.equal(doneA.raw.structuredContent.status, 'completed', doneA.text);
+  });
+
+  test('a caller without a session (2026-07-28 protocol) falls back to its client label, both ways', async () => {
+    const ask = (question: string, output: string) => (req: FakeRequest) => (req.step === 1 ? call('ask_host', { question, reason: 'choose' }) : call('finish', { output }));
+    policies.set('MARKER-STATELESS-A', ask('Which colour for the session run?', 'A done'));
+    policies.set('MARKER-STATELESS-S', ask('Which colour for the stateless run?', 'S done'));
+    const a = await srv.call('agent_run', { task: 'MARKER-STATELESS-A: pick a colour', output: 'the colour' });
+    const as = a.raw.structuredContent;
+    assert.equal(as.status, 'waiting', a.text);
+    // the same client name and version as srv.client, without a session
+    const { client } = await connectClient(srv.mcpUrl, 'integration-test', { versionNegotiation: { mode: 'auto' } });
+    try {
+      assert.equal((client as any).getNegotiatedProtocolVersion?.(), '2026-07-28');
+      const s: any = await client.callTool({ name: 'agent_run', arguments: { task: 'MARKER-STATELESS-S: pick a colour', output: 'the colour' } });
+      const ss = s.structuredContent;
+      assert.equal(ss.status, 'waiting', s.content[0].text);
+      // no session to compare: the session run of its label is listed as waiting for it
+      assert.match(s.content[0].text, new RegExp(`\\n\\nAlso waiting for your answer: run ${as.run_id} \\(question ${as.question.id}: Which colour for the session run\\?\\)$`));
+      assert.deepEqual(ss.also_waiting, [{ run_id: as.run_id, question_id: as.question.id, question: 'Which colour for the session run?' }]);
+      // a run started without a session belongs to its label: the session client lists it as its own too
+      const mine = await srv.call('agent_status', { run_id: as.run_id });
+      assert.deepEqual(mine.raw.structuredContent.also_waiting, [{ run_id: ss.run_id, question_id: ss.question.id, question: 'Which colour for the stateless run?' }]);
+      const listing = await srv.call('agent_status', {});
+      assert.match(listing.text, new RegExp(`asks ${ss.question.id}: Which colour for the stateless run\\?(\\n|$)`));
+      // a session of another client does not
+      const { client: other } = await connectClient(srv.mcpUrl, 'other-client');
+      try {
+        const theirs: any = await other.callTool({ name: 'agent_status', arguments: {} });
+        assert.match(theirs.content[0].text, new RegExp(`asks ${ss.question.id}: Which colour for the stateless run\\? \\(started by integration-test 1\\.0\\.0: theirs to answer\\)`));
+      } finally {
+        await other.close();
+      }
+      const doneS: any = await client.callTool({ name: 'agent_reply', arguments: { run_id: ss.run_id, question_id: ss.question.id, answer: 'green' } });
+      assert.equal(doneS.structuredContent.status, 'completed', doneS.content[0].text);
+    } finally {
+      await client.close();
+    }
+    const doneA = await srv.call('agent_reply', { run_id: as.run_id, question_id: as.question.id, answer: 'red' });
+    assert.equal(doneA.raw.structuredContent.status, 'completed', doneA.text);
+    assert.equal(doneA.raw.structuredContent.also_waiting, undefined);
+  });
+
   test('cancelling a waiting run closes its browser and writes its transcript; it takes no answer after that', async () => {
     const marker = 'MARKER-ASK-CANCEL';
     policies.set(marker, (req) =>

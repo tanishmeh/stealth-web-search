@@ -110,7 +110,7 @@ On macOS, programs on the host itself may be blocked from LAN addresses by the L
 
 **The chat model ends its turn while a run waits** (common with small models in LM Studio, and expected when it asks you). The run keeps waiting until `AGENT_REPLY_TIMEOUT_MS`. Tell the model in the chat what to answer, for example *"Answer the waiting question: yes"*, and it calls `agent_reply`.
 
-**`Also waiting for your answer` does not list a waiting run.** It lists only the runs your MCP client started. `agent_status` without a `run_id` lists every waiting run, and marks the ones another client started `(started by …: theirs to answer)`.
+**`Also waiting for your answer` does not list a waiting run.** It lists only the runs your MCP session started (by client name and version for a client without a session), so not those of another client, of another session of the same client, or of a session you had before a reconnect. `agent_status` without a `run_id` lists every waiting run, and marks the ones someone else started `(started by …: theirs to answer)`. You can still answer a run by its `run_id`.
 
 **The result says a site needs a sign-in.** Sub-agent browsers start signed out, and agents never type a password the TASK did not give them. Sign in once in your own browser, save it with `snapshot_save`, and pass `snapshot` to `agent_run`. See [Snapshots](SNAPSHOTS.md).
 

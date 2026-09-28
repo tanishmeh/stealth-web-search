@@ -64,12 +64,13 @@ export class AgentManager {
     });
   }
 
-  start(kind: AgentKind, input: AgentInput, client: string | null): AgentRun {
+  /** `client` and `sessionId`: the MCP client that starts the run (its label, and its session when it has one). */
+  start(kind: AgentKind, input: AgentInput, client: string | null, sessionId: string | null = null): AgentRun {
     if (this.shuttingDown) throw new AgentBusyError('The server is shutting down; no new agent runs are accepted.');
     if (this.queue.length >= MAX_QUEUED) {
       throw new AgentBusyError(`Too many agent runs are waiting (${this.queue.length}). Wait for some to finish (agent_status) or cancel them (agent_cancel).`);
     }
-    const run = new AgentRun(`r${randomUUID().replace(/-/g, '').slice(0, 7)}`, kind, input, client);
+    const run = new AgentRun(`r${randomUUID().replace(/-/g, '').slice(0, 7)}`, kind, input, client, sessionId);
     this.runs.set(run.id, run);
     this.prune();
     run.onUpdate(() => this.deps.hub.publishAgent(run.summary()));
@@ -78,6 +79,7 @@ export class AgentManager {
         runId: run.id,
         kind,
         client,
+        sessionId: sessionId ?? undefined,
         input: summarize(input, { maxString: 1_000 }),
         queuePosition: this.holders.size >= this.deps.config.agent.maxConcurrent ? this.queue.length + 1 : 0,
       },

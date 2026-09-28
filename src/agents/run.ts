@@ -147,7 +147,13 @@ export class AgentRun {
   readonly kind: AgentKind;
   readonly input: AgentInput;
   readonly createdAt = new Date().toISOString();
+  /** Label (name and version) of the MCP client that started the run. */
   readonly client: string | null;
+  /**
+   * MCP session that started the run (null for a stateless call): it tells two sessions of the same
+   * client apart. Only startedBy() reads it; it is not in the run's summary, result or transcript.
+   */
+  private readonly sessionId: string | null;
   readonly abort = new AbortController();
   status: RunStatus = 'queued';
   startedAt: string | null = null;
@@ -213,12 +219,22 @@ export class AgentRun {
   private settledResolve!: () => void;
   readonly settled: Promise<void>;
 
-  constructor(id: string, kind: AgentKind, input: AgentInput, client: string | null) {
+  constructor(id: string, kind: AgentKind, input: AgentInput, client: string | null, sessionId: string | null = null) {
     this.id = id;
     this.kind = kind;
     this.input = input;
     this.client = client;
+    this.sessionId = sessionId;
     this.settled = new Promise((r) => (this.settledResolve = r));
+  }
+
+  /**
+   * Whether `caller` started this run: the same MCP session when both have one, otherwise (a
+   * stateless call on either side) the same client label.
+   */
+  startedBy(caller: { id: string | null; client: string | null }): boolean {
+    if (this.sessionId !== null && caller.id !== null) return this.sessionId === caller.id;
+    return this.client === caller.client;
   }
 
   get done(): boolean {

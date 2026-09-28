@@ -7,7 +7,7 @@ import { TokenMeter, compactTranscript, parseToolArguments, transcriptChars } fr
 import { runResult } from '../../src/agents/format.ts';
 import { KINDS, isSearchResultsPage, quoteFound, quoteMatch, siteOf } from '../../src/agents/kinds.ts';
 import { redactParams, serverInstructions } from '../../src/mcp/server.ts';
-import { agentAutomate, agentReply, agentRun } from '../../src/tools/agents.ts';
+import { agentAutomate, agentReply, agentRun, agentStatus } from '../../src/tools/agents.ts';
 import { evaluationSource, isExpression } from '../../src/scripts/api.ts';
 import { ChatClient, LlmError, splitThinking, type ChatMessage } from '../../src/agents/llm.ts';
 import { AgentRun, looksLikeFinalPurchase, purchaseGuardFor, questionRefusal, questionsAllowed, type AgentInput, type AgentKind } from '../../src/agents/run.ts';
@@ -384,6 +384,89 @@ describe('sub-agent questions to the host', () => {
     assert.equal(value.a[0], 'x 1234', 'the input is not modified');
     const date = new Date(0);
     assert.equal(scrubDeep(date, scrub), date, 'class instances are left alone');
+  });
+});
+
+describe('which waiting runs are the caller\'s to answer', () => {
+  const input: AgentInput = { task: 'Pick a colour', output: 'the colour', outputFormat: 'text', maxSteps: 20 };
+  const waitingRun = (id: string, client: string | null, sessionId: string | null, question: string) => {
+    const run = new AgentRun(id, 'task', input, client, sessionId);
+    run.status = 'running';
+    run.startedAt = new Date().toISOString();
+    run.step = 1;
+    void run.ask({ text: question, options: [], reason: 'choose', secret: false, pageUrl: null }, 60_000);
+    return run;
+  };
+  /** The tool context of a caller, with a manager that holds `runs` (most recent first). */
+  const ctxOf = (runs: AgentRun[], session: { id: string | null; client: string | null }) =>
+    ({
+      session,
+      agents: {
+        get: (id: string) => runs.find((r) => r.id === id),
+        list: () => runs,
+        waitingRuns: () => runs.filter((r) => r.isWaiting),
+        activeCount: 0,
+        queuedCount: 0,
+        waitingCount: runs.filter((r) => r.isWaiting).length,
+      },
+    }) as any;
+
+  test('startedBy: the same MCP session when the run and the caller have one, otherwise the same client label', () => {
+    const run = new AgentRun('r1111111', 'task', input, 'cli 1.0.0', 'session-a');
+    assert.equal(run.startedBy({ id: 'session-a', client: 'cli 1.0.0' }), true);
+    assert.equal(run.startedBy({ id: 'session-b', client: 'cli 1.0.0' }), false, 'another session of the same client');
+    assert.equal(run.startedBy({ id: 'session-b', client: 'other 2.0.0' }), false);
+    assert.equal(run.startedBy({ id: null, client: 'cli 1.0.0' }), true, 'a stateless caller: by its label');
+    assert.equal(run.startedBy({ id: null, client: 'other 2.0.0' }), false);
+    const stateless = new AgentRun('r2222222', 'task', input, 'cli 1.0.0');
+    assert.equal(stateless.startedBy({ id: 'session-a', client: 'cli 1.0.0' }), true, 'a run a stateless call started: by its label');
+    assert.equal(stateless.startedBy({ id: 'session-a', client: 'other 2.0.0' }), false);
+    assert.equal(stateless.startedBy({ id: null, client: 'cli 1.0.0' }), true);
+    assert.equal(new AgentRun('r3333333', 'task', input, null).startedBy({ id: null, client: null }), true, 'no label on either side, as before');
+    // the session id stays on the server: not in the run's summary (dashboard, agent_status list, transcript)
+    assert.ok(!JSON.stringify(run.summary()).includes('session-a'));
+  });
+
+  test('"Also waiting" and the agent_status list tell two sessions of the same client apart', async () => {
+    const mine = waitingRun('raaaaaa1', 'cli 1.0.0', 'session-a', 'Which colour for A?');
+    const sameClient = waitingRun('rbbbbbb2', 'cli 1.0.0', 'session-b', 'Which colour for B?');
+    const otherClient = waitingRun('rcccccc3', 'other 2.0.0', 'session-c', 'Which colour for C?');
+    const stateless = waitingRun('rdddddd4', 'cli 1.0.0', null, 'Which colour for D?');
+    const runs = [stateless, otherClient, sameClient, mine];
+    try {
+      // session A looks at its own run: its other runs are the stateless one of its label, never session B's
+      const a = await agentStatus.handler({ run_id: mine.id }, ctxOf(runs, { id: 'session-a', client: 'cli 1.0.0' }));
+      const aText = String((a.content[0] as any).text);
+      assert.match(aText, /\n\nAlso waiting for your answer: run rdddddd4 \(question q[0-9a-f]{6}: Which colour for D\?\)$/);
+      assert.doesNotMatch(aText, /rbbbbbb2|rcccccc3/);
+      assert.deepEqual((a.structuredContent as any).also_waiting.map((w: any) => w.run_id), ['rdddddd4']);
+
+      // session B sees its run as its own, and session A's as another session's
+      const list = await agentStatus.handler({}, ctxOf(runs, { id: 'session-b', client: 'cli 1.0.0' }));
+      const lines = String((list.content[0] as any).text).split('\n');
+      const line = (id: string) => lines.find((l) => l.startsWith(id)) ?? '';
+      assert.match(line('raaaaaa1'), /asks q[0-9a-f]{6}: Which colour for A\? \(started by another session of cli 1\.0\.0: theirs to answer\)$/);
+      assert.match(line('rbbbbbb2'), /asks q[0-9a-f]{6}: Which colour for B\?$/);
+      assert.match(line('rcccccc3'), /asks q[0-9a-f]{6}: Which colour for C\? \(started by other 2\.0\.0: theirs to answer\)$/);
+      assert.match(line('rdddddd4'), /asks q[0-9a-f]{6}: Which colour for D\?$/, 'a run started without a session belongs to its label');
+      assert.match(lines.at(-1)!, /^Answer a waiting run you started with agent_reply/);
+
+      // a stateless caller (no session id) falls back to its label: every run of its client label is its own
+      const s = await agentStatus.handler({ run_id: otherClient.id }, ctxOf(runs, { id: null, client: 'cli 1.0.0' }));
+      assert.deepEqual((s.structuredContent as any).also_waiting.map((w: any) => w.run_id), ['rdddddd4', 'rbbbbbb2', 'raaaaaa1']);
+
+      // a new session of the other client has no waiting run of its own: every run is theirs, and no reply hint
+      const other = await agentStatus.handler({}, ctxOf(runs, { id: 'session-f', client: 'other 2.0.0' }));
+      const otherText = String((other.content[0] as any).text);
+      assert.doesNotMatch(otherText, /Answer a waiting run you started/);
+      assert.match(otherText, /Which colour for C\? \(started by another session of other 2\.0\.0: theirs to answer\)/);
+      assert.match(otherText, /Which colour for D\? \(started by cli 1\.0\.0: theirs to answer\)/);
+      const none = await agentStatus.handler({ run_id: otherClient.id }, ctxOf(runs, { id: 'session-f', client: 'other 2.0.0' }));
+      assert.doesNotMatch(String((none.content[0] as any).text), /Also waiting/);
+      assert.equal((none.structuredContent as any).also_waiting, undefined);
+    } finally {
+      for (const run of runs) run.closeQuestion('cancelled');
+    }
   });
 });
 

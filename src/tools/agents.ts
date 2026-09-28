@@ -68,13 +68,14 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * Other runs of this client paused on a question, so no question goes unseen while the host looks at
- * one run. Runs other clients started are theirs to answer.
+ * Other runs the caller started that are paused on a question, so no question goes unseen while the
+ * host looks at one run. Runs other clients, or other sessions of the same client, started are theirs
+ * to answer (AgentRun.startedBy).
  */
 function alsoWaiting(ctx: ToolContext, except: AgentRun | null): { lines: string[]; structured: Array<Record<string, unknown>> } {
   const others = manager(ctx)
     .waitingRuns()
-    .filter((r) => r !== except && r.question && r.client === ctx.session.client);
+    .filter((r) => r !== except && r.question && r.startedBy(ctx.session));
   return {
     lines: others.map((r) => `Also waiting for your answer: run ${r.id} (question ${r.question!.id}: ${clip(r.question!.text, 80)})`),
     structured: others.map((r) => ({ run_id: r.id, question_id: r.question!.id, question: clip(r.question!.text, 200) })),
@@ -130,7 +131,7 @@ async function snapshotFor(ctx: ToolContext, input: string): Promise<string> {
 
 function start(ctx: ToolContext, kind: AgentKind, input: AgentInput): AgentRun {
   try {
-    return manager(ctx).start(kind, input, ctx.session.client);
+    return manager(ctx).start(kind, input, ctx.session.client, ctx.session.id);
   } catch (err) {
     if (err instanceof AgentBusyError) throw new ToolError(err.message);
     throw err;
@@ -330,10 +331,11 @@ export const agentStatus = defineTool({
     // waiting runs are always listed: they need an answer
     const runs = [...all.slice(0, 20), ...all.slice(20).filter((r) => r.isWaiting)];
     if (!runs.length) return { content: [{ type: 'text', text: 'No agent runs yet.' }] };
-    const mine = (r: AgentRun) => r.client === ctx.session.client;
+    const mine = (r: AgentRun) => r.startedBy(ctx.session);
+    const starterOf = (r: AgentRun) => (r.client === null ? 'another client' : r.client === ctx.session.client ? `another session of ${r.client}` : r.client);
     const lines = runs.map((r) => {
       const state = r.done ? (r.outcome?.success ? 'success' : 'no result') : `step ${r.stepsUsed}/${r.input.maxSteps}`;
-      const owner = mine(r) ? '' : ` (started by ${r.client ?? 'another client'}: theirs to answer)`;
+      const owner = mine(r) ? '' : ` (started by ${starterOf(r)}: theirs to answer)`;
       const asks = r.isWaiting && r.question ? `  asks ${r.question.id}: ${clip(r.question.text, 80)}${owner}` : '';
       return `${r.id}  ${r.kind.padEnd(10)} ${r.status.padEnd(9)} ${state}  ${seconds(r.durationMs)}  ${r.input.task.replace(/\s+/g, ' ').slice(0, 80)}${asks}`;
     });

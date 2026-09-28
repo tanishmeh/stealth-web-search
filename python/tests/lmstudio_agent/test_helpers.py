@@ -10,6 +10,7 @@ import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
 from sws_tools.lmstudio_agent._js import js_json, js_len
+from sws_tools.lmstudio_agent.agent import UnfinishedRun, still_working_message
 from sws_tools.lmstudio_agent.cli import UsageError, parse_cli
 from sws_tools.lmstudio_agent.conversation import (
     ChatMessage,
@@ -298,3 +299,14 @@ def test_compact_history_shortens_old_results_keeps_one_image_and_fits_a_context
 
     total = sum(chars(m) + (js_len(js_json(m["tool_calls"])) if "tool_calls" in m else 0) for m in messages)
     assert total <= 25_000, f"conversation fits the budget ({total} chars)"
+
+
+def test_the_still_working_message_names_each_run_and_its_agent_wait_call() -> None:
+    assert still_working_message([UnfinishedRun("r1a2b3c4", "running")]) == (
+        'Run r1a2b3c4 you started is still working. Call agent_wait with {"run_id": "r1a2b3c4"} and wait for its '
+        "result or its question before you answer."
+    )
+    assert still_working_message([UnfinishedRun("r1a2b3c4", "running"), UnfinishedRun("r5e6f7a8", "queued")]) == (
+        'Runs r1a2b3c4, r5e6f7a8 you started are still working. Call agent_wait for each of them ({"run_id": '
+        '"r1a2b3c4"}, {"run_id": "r5e6f7a8"}) and wait for its result or its question before you answer.'
+    )
