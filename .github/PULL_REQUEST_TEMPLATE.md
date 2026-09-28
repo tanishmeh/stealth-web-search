@@ -9,6 +9,7 @@
 - [ ] `npm run typecheck`
 - [ ] `npm test`
 - [ ] `npm run test:integration`
+- [ ] `npm run test:py` and `npm run lint:py` (the Python tools in `python/` and `scripts/*.py`)
 - [ ] Docker suite: `docker compose -f compose.yaml -f compose.test.yaml up -d --build`, then `npm run test:docker`
 - [ ] `npm run lmstudio:e2e` (LM Studio changes)
 - [ ] `npm run agents:e2e` (sub-agent or script changes)
@@ -19,7 +20,7 @@
 - [ ] README.md or `docs/`
 - [ ] `.env.example` and `docs/CONFIGURATION.md` (new or changed environment variables)
 - [ ] `config/models.example.json` (new or changed models file fields)
-- [ ] `docs/TOOLS.md` regenerated with `npm run docs:tools` (tool definitions changed)
+- [ ] `docs/TOOLS.md` and `docs/tools.json` regenerated with `npm run docs:tools` (tool definitions changed)
 - [ ] `CHANGELOG.md` (changes users will notice)
 - [ ] No docs change needed
 

@@ -18,3 +18,10 @@ coverage
 config
 site
 _site
+# the image has no Python: the python/ tools and any local caches stay out of the build context
+python
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache

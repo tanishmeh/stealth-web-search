@@ -26,19 +26,22 @@
     "test": "node --test --test-reporter=spec test/unit/*.test.ts",
     "test:integration": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/integration/*.test.ts",
     "test:ui": "node --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/ui/*.test.ts",
-    "obscura:download": "node scripts/download-obscura.mjs",
+    "obscura:download": "node scripts/py.mjs script scripts/download_obscura.py",
     "stdio-bridge": "node dist/stdio-bridge.js",
-    "lmstudio:setup": "node scripts/setup-lmstudio.mjs",
-    "lmstudio:agent": "node scripts/lmstudio-agent.ts",
-    "lmstudio:e2e": "node scripts/lmstudio-e2e.ts",
-    "agents:e2e": "node scripts/agents-e2e.ts",
+    "lmstudio:setup": "node scripts/py.mjs script scripts/setup_lmstudio.py",
+    "lmstudio:agent": "node scripts/py.mjs run sws-lmstudio-agent",
+    "lmstudio:e2e": "node scripts/py.mjs run sws-lmstudio-e2e",
+    "agents:e2e": "node scripts/py.mjs run sws-agents-e2e",
     "test:docker": "node --env-file=test/docker.env --test --test-reporter=spec --test-concurrency=1 --test-timeout=600000 test/integration/*.test.ts",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
     "docs:tools": "node scripts/generate-tool-docs.ts",
-    "site:build": "node scripts/build-site.ts",
-    "site:serve": "node scripts/build-site.ts --serve"
+    "site:build": "node scripts/py.mjs run sws-site",
+    "site:serve": "node scripts/py.mjs run sws-site --serve",
+    "py:setup": "node scripts/py.mjs setup",
+    "test:py": "node scripts/py.mjs pytest",
+    "lint:py": "node scripts/py.mjs lint"
   },
   "keywords": [
     "mcp",
@@ -73,8 +76,6 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^24.13.5",
-    "highlight.js": "^11.12.0",
-    "marked": "^18.0.14",
     "typescript": "^7.0.2"
   }
 }

@@ -4,10 +4,15 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const SCRIPT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../scripts/setup-lmstudio.mjs');
-const temp = mkdtempSync(path.join(tmpdir(), 'sbm-setup-test-'));
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const SCRIPT = path.join(ROOT, 'scripts', 'setup_lmstudio.py');
+// the script runs the way `npm run lmstudio:setup` runs it: through the launcher, with $PYTHON or the first Python 3.9+
+const LAUNCHER = path.join(ROOT, 'scripts', 'py.mjs');
+const py: any = await import(pathToFileURL(LAUNCHER).href);
+const SKIP = !py.findInterpreter([3, 9]) && !process.env.CI && 'needs Python 3.9 or newer (set PYTHON to choose one)';
+const temp = SKIP ? '' : mkdtempSync(path.join(tmpdir(), 'sbm-setup-test-'));
 let counter = 0;
 
 /** A fresh fake home directory (never the real ~/.lmstudio). */
@@ -19,7 +24,7 @@ function home(): string {
 
 function run(args: string[], env: Record<string, string> = {}) {
   const { LMSTUDIO_HOME: _ignored, ...base } = process.env;
-  const res = spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: { ...base, ...env } });
+  const res = spawnSync(process.execPath, [LAUNCHER, 'script', SCRIPT, ...args], { encoding: 'utf8', env: { ...base, ...env } });
   return { code: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
@@ -31,7 +36,7 @@ const EXISTING = {
   otherTopLevel: 1,
 };
 
-describe('setup-lmstudio.mjs', () => {
+describe('setup_lmstudio.py', { skip: SKIP }, () => {
   after(() => rmSync(temp, { recursive: true, force: true }));
 
   test('creates mcp.json with the default entry', () => {

@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stealth-web-search-tools"
+dynamic = ["version"]
+description = "Developer tools for Stealth Web Search: the LM Studio CLI agent host, the live end-to-end runners and the website builder."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Typing :: Typed",
+]
+dependencies = [
+  # MCP client (Python SDK v2) for the agent host and the e2e runners; it brings httpx2, pydantic and anyio.
+  "mcp>=2.2,<2.3",
+  # streaming HTTP to LM Studio's OpenAI-compatible API (the same HTTP stack the MCP SDK uses)
+  "httpx2>=2.13,<3",
+  # website builder
+  "markdown-it-py>=4.2,<5",
+  "linkify-it-py>=2.2,<3",
+  "pygments>=2.21,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.1,<10",
+  "pytest-timeout>=2.4",
+  "anyio>=4.15",
+  "aiohttp>=3.14,<4",
+  "ruff>=0.16,<0.17",
+  "mypy>=2.3",
+]
+
+# Console commands. npm scripts run them through scripts/py.mjs (`node scripts/py.mjs run <name>`).
+[project.scripts]
+sws-tools = "sws_tools.cli:main"
+sws-lmstudio-agent = "sws_tools.lmstudio_agent.cli:main"
+sws-lmstudio-e2e = "sws_tools.lmstudio_e2e.cli:main"
+sws-agents-e2e = "sws_tools.agents_e2e.cli:main"
+sws-site = "sws_tools.website.cli:main"
+
+[project.urls]
+Homepage = "https://tanishmeh.github.io/stealth-web-search/"
+Repository = "https://github.com/tanishmeh/stealth-web-search"
+Issues = "https://github.com/tanishmeh/stealth-web-search/issues"
+
+[tool.hatch.version]
+path = "src/sws_tools/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sws_tools"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/sws_tools", "tests", "README.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+# scripts/*.py are standard-library tools for Python >= 3.9; `npm run lint:py` checks them with --target-version py39.
+
+[tool.ruff.lint]
+select = [
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # import sorting
+  "B",     # bugbear
+  "UP",    # pyupgrade
+  "SIM",   # simplify
+  "C4",    # comprehensions
+  "PIE",   # misc lints
+  "PT",    # pytest style
+  "ASYNC", # async pitfalls
+  "RUF",   # ruff-specific
+]
+ignore = [
+  "E501", # long lines: the formatter wraps code; long strings stay readable
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sws_tools"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+# "src" too: the checkout's source is importable even when the editable install's .pth file is skipped
+# (Python 3.13+ skips .pth files flagged hidden, which some macOS setups do to everything in .venv)
+pythonpath = [".", "src"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+xfail_strict = true
+# a hung stream or server must fail the run, not stall CI (same budget as npm run test:integration)
+timeout = 600
+markers = [
+  "integration: starts the TypeScript server (needs Node 24 and the Obscura binary; skipped when missing unless CI or SWS_REQUIRE_INTEGRATION is set)",
+]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

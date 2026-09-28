@@ -23,14 +23,50 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # the Python tools (python/): uv installs them from uv.lock, on the oldest Python they support
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          python-version: "3.10"
+          cache-dependency-glob: python/uv.lock
+          cache-python: true
       - run: npm ci
+      - name: Install the Python tools (fails when uv.lock is out of date)
+        run: uv sync --locked --extra dev --project python
+      # the pip route of npm run py:setup installs the versions of python/constraints.txt
+      - name: python/constraints.txt matches uv.lock
+        run: |
+          uv export --project python --locked --extra dev --no-hashes --no-emit-project --quiet -o python/constraints.txt
+          if [ -n "$(git status --porcelain -- python/constraints.txt)" ]; then
+            git --no-pager diff -- python/constraints.txt
+            echo "::error::python/constraints.txt is out of date: run the uv export command above from the repository root and commit the result"
+            exit 1
+          fi
       - run: npm run typecheck
+      - name: Lint the Python code (ruff check and format)
+        run: npm run lint:py
+        env:
+          UV_LOCKED: "1"
       - run: npm test
-      - name: Download Obscura for this runner
+      - name: Download Obscura for this runner (scripts/download_obscura.py)
         run: npm run obscura:download
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run test:integration
+      # after the Obscura download: the integration tests start the TypeScript server (required here, never skipped)
+      - name: Python tests
+        run: npm run test:py
+        env:
+          UV_LOCKED: "1"
+      # scripts/setup_lmstudio.py and scripts/download_obscura.py promise Python 3.9 (the macOS system python3)
+      - name: Standard-library scripts on Python 3.9
+        run: |
+          uv python install 3.9
+          py39="$(uv python find 3.9)"
+          SWS_SCRIPT_PYTHONS="$py39" npm run test:py -- tests/scripts
+          PYTHON="$py39" node --test --test-reporter=spec test/unit/setup-lmstudio.test.ts
+        env:
+          UV_LOCKED: "1"
       - run: npm run build
 
   site:
@@ -43,9 +79,26 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          cache-dependency-glob: python/uv.lock
       - run: npm ci
-      # fails on a broken link or anchor between the pages
+      # generated from the TypeScript tool registry; the site takes its tool counts from docs/tools.json
+      - name: docs/TOOLS.md and docs/tools.json are up to date
+        run: |
+          npm run docs:tools
+          if [ -n "$(git status --porcelain -- docs/)" ]; then
+            git status --short -- docs/
+            git --no-pager diff -- docs/
+            echo "::error::docs/TOOLS.md or docs/tools.json is out of date: run npm run docs:tools and commit the result"
+            exit 1
+          fi
+      - run: uv sync --locked --project python
+      # the Python builder (python/src/sws_tools/website); fails on a broken link or anchor between the pages
       - run: npm run site:build
+        env:
+          UV_LOCKED: "1"
 
   docker:
     name: Docker image
@@ -57,7 +110,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # the LM Studio CLI host's tests (pytest) also run against the container
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          cache-dependency-glob: python/uv.lock
       - run: npm ci
+      - run: uv sync --locked --extra dev --project python
       # the container runs as uid 1000; the runner's checkout belongs to another user
       - run: sudo chown 1000:1000 logs
       - name: Build and start the container
@@ -73,6 +132,13 @@ jobs:
           exit 1
       - name: Run the integration suite against the container
         run: npm run test:docker
+      # test/docker.env for the Python suite: the CLI agent host and the e2e runner against the image
+      - name: Run the CLI agent host tests against the container
+        run: npm run test:py -- tests/lmstudio_agent tests/lmstudio_e2e
+        env:
+          UV_LOCKED: "1"
+          MCP_URL: http://127.0.0.1:8931/mcp
+          FIXTURE_HOST: host.docker.internal
       - name: Container logs
         if: always()
         run: docker compose logs --no-log-prefix | tail -n 200

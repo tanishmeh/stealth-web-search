@@ -25,8 +25,26 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # the builder is Python (python/src/sws_tools/website), installed by uv from python/uv.lock
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.12.19"
+          cache-dependency-glob: python/uv.lock
       - run: npm ci
+      # the site takes its tool counts from docs/tools.json: never publish stale ones
+      - name: docs/TOOLS.md and docs/tools.json are up to date
+        run: |
+          npm run docs:tools
+          if [ -n "$(git status --porcelain -- docs/)" ]; then
+            git status --short -- docs/
+            git --no-pager diff -- docs/
+            echo "::error::docs/TOOLS.md or docs/tools.json is out of date: run npm run docs:tools and commit the result"
+            exit 1
+          fi
+      - run: uv sync --locked --project python
       - run: npm run site:build
+        env:
+          UV_LOCKED: "1"
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
