@@ -20,21 +20,87 @@ export interface LogRecord {
 
 const LEVEL_NAMES: Record<number, string> = { 10: 'trace', 20: 'debug', 30: 'info', 40: 'warn', 50: 'error', 60: 'fatal' };
 
+function parseLine(line: string): LogRecord | null {
+  try {
+    const rec = JSON.parse(line) as LogRecord;
+    rec.levelName = LEVEL_NAMES[rec.level] ?? String(rec.level);
+    return rec;
+  } catch {
+    return null; // never let the dashboard tap break logging
+  }
+}
+
 /**
  * In-process tap on the log stream. The dashboard subscribes to it so that the
  * "Logs" panel shows exactly what is written to stdout / the log file.
+ *
+ * Lines arrive as the JSON text pino wrote. While nobody listens for 'record' events (no dashboard
+ * viewer is connected) they are kept as text and only parsed when read (a viewer connects and gets
+ * the history): most debug lines are never shown, so they are never parsed.
  */
 export class LogTap extends EventEmitter {
-  readonly buffer: LogRecord[] = [];
+  /**
+   * Ring of the newest entries; an entry is a line's text until it is parsed. A ring, because
+   * trimming an array from the front (splice) moves every element: ~3-6 µs per log line at 2000.
+   */
+  private readonly entries: Array<LogRecord | string> = [];
+  /** Index of the oldest entry once the ring is full (0 until then). */
+  private oldest = 0;
   private readonly capacity: number;
   constructor(capacity = 2000) {
     super();
     this.capacity = capacity;
   }
+
+  /** Every kept record, oldest first. */
+  get buffer(): LogRecord[] {
+    return this.recent(this.capacity);
+  }
+
+  /** The last `count` records, oldest first. */
+  recent(count: number): LogRecord[] {
+    const size = this.entries.length;
+    const records: LogRecord[] = [];
+    for (let k = Math.max(0, size - count); k < size; k++) {
+      const i = (this.oldest + k) % size;
+      let entry = this.entries[i];
+      if (typeof entry === 'string') {
+        const rec = parseLine(entry);
+        if (!rec) continue;
+        this.entries[i] = entry = rec;
+      }
+      records.push(entry);
+    }
+    return records;
+  }
+
   push(rec: LogRecord): void {
-    this.buffer.push(rec);
-    if (this.buffer.length > this.capacity) this.buffer.splice(0, this.buffer.length - this.capacity);
+    this.keep(rec);
     this.emit('record', rec);
+  }
+
+  /** One line of JSON as written to the log; parsed right away only when someone listens. */
+  pushLine(line: string): void {
+    if (this.listenerCount('record') === 0) {
+      this.keep(line);
+      return;
+    }
+    const rec = parseLine(line);
+    if (!rec) return;
+    try {
+      this.push(rec);
+    } catch {
+      // never let the dashboard tap break logging
+    }
+  }
+
+  private keep(entry: LogRecord | string): void {
+    if (this.entries.length < this.capacity) {
+      this.entries.push(entry);
+      return;
+    }
+    this.entries[this.oldest] = entry;
+    this.oldest = (this.oldest + 1) % this.capacity;
   }
 }
 
@@ -58,16 +124,10 @@ export async function createLogging(config: Config): Promise<LoggingHandle> {
   const tapLevel = 'debug';
 
   const tapStream = new Writable({
-    write(chunk: Buffer, _enc, cb) {
-      for (const line of chunk.toString('utf8').split('\n')) {
-        if (!line) continue;
-        try {
-          const rec = JSON.parse(line) as LogRecord;
-          rec.levelName = LEVEL_NAMES[rec.level] ?? String(rec.level);
-          tap.push(rec);
-        } catch {
-          // never let the dashboard tap break logging
-        }
+    decodeStrings: false, // pino writes strings: no round trip through a Buffer
+    write(chunk: string | Buffer, _enc, cb) {
+      for (const line of (typeof chunk === 'string' ? chunk : chunk.toString('utf8')).split('\n')) {
+        if (line) tap.pushLine(line);
       }
       cb();
     },

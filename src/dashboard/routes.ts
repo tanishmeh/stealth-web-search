@@ -17,6 +17,25 @@ const FRAME_BACKLOG_BYTES = 1024 * 1024;
 // The dashboard reconnects on its own and rehydrates from 'hello'.
 const MAX_BACKLOG_BYTES = 32 * 1024 * 1024;
 
+const sseChunk = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+
+/**
+ * SSE bytes of hub events and frames, encoded once and shared by every viewer they go to. The hub
+ * hands all viewers the same event object, and the same frame object (which each viewer may send
+ * later, when it coalesces frames); neither changes once published. Weak keys: the bytes go away
+ * with their event.
+ */
+const sharedChunks = new WeakMap<object, Buffer>();
+
+function sharedSseChunk(key: object, type: string, data: unknown): Buffer {
+  let chunk = sharedChunks.get(key);
+  if (chunk === undefined) {
+    chunk = Buffer.from(sseChunk(type, data), 'utf8');
+    sharedChunks.set(key, chunk);
+  }
+  return chunk;
+}
+
 /** The browser a viewer asked to watch, if it exists (else the main browser). */
 export function resolveWatch(deps: HttpDeps, requested: unknown): string {
   const id = typeof requested === 'string' ? requested.trim() : '';
@@ -248,7 +267,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
     res.socket?.setNoDelay(true);
     let closed = false;
     let backlogLimit = MAX_BACKLOG_BYTES; // raised by the size of 'hello', which may legitimately be large
-    const write = (chunk: string) => {
+    const write = (chunk: string | Buffer) => {
       if (closed || res.writableEnded || res.destroyed) return;
       res.write(chunk);
       if (res.writableLength > backlogLimit) {
@@ -256,8 +275,9 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
         res.destroy();
       }
     };
-    const encode = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
-    const send = (type: string, data: unknown) => write(encode(type, data));
+    /** For this viewer only ('hello', 'status'). */
+    const send = (type: string, data: unknown) => write(sseChunk(type, data));
+    const sendFrame = (frame: FrameData) => write(sharedSseChunk(frame, 'frame', frame));
 
     let pendingFrame: FrameData | null = null;
     let lastFrameSent = 0;
@@ -271,7 +291,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
       }
       const frame = pendingFrame;
       pendingFrame = null;
-      send('frame', frame);
+      sendFrame(frame);
       lastFrameSent = Date.now();
     };
     const queueFrame = (frame: FrameData) => {
@@ -283,7 +303,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
     };
     const onEvent = (event: HubEvent) => {
       if (event.type === 'frame') queueFrame(event.data);
-      else send(event.type, event.data);
+      else write(sharedSseChunk(event, event.type, event.data));
     };
 
     // The history is captured before subscribing (so nothing is delivered twice); events raised while
@@ -299,7 +319,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
       watch,
     );
     hello.liveView.viewers = deps.hub.viewerCount; // include this viewer
-    const helloChunk = encode('hello', hello);
+    const helloChunk = sseChunk('hello', hello);
     backlogLimit += Buffer.byteLength(helloChunk);
     write(helloChunk);
     // only the active tab's last frame: a frame of a closed tab would show a page that no longer exists
@@ -307,7 +327,7 @@ export function registerDashboardRoutes(app: Express, deps: HttpDeps): void {
     const latest = deps.hub.latestFrameFor(watch);
     const watchedBrowser = watch === MAIN_BROWSER ? deps.browser : (deps.registry?.browser(watch) ?? null);
     if (live && latest && (watchedBrowser ? latest.tabId === watchedBrowser.activeTab?.id : watch !== MAIN_BROWSER)) {
-      send('frame', latest);
+      sendFrame(latest);
       lastFrameSent = Date.now();
     }
     const early = held;

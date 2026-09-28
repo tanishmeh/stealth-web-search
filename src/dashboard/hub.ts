@@ -159,12 +159,13 @@ export class Hub extends EventEmitter {
   /** The latest snapshots list, for viewers that connect later (null until the server listed them). */
   private snapshots: unknown = null;
   private readonly logTap: LogTap;
+  /** Listens to the log tap only while someone is subscribed: without a viewer, log lines stay unparsed. */
+  private readonly onLog = (rec: LogRecord) => this.broadcast({ type: 'log', data: rec });
 
   constructor(logTap: LogTap) {
     super();
     this.logTap = logTap;
     this.setMaxListeners(200);
-    logTap.on('record', (rec: LogRecord) => this.broadcast({ type: 'log', data: rec }));
   }
 
   /** Live viewers across all browsers. */
@@ -188,6 +189,7 @@ export class Hub extends EventEmitter {
   }
 
   subscribe(listener: Listener, live: boolean, watch: string = MAIN_BROWSER): () => void {
+    if (this.subscribers.size === 0) this.logTap.on('record', this.onLog);
     this.subscribers.set(listener, { live, watch });
     if (live) this.changeViewers(watch, +1);
     let done = false;
@@ -195,6 +197,7 @@ export class Hub extends EventEmitter {
       if (done) return;
       done = true;
       this.subscribers.delete(listener);
+      if (this.subscribers.size === 0) this.logTap.off('record', this.onLog);
       if (live) this.changeViewers(watch, -1);
     };
   }
@@ -291,7 +294,7 @@ export class Hub extends EventEmitter {
       activity: this.activityOrder.map((id) => this.activity.get(id)).filter(Boolean),
       console: h ? [...h.console.items] : [],
       network: h ? [...h.network.items] : [],
-      logs: this.logTap.buffer.slice(-500),
+      logs: this.logTap.recent(500),
       browserEvents: h ? [...h.events.items] : [],
       agents: [...this.agents.values()],
       snapshots: this.snapshots,

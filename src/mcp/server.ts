@@ -321,10 +321,14 @@ export async function runTool(
           }
           const handlerPromise = Promise.resolve().then(() => tool.handler(args, ctx));
           handlerPromise.catch(() => undefined); // a rejection after the timeout must not go unhandled
+          let timeout: NodeJS.Timeout | undefined;
           const outcome = await Promise.race([
             handlerPromise.then((value) => ({ kind: 'ok' as const, value }), (error) => ({ kind: 'err' as const, error })),
-            new Promise<{ kind: 'timeout' }>((r) => setTimeout(() => r({ kind: 'timeout' }), config.browser.toolTimeoutMs)),
+            new Promise<{ kind: 'timeout' }>((r) => (timeout = setTimeout(() => r({ kind: 'timeout' }), config.browser.toolTimeoutMs))),
           ]);
+          // A pending timer keeps this whole call (context, arguments, result) in memory for
+          // TOOL_TIMEOUT_MS: under load that was hundreds of MB.
+          clearTimeout(timeout);
           if (outcome.kind === 'ok') return void resolve(outcome.value);
           if (outcome.kind === 'err') return void reject(outcome.error);
           // Timed out: return a clear error to the client now, but keep holding the mutex until the
@@ -336,7 +340,9 @@ export async function runTool(
                 'The action may still be completing in the browser; check the page state (browser_snapshot) before retrying.',
             ),
           );
-          await Promise.race([handlerPromise.then(() => undefined, () => undefined), new Promise((r) => setTimeout(r, TIMEOUT_MUTEX_HOLD_MS))]);
+          let hold: NodeJS.Timeout | undefined;
+          await Promise.race([handlerPromise.then(() => undefined, () => undefined), new Promise((r) => (hold = setTimeout(r, TIMEOUT_MUTEX_HOLD_MS)))]);
+          clearTimeout(hold);
         })
         .catch(reject);
     });

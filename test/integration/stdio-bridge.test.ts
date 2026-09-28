@@ -9,6 +9,7 @@ import { Client, type ClientOptions } from '@modelcontextprotocol/client';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/client/stdio';
 import { startFixtureServer, type FixtureServer } from '../helpers/fixture-server.ts';
 import { startTestServer, type TestServer } from '../helpers/harness.ts';
+import { hasSlowKeepAlive } from '../../src/util/keepalive-fetch.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const BRIDGE = path.join(ROOT, 'src/stdio-bridge.ts');
@@ -78,6 +79,21 @@ describe('stdio bridge', () => {
     const session = s.sessions.find((x: any) => x.client === 'bridge-test 1.2.3');
     assert.ok(session, `server sees the stdio client's own identity: ${JSON.stringify(s.sessions)}`);
     assert.match(bridge.stderr(), /connected to stealth-web-search/);
+  });
+
+  test("relays through undici's own Agent where Node's bundled undici waits a timer tick per request", async () => {
+    // src/util/keepalive-fetch.ts: loaded 500 ms after the handshake; the tests below then run over it
+    const line = /keep-alive requests go through undici's Agent/;
+    if (hasSlowKeepAlive(process.versions.undici)) {
+      const deadline = Date.now() + 10_000;
+      while (!line.test(bridge.stderr()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      assert.match(bridge.stderr(), line);
+    } else {
+      await new Promise((r) => setTimeout(r, 1_000));
+      assert.doesNotMatch(bridge.stderr(), line);
+    }
+    const { tools } = await bridge.client.listTools();
+    assert.ok(tools.length > 0);
   });
 
   test('calls browser tools through the bridge', async () => {

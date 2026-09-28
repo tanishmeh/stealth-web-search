@@ -36,6 +36,7 @@ import {
   type JSONRPCMessage,
 } from '@modelcontextprotocol/client';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { keepAliveFetch } from './util/keepalive-fetch.ts';
 
 type Level = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 const LEVELS: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40, silent: 99 };
@@ -55,6 +56,9 @@ Environment:
 `;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** How long after the handshake the keep-alive fix is loaded (see src/util/keepalive-fetch.ts). */
+const KEEPALIVE_LOAD_DELAY_MS = 500;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -141,7 +145,10 @@ async function main(): Promise<void> {
   const token = process.env.AUTH_TOKEN?.trim();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const http = new StreamableHTTPClientTransport(url, { requestInit: { headers } });
+  // Only on Node versions whose bundled undici waits a timer tick before each keep-alive reuse, and
+  // before the first fetch (a dispatcher installed before it, e.g. a proxy, stays in charge).
+  const keepAlive = keepAliveFetch();
+  const http = new StreamableHTTPClientTransport(url, { requestInit: { headers }, ...(keepAlive && { fetch: keepAlive.fetch }) });
   const stdio = new StdioServerTransport();
 
   /** The client's initialize request, replayed when the server lost the session. */
@@ -203,6 +210,10 @@ async function main(): Promise<void> {
             'info',
             `connected to ${info.name ?? 'MCP server'} ${info.version ?? ''} at ${url.href} (protocol ${m.result.protocolVersion}${http.sessionId ? `, session ${http.sessionId}` : ''})`.replace(/\s+\(/, ' ('),
           );
+          // after the handshake and the client's first requests, so the import delays neither
+          void keepAlive?.load(KEEPALIVE_LOAD_DELAY_MS).then((used) => {
+            if (used) log('debug', `keep-alive requests go through undici's Agent (Node's bundled undici ${process.versions.undici} waits a timer tick per request)`);
+          });
         } else if (isJSONRPCErrorResponse(msg)) {
           log('warn', `initialize was rejected by the server: ${m.error?.message ?? 'unknown error'}`);
         }

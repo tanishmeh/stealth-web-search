@@ -241,6 +241,80 @@ describe('dashboard event stream', () => {
   });
 });
 
+describe('dashboard event stream fan-out', () => {
+  /** Raw bytes of one live viewer's stream. */
+  function rawStream(port: number) {
+    const chunks: Buffer[] = [];
+    let response: http.IncomingMessage | null = null;
+    const ready = new Promise<void>((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port, path: '/api/events?live=1' }, (res) => {
+          response = res;
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          resolve();
+        })
+        .on('error', reject);
+    });
+    const bytes = () => Buffer.concat(chunks);
+    /** Everything after the viewer's own 'hello' event. */
+    const afterHello = () => {
+      const all = bytes();
+      const start = all.indexOf('event: hello\n');
+      const end = all.indexOf('\n\n', start);
+      return start < 0 || end < 0 ? null : all.subarray(end + 2);
+    };
+    return { ready, bytes, afterHello, close: () => response?.destroy() };
+  }
+
+  test('every viewer gets the same bytes for each event and frame, encoded once per event', async () => {
+    const ctx = await startRoutes();
+    const viewers = [rawStream(ctx.port), rawStream(ctx.port), rawStream(ctx.port)];
+    const stringify = JSON.stringify;
+    try {
+      await Promise.all(viewers.map((v) => v.ready));
+      const deadline = Date.now() + 10_000;
+      while (viewers.some((v) => v.afterHello() === null) && Date.now() < deadline) await sleep(20);
+
+      const activity = { ...bigActivity(1, 'Café – 東京 – emoji \u{1F680} – "quotes" \\ back\nslash'), status: 'ok' as const };
+      const network = {
+        tabId: 'tab-1',
+        requestId: 'r1',
+        method: 'GET',
+        url: 'https://example.com/ü?q=1',
+        resourceType: 'Document',
+        status: 200,
+        mimeType: 'text/html',
+        size: 10,
+        initiator: null,
+        startedAt: new Date().toISOString(),
+        durationMs: 3,
+        state: 'done' as const,
+      };
+      const shot = frame('tab-1', 'Überblick 東京 \u{1F680}', 50_000);
+      let frameEncodes = 0;
+      JSON.stringify = ((value: unknown, ...rest: any[]) => {
+        if (value === shot) frameEncodes++;
+        return (stringify as any)(value, ...rest);
+      }) as typeof JSON.stringify;
+      ctx.hub.publishActivity(activity);
+      ctx.hub.publishNetwork(network);
+      ctx.hub.publishFrame(shot);
+
+      const expected = Buffer.from(
+        `event: activity\ndata: ${stringify(activity)}\n\n` + `event: network\ndata: ${stringify(network)}\n\n` + `event: frame\ndata: ${stringify(shot)}\n\n`,
+        'utf8',
+      );
+      while (viewers.some((v) => (v.afterHello()?.length ?? 0) < expected.length) && Date.now() < deadline) await sleep(20);
+      for (const [i, v] of viewers.entries()) assert.ok(v.afterHello()!.equals(expected), `viewer ${i} got the same bytes as JSON.stringify gives`);
+      assert.equal(frameEncodes, 1, 'the frame is encoded once, not once per viewer');
+    } finally {
+      JSON.stringify = stringify;
+      for (const v of viewers) v.close();
+      await ctx.close();
+    }
+  });
+});
+
 describe('dashboard event stream memory bounds', () => {
   test('a viewer that stops reading entirely is disconnected instead of growing server memory', async () => {
     const ctx = await startRoutes();
