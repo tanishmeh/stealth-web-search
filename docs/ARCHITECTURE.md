@@ -10,7 +10,7 @@ flowchart TB
     subgraph Clients
         LMS[LM Studio]
         CD[Claude Desktop / Cursor / VS Code]
-        CLI[scripts/lmstudio-agent.ts]
+        CLI["sws-lmstudio-agent (python/)"]
     end
     Human[You, in a web browser]
 
@@ -124,6 +124,33 @@ This project owns the CDP connections: one for the shared browser and one per su
 
 `src/obscura/process.ts` starts `obscura serve --host 127.0.0.1` (CDP is never reachable from outside the container) and parses its log lines into structured logs. The server runs two of them, the shared engine and the isolated engine (one with `OBSCURA_SEPARATE_ENGINE=false` and no `OBSCURA_STORAGE_DIR`), and restarts each with exponential backoff if it crashes. Inside the container, `tini` is PID 1, Node is the supervisor, and the Obscura engines are Node's children. `docker stop` shuts everything down cleanly within a second.
 
+## Python tools
+
+The server is TypeScript. The developer tools that only talk to it from outside, over HTTP, are Python, in the [`python/`](../python/README.md) package (`stealth-web-search-tools`, Python 3.10+, dependencies pinned in `python/uv.lock`):
+
+- `sws-lmstudio-agent` (`npm run lmstudio:agent`): the LM Studio command-line agent. It is an MCP client of the server (the MCP Python SDK, with the 2025-11-25 session handshake that LM Studio also uses) and a streaming client of LM Studio's OpenAI-compatible API, and it runs the model's tool calls on the server. It learns each tool's group from the tool list (`_meta`), so it needs nothing from `src/`.
+- `sws-lmstudio-e2e` (`npm run lmstudio:e2e`) runs that agent through the end-to-end scenarios, and `sws-agents-e2e` (`npm run agents:e2e`) checks the sub-agents live.
+- `sws-site` (`npm run site:build`, `npm run site:serve`) builds the website: Markdown with markdown-it-py, code highlighting with Pygments mapped onto the highlight.js class names that `site/assets/site.css` styles, and a link and anchor checker. It takes the tool counts from `docs/tools.json`, which `scripts/generate-tool-docs.ts` writes from the TypeScript tool registry next to `docs/TOOLS.md`.
+- `scripts/setup_lmstudio.py` (`npm run lmstudio:setup`) and `scripts/download_obscura.py` (`npm run obscura:download`) are single files that use only the standard library and run on Python 3.9, so they need no setup.
+
+The npm scripts run them through `scripts/py.mjs`: with `uv run --project python` when uv is installed, else from `python/.venv` (`npm run py:setup`), else with a Python that already has the package. It passes arguments, exit codes and signals through. The Python tests (`python/tests/`, `npm run test:py`) start the real TypeScript server the way `test/helpers/harness.ts` does, with scripted stand-ins for LM Studio and the sub-agents' model.
+
+## Why the server stays in TypeScript
+
+A Python port of the server was measured before this split (Apple M4 Max, Node 24, Python 3.13, the official MCP SDKs of both languages), and it would be slower where it matters:
+
+| Measure | TypeScript | Python |
+|---|---|---|
+| `tools/call` round trip, minimal server on the official SDK (p50) | 0.085 ms | 0.34-0.52 ms |
+| Calls per second, 4 sessions, minimal server | about 24,000 | about 3,000 (5,600 with JSON responses) |
+| The real server, `browser_tab_list` with a CDP round trip (p50) | 0.28 ms | (a minimal Python server is already slower) |
+| Start to ready, minimal server | 87 ms | 290 ms |
+| stdio bridge, start to first answer | 68-104 ms | about 290 ms |
+
+The cost is in the Python SDK (task groups and memory streams per request, and about 100 ms of pydantic model building at import), not in the language: a hand-written Python endpoint without the SDK answered in 0.06 ms. Python did better in the data-heavy parts, with orjson: parsing and encoding screencast frames, dashboard SSE fan-out, and memory (75-85 MB against 158 MB idle). But those parts live in the same process as the MCP server and share its browser objects, so moving them would add a hop per frame and per CDP command and a second runtime in the image. The measurements instead pointed at TypeScript fixes, which this version has: the stdio bridge's keep-alive delay on Node 24.17-24.20 (`src/util/keepalive-fetch.ts`, relay p50 about 1.8 ms to 0.3 ms), frames encoded once for all dashboard viewers, a cheaper log tap, and tool-call timers that no longer keep every call in memory.
+
+The Python tools are separate processes that only call the server. Their cost is their start-up, mostly importing the MCP SDK: the command-line agent starts about 150 ms later than the TypeScript version on a current Node (24.21 or newer) and adds about 0.3-0.7 ms per step, next to model answers that take seconds; on Node 24.17-24.20 its steps are faster than the TypeScript version's were.
+
 ## Source map
 
 | Path | Responsibility |
@@ -151,3 +178,10 @@ This project owns the CDP connections: one for the shared browser and one per su
 | `src/util/` | Shared helpers: log summaries, masking of secret answers, limits shared by the agent manager, script runs and the Obscura connection budget |
 | `src/dashboard/` | Event hub, API routes, static UI |
 | `src/stdio-bridge.ts` | stdio ↔ HTTP bridge for stdio-only MCP clients |
+| `src/util/keepalive-fetch.ts` | The bridge's keep-alive fix for the undici bundled with Node 24.17-24.20 |
+| `scripts/generate-tool-docs.ts` | `npm run docs:tools`: `docs/TOOLS.md` and `docs/tools.json` from the tool registry |
+| `scripts/py.mjs` | Runs the Python tools for the npm scripts (uv, `python/.venv` or a system Python) |
+| `scripts/setup_lmstudio.py`, `scripts/download_obscura.py` | `npm run lmstudio:setup` and `npm run obscura:download` (standard library, Python 3.9+) |
+| `python/src/sws_tools/lmstudio_agent/` | The LM Studio command-line agent (`npm run lmstudio:agent`) |
+| `python/src/sws_tools/lmstudio_e2e/`, `python/src/sws_tools/agents_e2e/` | The live end-to-end runners (`npm run lmstudio:e2e`, `npm run agents:e2e`) |
+| `python/src/sws_tools/website/` | The website builder (`npm run site:build`, `npm run site:serve`) |

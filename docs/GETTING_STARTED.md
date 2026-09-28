@@ -155,10 +155,10 @@ LM Studio connects to MCP servers on your own machine only through entries in it
 
 **One-click link.** For the default address and no `AUTH_TOKEN`: with LM Studio installed, open [Add to LM Studio](https://lmstudio.ai/install-mcp?name=stealth-web-search&config=eyJ1cmwiOiJodHRwOi8vMTI3LjAuMC4xOjg5MzEvbWNwIiwidGltZW91dCI6MTgwMDAwfQ%3D%3D) and confirm the install dialog in LM Studio. The link adds the default entry shown below.
 
-**Setup script.** It needs Node.js but no `npm ci`, because it uses only Node's built-in modules:
+**Setup script.** It needs Python 3.9 or newer but no `npm ci`, because it uses only Python's standard library. The `python3` of a recent Linux distribution, or of macOS with the Xcode Command Line Tools (`xcode-select --install`), is enough; on Windows, install [Python](https://www.python.org/downloads/) or [uv](https://docs.astral.sh/uv/):
 
 ```bash
-npm run lmstudio:setup
+npm run lmstudio:setup              # or, without npm: python3 scripts/setup_lmstudio.py
 ```
 
 The script adds or updates only its own entry, keeps your other servers, and writes a timestamped backup before it changes the file. Pass `-- --token <token>` when the server has `AUTH_TOKEN` set, and `-- --url http://127.0.0.1:<port>/mcp` when you changed `HOST_PORT`. `-- --print` prints the entry and an install link for your options without changing anything.
@@ -219,10 +219,10 @@ Ask your client (an LM Studio chat, Claude Code, Cursor and so on) for a web tas
 
 Tasks work best when you give the full URL, say exactly what to return ("the exact text of", "a list of", "the price of"), and list the steps of a longer task in order.
 
-To try it without a chat app, use the command-line agent. It needs `npm ci` once, LM Studio's local server (**Developer > Start Server**) and a loaded tool-use model. It finds the loaded model through an API that LM Studio added in 0.4. With an older version, pass `--model <id>`:
+To try it without a chat app, use the command-line agent. It is a Python tool (in `python/`): it needs [uv](https://docs.astral.sh/uv/), or Python 3.10+ and `npm run py:setup` once, plus LM Studio's local server (**Developer > Start Server**) and a loaded tool-use model. It finds the loaded model through an API that LM Studio added in 0.4. With an older version, pass `--model <id>`:
 
 ```bash
-npm ci
+npm run py:setup   # once, unless uv is installed
 npm run lmstudio:agent -- "Open https://example.com and tell me the main heading"
 ```
 
@@ -404,7 +404,7 @@ npm run obscura:download
 npm run dev
 ```
 
-- `npm run obscura:download` fetches the Obscura release for your OS and CPU (macOS, Linux or Windows; x64 or arm64) into `.obscura/` and checks its SHA-256 checksum against the digest GitHub publishes for it. It uses the same Obscura version as the Docker image.
+- `npm run obscura:download` fetches the Obscura release for your OS and CPU (macOS, Linux or Windows; x64 or arm64) into `.obscura/` and checks its SHA-256 checksum against the digest GitHub publishes for it. It uses the same Obscura version as the Docker image. It is a Python script (`scripts/download_obscura.py`, standard library only) and needs Python 3.9 or newer. With the python.org installer on macOS, run its **Install Certificates.command** once if the download fails with `CERTIFICATE_VERIFY_FAILED`.
 - `npm run dev` runs `src/main.ts` with auto-reload on `http://127.0.0.1:8931`.
 - `.env` is not read. Set variables in your shell instead, for example `ALLOW_PRIVATE_NETWORK=true npm run dev`.
 - `config/models.json` in the project folder is read as in Docker. `host.docker.internal` does not resolve outside Docker, so use `127.0.0.1` URLs for models on your machine. Check it with `npm run config:check -- --ping`, adding `--env-file .env` if the file uses `${NAME}` variables from `.env`.

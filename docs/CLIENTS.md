@@ -126,7 +126,7 @@ LM Studio has its own guide, [LM Studio](LM_STUDIO.md). It covers chat use, reco
 
 1. Add the server to LM Studio in one of three ways:
    - **One click.** With the server on the default address and no `AUTH_TOKEN`, open **[Add to LM Studio](https://lmstudio.ai/install-mcp?name=stealth-web-search&config=eyJ1cmwiOiJodHRwOi8vMTI3LjAuMC4xOjg5MzEvbWNwIiwidGltZW91dCI6MTgwMDAwfQ%3D%3D)** and confirm the install dialog in LM Studio.
-   - **Setup script.** Run `npm run lmstudio:setup`. It adds or updates only its own entry in `~/.lmstudio/mcp.json` and writes a backup first. Add `-- --token <token>` for a server with `AUTH_TOKEN`, or `-- --url http://127.0.0.1:<port>/mcp` for another port.
+   - **Setup script.** Run `npm run lmstudio:setup` (needs Python 3.9 or newer). It adds or updates only its own entry in `~/.lmstudio/mcp.json` and writes a backup first. Add `-- --token <token>` for a server with `AUTH_TOKEN`, or `-- --url http://127.0.0.1:<port>/mcp` for another port.
    - **By hand.** In LM Studio, open the right sidebar's **Program** tab, choose **Install > Edit mcp.json**, and add the entry from [`examples/lmstudio-mcp.json`](../examples/lmstudio-mcp.json):
 
      ```json

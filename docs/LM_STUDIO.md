@@ -28,6 +28,7 @@ Tested with LM Studio 0.4.18 on macOS and `qwen/qwen3.8-27b` (MLX 4-bit, vision,
 - **A context length of at least 32k tokens.** The tool definitions alone take about 9.5k tokens for the 50 tools the server offers by default (41 `browser_*`, 4 `script_*` and 5 `snapshot_*` tools). With a sub-agent model configured, the 7 `agent_*` tools are added (57 tools, about 12k tokens). Each page snapshot adds up to about 3k. LM Studio's default of 4k–8k is far too small.
 - **The Stealth Web Search server** running in Docker (recommended) or locally with Node 24.
 - **LM Studio's local server** (**Developer > Start Server**, or `~/.lmstudio/bin/lms server start`) for the CLI agent, the end-to-end checks and integration 2. Chats in the app do not need it.
+- **Python 3.10 or newer, or [uv](https://docs.astral.sh/uv/getting-started/installation/)**, for the CLI agent and the end-to-end checks ([section 7](#7-the-command-line-agent)). The server and the chat integration do not need Python.
 
 ## 2. Start the server
 
@@ -70,10 +71,10 @@ For a different URL or a token, generate both links with `npm run lmstudio:setup
 
 ### 3b. The setup script
 
-Use the script when you changed `HOST_PORT`, set `AUTH_TOKEN`, or want to script the setup:
+Use the script when you changed `HOST_PORT`, set `AUTH_TOKEN`, or want to script the setup. It is `scripts/setup_lmstudio.py`, a standard-library Python script: it needs Python 3.9 or newer (the `python3` of a recent Linux distribution, or of macOS with the Xcode Command Line Tools) and no `npm ci`.
 
 ```bash
-npm run lmstudio:setup
+npm run lmstudio:setup              # or, without npm: python3 scripts/setup_lmstudio.py
 ```
 
 ```text
@@ -171,16 +172,20 @@ LM Studio reads the tool list when a chat first uses the server. Start a new cha
 
 The agent is its own MCP client. It connects to the server over Streamable HTTP and uses LM Studio's OpenAI-compatible API (`/v1/chat/completions` with function tools). It needs no `mcp.json` entry, token or LM Studio setting. Only LM Studio's local server must be running: **Developer > Start Server**, or `~/.lmstudio/bin/lms server start`.
 
+It is a Python command, `sws-lmstudio-agent`, from the [`python/`](../python/README.md) package (Python 3.10 or newer). `npm run lmstudio:agent` runs it with [uv](https://docs.astral.sh/uv/getting-started/installation/) when uv is installed, and otherwise from `python/.venv`, which `npm run py:setup` creates once. Arguments after `--` reach the agent unchanged.
+
 ```bash
 npm run lmstudio:agent -- "Open https://example.com and tell me the main heading"
-# or
-node scripts/lmstudio-agent.ts "Go to https://news.ycombinator.com and list the top 3 story titles" --max-steps 15
+# or, with uv, straight from the package
+uv run --project python sws-lmstudio-agent "Go to https://news.ycombinator.com and list the top 3 story titles" --max-steps 15
 ```
+
+The agent does not need the rest of the repository: `uvx --from ./python sws-lmstudio-agent "..."` (or `pip install ./python`) installs it on its own, for use against a server that runs elsewhere.
 
 Sample transcript (vision model, all tools):
 
 ```text
-$ node scripts/lmstudio-agent.ts "Open https://example.com, take a screenshot with browser_screenshot, and tell me from the image what color the page background is and whether the text is centered."
+$ npm run lmstudio:agent -- "Open https://example.com, take a screenshot with browser_screenshot, and tell me from the image what color the page background is and whether the text is centered."
 Stealth Web Search agent | model qwen/qwen3.8-27b | reasoning low | vision on | 41 tools | http://127.0.0.1:8931/mcp
 Task: Open https://example.com, take a screenshot with browser_screenshot, and tell me ...
 
@@ -216,7 +221,7 @@ The first step is the slowest because LM Studio processes the tool definitions o
 | `--max-steps <n>` | 25 | Model rounds before the agent gives up |
 | `--reasoning <mode>` | `low` | `none`, `low`, `medium`, `high` or `on` (the model's default). Sent as `reasoning_effort`, except to a model that LM Studio lists without reasoning options |
 | `--tools a,b` | all | Offer only these tools to the model |
-| `--toolsets core,...` | all | Offer only tools from these groups (client-side counterpart of `TOOLSETS`, same group names). Unknown group names are an error |
+| `--toolsets core,...` | all | Offer only tools from these groups (client-side counterpart of `TOOLSETS`, same group names), or with these names. The groups come from the server's tool list, so a group the server does not offer (for example `agents` without a sub-agent model) is an unknown name, and unknown names are an error |
 | `--no-vision` | vision on if the model supports it | Never send screenshots as images. `--vision` forces them on |
 | `--interactive`, `--no-interactive` | on when stdin and stdout are a terminal and `--quiet` is not set | Ask you when a sub-agent run it started waits for your answer, for example to approve a purchase ([below](#approving-a-sub-agents-purchase)). `--no-interactive` never asks. `--interactive` also asks with `--quiet`, piped input (one answer per line of stdin) or redirected output |
 | `--json <file>` | | Write the full transcript: messages, reasoning, every tool call with arguments, result and timing, token usage, the questions put to you and your answers (`userTurns`), and the sub-agent runs still waiting at the end (`waitingRuns`) |
@@ -267,7 +272,7 @@ Your answer (Enter to leave it unanswered): yes
 
 ## 8. End-to-end checks with the real model
 
-`scripts/lmstudio-e2e.ts` starts the local fixture website and runs scenarios through the same agent loop. Each scenario is judged by an objective assertion, not by the model's own claims:
+`npm run lmstudio:e2e` (the `sws-lmstudio-e2e` command of the [`python/`](../python/README.md) package, set up as for the [command-line agent](#7-the-command-line-agent)) starts the local fixture website and runs scenarios through the same agent loop. Each scenario is judged by an objective assertion, not by the model's own claims:
 
 | Scenario | Task given to the model | Passes when |
 |---|---|---|

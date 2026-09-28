@@ -114,7 +114,7 @@ With the server running, click **Add to LM Studio** above (it opens LM Studio's 
 
 ```bash
 npm install
-npm run lmstudio:setup
+npm run lmstudio:setup     # Python 3.9+ standard library; or: python3 scripts/setup_lmstudio.py
 ```
 
 In LM Studio, load a model trained for tool use with a context length of 32k or more, open a new chat, and turn on **mcp/stealth-web-search** in the Integrations panel. Then ask something like *"Open https://quotes.toscrape.com/js/ and tell me who wrote the first three quotes"* and watch it work on the dashboard.
@@ -132,9 +132,10 @@ To add it by hand, put this entry in `mcp.json` (LM Studio: **Program → Instal
 }
 ```
 
-There is also a command-line agent that drives an LM Studio model through the browser with a readable transcript, no `mcp.json` needed:
+There is also a command-line agent that drives an LM Studio model through the browser with a readable transcript, no `mcp.json` needed. It is a Python tool: with [uv](https://docs.astral.sh/uv/) installed it runs as is, otherwise run `npm run py:setup` once (Python 3.10+):
 
 ```bash
+npm run py:setup   # once, unless uv is installed
 npm run lmstudio:agent -- "Open https://example.com and tell me the main heading"
 ```
 
@@ -284,7 +285,7 @@ The same guides are on the [website](https://tanishmeh.github.io/stealth-web-sea
 
 ## Development
 
-Run the server without Docker (Node.js 24+):
+Run the server without Docker (Node.js 24+; the Obscura download needs Python 3.9+, the `python3` of a recent Linux distribution or of macOS with the Xcode Command Line Tools). The developer tools in `python/` (the LM Studio command-line agent, the e2e runners, the website builder) need Python 3.10+ with [uv](https://docs.astral.sh/uv/), or `npm run py:setup` once:
 
 ```bash
 npm install
@@ -298,6 +299,8 @@ Tests:
 npm run typecheck
 npm test                     # unit tests
 npm run test:integration     # starts real servers + Obscura against a local fixture website
+npm run test:py              # the Python tools' tests (-- -m "not integration" skips the ones that start the server)
+npm run lint:py              # ruff over python/ and scripts/*.py
 
 # the same integration suite against the Docker container
 docker compose -f compose.yaml -f compose.test.yaml up -d --build
@@ -308,11 +311,11 @@ docker compose up -d --build   # afterwards: back to the normal settings (privat
 # end-to-end with a real local model in LM Studio
 npm run lmstudio:e2e -- --online
 
-# sub-agents live, with the model configured on the running server
+# sub-agents live, with the model configured on the running server (Python tools: uv, or npm run py:setup)
 npm run agents:e2e
 ```
 
-Other scripts: `npm run build` (compile to `dist/`), `npm run config:check` (validate the configuration), `npm run docs:tools` (regenerate `docs/TOOLS.md`), `npm run site:build` / `npm run site:serve` (the website, from `site/` and the docs), `npm run lmstudio:agent -- "<task>"`.
+Other scripts: `npm run build` (compile to `dist/`), `npm run config:check` (validate the configuration), `npm run docs:tools` (regenerate `docs/TOOLS.md` and `docs/tools.json`), `npm run site:build` / `npm run site:serve` (the website, from `site/` and the docs), `npm run lmstudio:agent -- "<task>"`.
 
 Project layout:
 
@@ -335,7 +338,8 @@ src/
   dashboard/           dashboard API and static UI
   stdio-bridge.ts      stdio <-> HTTP bridge
 config/                models.example.json (copy to models.json)
-scripts/               Obscura download, LM Studio setup/agent/e2e, sub-agent e2e, docs and site generators
+scripts/               Obscura download and LM Studio setup (Python 3.9+), the npm launcher for the Python tools, the tool docs generator
+python/                Python tools: LM Studio command-line agent and e2e, sub-agent e2e, website builder
 site/                  the website's landing page and assets
 test/                  unit and integration tests, fixture website
 docs/                  the guides listed above
