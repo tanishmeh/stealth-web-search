@@ -1,4 +1,4 @@
-"""The e2e runner's checks (the port of test/unit/lmstudio-agent.test.ts, "lmstudio e2e assertions")."""
+"""The e2e runner's checks."""
 
 from __future__ import annotations
 

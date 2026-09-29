@@ -9,12 +9,10 @@ test
 docs
 examples
 *.md
-!README.md
 .env
 .env.*
 !.env.example
 .DS_Store
-coverage
 config
 site
 _site

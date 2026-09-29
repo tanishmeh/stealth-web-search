@@ -2,9 +2,6 @@
 (a second scripted model, run by the server in its own browser) that asks before it orders on the
 fixture checkout page. Needs a server started with the fake sub-agent model, so it is skipped
 against MCP_URL.
-
-The port of the second half of test/integration/lmstudio-agent.test.ts ("lmstudio agent: the user
-approves a sub-agent purchase (scripted models)").
 """
 
 from __future__ import annotations

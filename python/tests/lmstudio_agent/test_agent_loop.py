@@ -1,8 +1,7 @@
 """The CLI agent loop against the real server, with a scripted stand-in for LM Studio's
 OpenAI-compatible API (no model needed; real-model runs are `npm run lmstudio:e2e`).
 
-The port of the first half of test/integration/lmstudio-agent.test.ts ("lmstudio agent loop
-(scripted model)"). Each test gets its own server.
+Each test gets its own server.
 """
 
 from __future__ import annotations

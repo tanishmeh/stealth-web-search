@@ -1,8 +1,7 @@
 """Scripted stand-ins for the model servers, and a TCP proxy that can cut connections.
 
 - FakeLmStudio: LM Studio's native model list and a scripted /v1/chat/completions that streams
-  given chunks, answers with an HTTP error, or holds the stream open (as test/integration/
-  lmstudio-agent.test.ts had it).
+  given chunks, answers with an HTTP error, or holds the stream open.
 - FakeLlm: the OpenAI-compatible model the server's sub-agents use (the port of
   test/helpers/fake-llm.ts): a policy looks at the request and returns the next assistant turn.
 - TcpProxy: forwards to the MCP server until `cut()`, like a server that went away.

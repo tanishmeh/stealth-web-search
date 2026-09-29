@@ -1,4 +1,4 @@
-"""Helpers of the agent host (the port of test/unit/lmstudio-agent.test.ts, "lmstudio agent helpers")."""
+"""Helpers of the agent host."""
 
 from __future__ import annotations
 

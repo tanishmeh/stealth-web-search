@@ -1,7 +1,6 @@
 """Shared fixtures for the Python test suite.
 
-- `repo_root`, `site_dir` (test/fixtures/site, the fixture website shared with the TS suites) and
-  `fixtures_dir` (python/tests/fixtures, files only the Python tests use).
+- `repo_root` and `site_dir` (test/fixtures/site, the fixture website shared with the TS suites).
 - `ts_server`: starts the TypeScript server (`node src/main.ts`) with the safe environment of
   test/helpers/harness.ts, or uses MCP_URL when set. Integration tests request it; it skips when
   node or the Obscura binary is missing, and fails instead when CI or SWS_REQUIRE_INTEGRATION is set.
@@ -55,11 +54,6 @@ def repo_root() -> Path:
 @pytest.fixture(scope="session")
 def site_dir(repo_root: Path) -> Path:
     return repo_root / "test" / "fixtures" / "site"
-
-
-@pytest.fixture(scope="session")
-def fixtures_dir() -> Path:
-    return Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(scope="session")

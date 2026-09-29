@@ -33,6 +33,6 @@ With the venv active, or through `uv run --project python`: `ruff format`, `ruff
 
 Integration tests start the real server (`node src/main.ts`) with the same safe environment as `test/helpers/harness.ts`, so they need Node 24 and the Obscura binary (`npm run obscura:download`). They are skipped when either is missing, except in CI. Set `MCP_URL` to test a server that is already running instead.
 
-Layout: `src/sws_tools/<tool>/` holds each command (`cli.py` has its `main`), `src/sws_tools/ts_server.py` starts the TypeScript server, `src/sws_tools/fixture_site.py` serves the fixture website (`test/fixtures/site`), and `tests/` holds the pytest suite, with Python-only test data in `tests/fixtures/`.
+Layout: `src/sws_tools/<tool>/` holds each command (`cli.py` has its `main`), `src/sws_tools/ts_server.py` starts the TypeScript server, `src/sws_tools/fixture_site.py` serves the fixture website (`test/fixtures/site`), and `tests/` holds the pytest suite.
 
 After changing dependencies in `pyproject.toml`, update the lock with `uv lock --project python`, export it for the pip route with `uv export --project python --locked --extra dev --no-hashes --no-emit-project -o python/constraints.txt` (run from the repository root), and commit both files. CI installs with `uv sync --locked` and fails when `constraints.txt` does not match `uv.lock`.
